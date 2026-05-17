@@ -202,3 +202,216 @@ jobs:
         # Web build may fail without a real DB at build time; that's expected.
         # The job validates the Dockerfile syntax and layer cacheability.
         continue-on-error: true
+
+  # ── Smoke: actually RUN each image and assert it does not crash ──────────────
+  # Catches the recurring "image builds but crashes at runtime" class that pure
+  # `docker build` cannot see (web standalone/server.js path, python `polyecho`
+  # namespace import, date-type). Builds with `load: true` reusing the warm
+  # type=gha cache populated by the `docker` job (so layers are NOT rebuilt),
+  # then runs each container with strict, bounded timeouts.
+  smoke:
+    name: Smoke (run images, assert no runtime crash)
+    runs-on: ubuntu-latest
+    needs: [docker]
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_DB: polyecho
+          POSTGRES_USER: polyecho
+          POSTGRES_PASSWORD: polyecho
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U polyecho -d polyecho"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Apply baseline migration (so DB-touching workers have schema)
+        run: |
+          psql postgresql://polyecho:polyecho@localhost:5432/polyecho \
+            -f infra/migrations/0000_init.sql
+
+      # Rebuild with load:true — layers come from the warm gha cache the
+      # `docker` job just wrote, so this is a cache hit, not a fresh build.
+      - name: Load python/core image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.python
+          build-args: PACKAGE=core
+          tags: polyecho/core:ci
+          push: false
+          load: true
+          cache-from: type=gha,scope=core
+          cache-to: type=gha,mode=max,scope=core
+
+      - name: Load python/discovery image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.python
+          build-args: PACKAGE=discovery
+          tags: polyecho/discovery:ci
+          push: false
+          load: true
+          cache-from: type=gha,scope=discovery
+          cache-to: type=gha,mode=max,scope=discovery
+
+      - name: Load python/push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.python
+          build-args: PACKAGE=push
+          tags: polyecho/push:ci
+          push: false
+          load: true
+          cache-from: type=gha,scope=push
+          cache-to: type=gha,mode=max,scope=push
+
+      - name: Load python/backtest image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.python
+          build-args: PACKAGE=backtest
+          tags: polyecho/backtest:ci
+          push: false
+          load: true
+          cache-from: type=gha,scope=backtest
+          cache-to: type=gha,mode=max,scope=backtest
+
+      - name: Load cli image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.cli
+          tags: polyecho/cli:ci
+          push: false
+          load: true
+          cache-from: type=gha,scope=cli
+          cache-to: type=gha,mode=max,scope=cli
+
+      - name: Load web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.web
+          tags: polyecho/web:ci
+          push: false
+          load: true
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+      # Host networking lets containers reach the `postgres` service published
+      # on the runner at localhost:5432 (matches the schema job's URL form).
+      # asyncpg driver form for the Python SQLAlchemy engine; plain form for
+      # Drizzle/node. Fixture datasource keeps external HTTP fully hermetic.
+      - name: Smoke — discovery (--once, fixture + real DB) must exit 0
+        timeout-minutes: 3
+        run: |
+          docker run --rm --network host \
+            -e POLYECHO_DATASOURCE=fixture \
+            -e POLYECHO_DB_URL=postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho \
+            -e POLYECHO_DB_URL_DRIZZLE=postgresql://polyecho:polyecho@localhost:5432/polyecho \
+            polyecho/discovery:ci --once
+          echo "discovery --once exited 0 (no runtime crash, namespace import OK)"
+
+      - name: Smoke — backtest (--once, fixture + real DB) must exit 0
+        timeout-minutes: 3
+        run: |
+          docker run --rm --network host \
+            -e POLYECHO_DATASOURCE=fixture \
+            -e POLYECHO_DB_URL=postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho \
+            -e POLYECHO_DB_URL_DRIZZLE=postgresql://polyecho:polyecho@localhost:5432/polyecho \
+            polyecho/backtest:ci --once
+          echo "backtest --once exited 0 (no runtime crash, date-type OK)"
+
+      # core/push are Phase 4/5 stubs whose default entrypoint would loop or
+      # raise — only assert the `polyecho` namespace package imports (this is
+      # exactly the bug class that previously slipped through). Override the
+      # shell ENTRYPOINT's $@ with `-c …`; the wrapper runs `python -m
+      # polyecho.${PACKAGE} <args>`, so we instead invoke python directly.
+      - name: Smoke — core namespace import succeeds
+        timeout-minutes: 2
+        run: |
+          docker run --rm --entrypoint python polyecho/core:ci \
+            -c "import polyecho.core; print('import polyecho.core OK')"
+
+      - name: Smoke — push namespace import succeeds
+        timeout-minutes: 2
+        run: |
+          docker run --rm --entrypoint python polyecho/push:ci \
+            -c "import polyecho.push; print('import polyecho.push OK')"
+
+      - name: Smoke — cli --help exits 0
+        timeout-minutes: 2
+        run: |
+          docker run --rm polyecho/cli:ci --help
+
+      # doctor may legitimately return non-zero (e.g. a WARN/FAIL check) — that
+      # is acceptable. What is NOT acceptable is an uncaught Python traceback,
+      # which signals a runtime crash. Capture output, allow non-zero, then
+      # fail only if a traceback is present.
+      - name: Smoke — cli doctor runs without a Python traceback
+        timeout-minutes: 2
+        run: |
+          set +e
+          out="$(docker run --rm --network host \
+            -e POLYECHO_DATASOURCE=fixture \
+            -e POLYECHO_DB_URL=postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho \
+            -e POLYECHO_DB_URL_DRIZZLE=postgresql://polyecho:polyecho@localhost:5432/polyecho \
+            polyecho/cli:ci doctor 2>&1)"
+          rc=$?
+          set -e
+          echo "----- polyecho doctor output (exit ${rc}) -----"
+          echo "$out"
+          echo "-----------------------------------------------"
+          if echo "$out" | grep -qE 'Traceback \(most recent call last\)'; then
+            echo "FAIL: polyecho doctor produced a Python traceback (runtime crash)"
+            exit 1
+          fi
+          echo "doctor ran without a traceback (exit ${rc} acceptable)"
+
+      # Web standalone server: this is the exact class that broke before
+      # (server.js path). Run detached, poll until it serves a 200, then stop.
+      - name: Smoke — web image serves HTTP 200 on :3000
+        timeout-minutes: 3
+        run: |
+          set -e
+          docker run -d --name polyecho-web-smoke -p 3000:3000 \
+            -e POLYECHO_DB_URL_DRIZZLE=postgresql://u:p@localhost:5432/db \
+            polyecho/web:ci
+          ok=0
+          for i in $(seq 1 30); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000 || true)"
+            if [ "$code" = "200" ]; then
+              ok=1
+              echo "web served HTTP 200 after ${i} attempt(s)"
+              break
+            fi
+            # Bail early with logs if the container already died.
+            if [ -z "$(docker ps -q -f name=polyecho-web-smoke)" ]; then
+              echo "FAIL: web container exited before serving"
+              docker logs polyecho-web-smoke || true
+              exit 1
+            fi
+            sleep 2
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "FAIL: web did not serve HTTP 200 within timeout"
+            docker logs polyecho-web-smoke || true
+            exit 1
+          fi
+
+      - name: Stop web smoke container
+        if: always()
+        run: |
+          docker rm -f polyecho-web-smoke 2>/dev/null || true
