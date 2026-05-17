@@ -80,6 +80,13 @@ ignore_errors = true
 module = ["pandas", "pandas.*"]
 ignore_missing_imports = true
 
+# `py_vapid` (VAPID keypair / claims helper used by shared.vapid) ships no
+# inline types nor a `py.typed` marker and no stub package is in the frozen
+# uv.lock; same documented, narrowly-scoped single-lib exception as pandas.
+[[tool.mypy.overrides]]
+module = ["py_vapid", "py_vapid.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["packages"]

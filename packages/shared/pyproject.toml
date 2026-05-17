@@ -12,6 +12,7 @@ dependencies = [
   "cryptography>=43",
   "structlog>=24",
   "httpx>=0.27",
+  "py-vapid>=1.9",
 ]
 
 [project.optional-dependencies]
