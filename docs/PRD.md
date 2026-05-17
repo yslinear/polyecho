@@ -751,28 +751,30 @@ events (
 
 ## 9. 開發階段（Roadmap）
 
-### Phase 0：基礎建設（1 週）
+### Phase 0：基礎建設（1 週）✅ 完成（2026-05-17）
 
-- [ ] 建立 `polyecho` GitHub repo（kebab-case）
-- [ ] Monorepo scaffolding：`packages/{core,discovery,backtest,push,cli,shared,web}/`
-- [ ] Python workspace 設定（pyproject.toml + `polyecho` namespace）
-- [ ] Next.js 15 + Drizzle ORM 在 `packages/web/`
-- [ ] Postgres schema + Drizzle migrations（DB 名 `polyecho`）
-- [ ] CI/CD（GitHub Actions）
-- [ ] Docker images：`polyecho/core`、`polyecho/web`、`polyecho/push`
-- [ ] Tailscale Serve 設定
-- [ ] `polyecho doctor` 健檢指令
+- [x] 建立 `polyecho` git repo（本地已 init；GitHub remote / push 待使用者）
+- [x] Monorepo scaffolding：`packages/{core,discovery,backtest,push,cli,shared,web}/`
+- [x] Python workspace 設定（pyproject.toml + `polyecho` PEP 420 namespace，`docker build` 驗證）
+- [x] Next.js 15 + Drizzle ORM 在 `packages/web/`
+- [x] Postgres schema + Drizzle migrations（DB 名 `polyecho`，`infra/migrations/0000_init.sql`）
+- [x] CI/CD（GitHub Actions：python / web / docker / schema jobs）
+- [x] Docker images：`polyecho/core`、`polyecho/web`、`polyecho/push`、`polyecho/cli`
+- [x] Tailscale Serve 設定（serve.json + ACL，警告勿開 Funnel）
+- [x] `polyecho doctor` 健檢指令（Config/DB/API/Tailnet 真實檢查）
 
-### Phase 1：Discovery + 評分（2 週）
+### Phase 1：Discovery + 評分（2 週）✅ 完成（2026-05-17）
 
-- [ ] Polymarket SDK 封裝
-- [ ] 4 源 discovery worker
-- [ ] 頻率與策略分析
-- [ ] 雙維度打分
-- [ ] 風險旗標偵測
-- [ ] Web 上的候選池頁面（唯讀）
+- [x] Polymarket SDK 封裝（`polyecho.shared.datasource`：DataSource Protocol + Live/Fixture + factory；live 端點已對官方文件驗證）
+- [x] 4 源 discovery worker（leaderboard / 熱門市場持倉 / 大額新開倉 / 聰明錢 seed）
+- [x] 頻率與策略分析（`frequency.py`：stats + 5 類策略分類 + drift 偵測）
+- [x] 雙維度打分（`scoring.py`：profit × replicability / 100）
+- [x] 風險旗標偵測（`riskflags.py`：insider_suspect 自動 reject 等）
+- [x] Web 上的候選池頁面（唯讀）（`/discovery` + `/discovery/[wallet]`）
 
 **里程碑**：累積一週後能看到穩定的候選池，識別出甜蜜點 leader。
+
+> **進度註記（2026-05-17）**：Phase 0–1 由 agent swarm 完成；容器內 `pytest packages/shared packages/discovery` → **95 passed / 0 failed**。資料來源預設 fixture（PRD §8.1 台灣地域限制），live client 已實作並藏在 interface 後。尚未 push（使用者掌控）。
 
 ### Phase 2：回測引擎（1–2 週）
 
