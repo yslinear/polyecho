@@ -33,7 +33,10 @@ jobs:
       - name: Mypy type-check
         run: uv run mypy packages/
 
-      - name: Pytest (fixture datasource — hermetic, no network)
+      - name: Pytest + coverage (fixture datasource — hermetic, no network)
+        # Coverage flags live in [tool.pytest.ini_options] addopts so the gate
+        # (--cov-fail-under=70, scoped to packages/*/src) is enforced by the
+        # canonical `pytest` invocation itself, not just here.
         run: uv run pytest
         env:
           POLYECHO_DATASOURCE: fixture
@@ -111,6 +114,9 @@ jobs:
       - name: Lint
         run: pnpm --filter @polyecho/web lint
 
+      - name: Test (vitest — headless, no DB/network)
+        run: pnpm --filter @polyecho/web test
+
       - name: Build (Next.js standalone)
         run: pnpm --filter @polyecho/web build
         env:
@@ -125,68 +131,74 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
+        # build-push-action needs the docker-container driver (default with
+        # this action) for cache export — the plain `docker` driver does not
+        # support `--cache-to`, which is what previously broke this job.
         uses: docker/setup-buildx-action@v3
-
-      - name: Cache Docker layers
-        uses: actions/cache@v4
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
 
       - name: Validate docker-compose config
         run: docker compose -f infra/docker-compose.yml config --quiet
 
+      # GitHub Actions cache (type=gha) is supported by the docker-container
+      # buildx driver and persists layers across runs without manual rotation.
+      # `scope` keeps each image's cache isolated so they don't clobber.
       - name: Build python/core image
-        run: |
-          docker build \
-            -f infra/docker/Dockerfile.python \
-            --build-arg PACKAGE=core \
-            --cache-from type=local,src=/tmp/.buildx-cache \
-            --cache-to   type=local,dest=/tmp/.buildx-cache-new,mode=max \
-            -t polyecho/core:ci \
-            .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.python
+          build-args: PACKAGE=core
+          tags: polyecho/core:ci
+          push: false
+          load: false
+          cache-from: type=gha,scope=core
+          cache-to: type=gha,mode=max,scope=core
 
       - name: Build python/discovery image
-        run: |
-          docker build \
-            -f infra/docker/Dockerfile.python \
-            --build-arg PACKAGE=discovery \
-            --cache-from type=local,src=/tmp/.buildx-cache \
-            -t polyecho/discovery:ci \
-            .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.python
+          build-args: PACKAGE=discovery
+          tags: polyecho/discovery:ci
+          push: false
+          load: false
+          cache-from: type=gha,scope=discovery
+          cache-to: type=gha,mode=max,scope=discovery
 
       - name: Build python/push image
-        run: |
-          docker build \
-            -f infra/docker/Dockerfile.python \
-            --build-arg PACKAGE=push \
-            --cache-from type=local,src=/tmp/.buildx-cache \
-            -t polyecho/push:ci \
-            .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.python
+          build-args: PACKAGE=push
+          tags: polyecho/push:ci
+          push: false
+          load: false
+          cache-from: type=gha,scope=push
+          cache-to: type=gha,mode=max,scope=push
 
       - name: Build cli image
-        run: |
-          docker build \
-            -f infra/docker/Dockerfile.cli \
-            --cache-from type=local,src=/tmp/.buildx-cache \
-            -t polyecho/cli:ci \
-            .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.cli
+          tags: polyecho/cli:ci
+          push: false
+          load: false
+          cache-from: type=gha,scope=cli
+          cache-to: type=gha,mode=max,scope=cli
 
       - name: Build web image
-        run: |
-          docker build \
-            -f infra/docker/Dockerfile.web \
-            --cache-from type=local,src=/tmp/.buildx-cache \
-            -t polyecho/web:ci \
-            .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.web
+          tags: polyecho/web:ci
+          push: false
+          load: false
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
         # Web build may fail without a real DB at build time; that's expected.
         # The job validates the Dockerfile syntax and layer cacheability.
         continue-on-error: true
-
-      # Rotate cache (avoids unbounded growth)
-      - name: Rotate build cache
-        run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache 2>/dev/null || true

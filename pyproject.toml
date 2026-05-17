@@ -25,6 +25,7 @@ dev = [
     "mypy>=1.13",
     "pytest>=8",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=6",
 ]
 
 # ── Lint / type / test config: SINGLE SOURCE OF TRUTH (root only) ───────────
@@ -84,5 +85,32 @@ asyncio_mode = "auto"
 testpaths = ["packages"]
 # Monorepo with per-package `tests/` dirs sharing module basenames:
 # importlib mode + namespace packages avoids the prepend-mode collision.
-addopts = "--import-mode=importlib"
+# Coverage is wired into addopts (not the CI step) so the canonical
+# `pytest` invocation — with no path args — always enforces the gate.
+# --cov-fail-under is set CONSERVATIVELY below measured coverage so it acts
+# as a regression floor, never a flaky failure while packages/** evolves.
+addopts = "--import-mode=importlib --cov --cov-report=term-missing --cov-fail-under=70"
 consider_namespace_packages = true
+
+# ── Coverage: scoped to packages/*/src (the shipped code), single source ─────
+[tool.coverage.run]
+branch = true
+source = [
+    "packages/shared/src",
+    "packages/core/src",
+    "packages/discovery/src",
+    "packages/backtest/src",
+    "packages/push/src",
+    "packages/cli/src",
+]
+
+[tool.coverage.report]
+show_missing = true
+# `--cov-fail-under=70` is the hard gate (measured ≈82% on 2026-05-17, with a
+# ~12-point safety margin so concurrent test/code changes never falsely fail).
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]
