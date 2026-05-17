@@ -57,6 +57,68 @@ polyecho logs <service>      # Phase 0
 polyecho doctor
 ```
 
+## `polyecho backtest`
+
+Enqueue and inspect backtest jobs. The backtest worker (`python -m polyecho.backtest`) consumes pending jobs and writes results.
+
+### `polyecho backtest new`
+
+```
+polyecho backtest new --leader <addr> [--leader <addr>]... [OPTIONS]
+
+Options:
+  --days INT            Historical days to simulate (default: 90)
+  --capital FLOAT       Initial capital in USD (default: 1000.0)
+  --copy-ratio FLOAT    Copy ratio, e.g. 0.001 = 0.1% (default: 0.001)
+  --max-position FLOAT  Max position size in USD
+  --min-trade FLOAT     Minimum trade size in USD
+  --daily-loss FLOAT    Daily loss limit in USD
+  --slippage-bps INT    Slippage in basis points (default: 150)
+  --delay INT           Execution delay in seconds (default: 30)
+  --category TEXT       Category whitelist entry (repeatable)
+```
+
+Inserts a row into `backtest_jobs` with `status='pending'` and prints the new job UUID.
+
+### `polyecho backtest list`
+
+```
+polyecho backtest list [--limit 20]
+```
+
+Renders a Rich table of recent jobs: short ID, status, progress %, leaders, created at.
+
+### `polyecho backtest show <id>`
+
+```
+polyecho backtest show <uuid-or-8-char-prefix>
+```
+
+Prints job params + status. If the job is completed and a `result` JSONB payload is present, renders:
+
+- Per-leader stats table (return %, Sharpe, max drawdown, win rate, trade count)
+- Three-scenario summary table (optimistic / neutral / pessimistic)
+
+Exits with code 1 if the job is not found.
+
+---
+
+## `polyecho db migrate`
+
+```
+polyecho db migrate
+```
+
+Reads `infra/migrations/0000_init.sql` from the repo root and executes it against the database configured via `POLYECHO_DB_URL` (or the default `postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho`).
+
+- **Idempotent** — the SQL uses `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`.
+- **Multi-statement** — the full script is passed to asyncpg's `exec_driver_sql` in a single call; asyncpg handles semicolon splitting internally.
+- **Non-zero exit** on any DB or file error.
+
+`db backup` and `db reconcile` remain stubs for Phase 1 / Phase 4.
+
+---
+
 ## `polyecho doctor`
 
 The `doctor` command is the only fully-implemented command in Phase 0. It
