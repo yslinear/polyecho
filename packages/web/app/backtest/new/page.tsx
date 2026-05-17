@@ -1,36 +1,34 @@
 /**
- * /backtest/new — Create a new backtest job
- * Phase 0 skeleton: the form and job submission come in Phase 2.
+ * /backtest/new — Create a new backtest job (Phase 2)
+ *
+ * Server Component wrapper that reads optional ?leader= search param,
+ * then renders the client-side form island.
  */
 
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+interface NewBacktestPageProps {
+  searchParams: Promise<Record<string, string | undefined>>;
+}
 
-export default function NewBacktestPage() {
+import { BacktestForm } from "./backtest-form";
+
+export default async function NewBacktestPage({
+  searchParams,
+}: NewBacktestPageProps) {
+  const sp = await searchParams;
+  const defaultLeader = sp.leader ?? "";
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-w-2xl">
       <div>
         <h1 className="text-3xl font-bold">New Backtest</h1>
         <p className="text-muted-foreground mt-1">
-          Configure and submit a backtest job
+          Configure a backtest job — results appear at{" "}
+          <code className="text-xs bg-muted px-1 rounded">/backtest/[id]</code>
+          .
         </p>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Backtest Parameters</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">
-            Form fields (leader address, date range, copy_ratio, slippage_bps,
-            execution_delay_seconds) and three-scenario selector will appear
-            here.
-          </p>
-          <Badge variant="outline" className="mt-3">
-            Phase 2
-          </Badge>
-        </CardContent>
-      </Card>
+      <BacktestForm defaultLeader={defaultLeader} />
     </div>
   );
 }

@@ -51,9 +51,48 @@ polyecho db migrate
 
 - **Next.js 15.1.8** App Router, Server Components, TypeScript
 - **Drizzle ORM 0.39.x** with postgres-js driver
-- **Tailwind CSS 3.4.x** + **shadcn/ui** primitives (button, card, table, badge)
-- **Recharts 2.x** (charts — wired up in Phase 2/3)
+- **Tailwind CSS 3.4.x** + **shadcn/ui** (Phase 2 full component set — see below)
+- **Recharts 2.x** via shadcn `chart` wrapper
+- **@tanstack/react-table v8** via shadcn `data-table` wrapper
+- **react-hook-form + zod + @hookform/resolvers** — backtest form
+- **sonner** — toast notifications (Toaster wired in root layout)
 - No auth — access restricted by Tailscale network isolation (PRD §5.9)
+
+## shadcn/ui Component Set (Phase 2)
+
+All source files live under `components/ui/`. Style: `default` / slate base-color, CSS variables, RSC-compatible.
+
+Phase 0 (pre-existing): `button`, `card`, `badge`, `table`
+
+Phase 2 additions (deps install in-container, no host install needed):
+
+| Component | Radix dep |
+|---|---|
+| `input` | — |
+| `label` | `@radix-ui/react-label` |
+| `separator` | `@radix-ui/react-separator` |
+| `skeleton` | — |
+| `tooltip` | `@radix-ui/react-tooltip` |
+| `select` | `@radix-ui/react-select` |
+| `dialog` | `@radix-ui/react-dialog` |
+| `sheet` | `@radix-ui/react-dialog` (reuse) |
+| `tabs` | `@radix-ui/react-tabs` |
+| `dropdown-menu` | `@radix-ui/react-dropdown-menu` |
+| `form` | `react-hook-form`, `zod`, `@hookform/resolvers` |
+| `sonner` | `sonner` |
+| `chart` | `recharts` (already dep) |
+| `sidebar` | collapsible icon/offcanvas, CSS-var theme |
+| `data-table` | `@tanstack/react-table` |
+
+## Phase 2 Pages
+
+| Route | What changed |
+|---|---|
+| `app/layout.tsx` | Replaced flat NavSidebar with shadcn `SidebarProvider` + collapsible `AppSidebar` + global header (Pause All placeholder, Phase 4/5) + `Toaster` |
+| `/discovery` | Rebuilt on shadcn `data-table`: column sorting, faceted filters (status / strategy / risk-flag), text filter, pagination |
+| `/discovery/[wallet]` | shadcn `Tabs` (Overview / Stats / Score History); score chart migrated to shadcn `chart` (Recharts-based) |
+| `/backtest/new` | Real shadcn `form` (react-hook-form + zod); Server Action inserts `backtest_jobs` row (status=queued), toasts, redirects |
+| `/backtest/[id]` | Reads job row; progress bar while running; PnL curve + stats table + 3-scenario side-by-side when completed |
 
 ## Development (host, optional)
 
