@@ -1,0 +1,77 @@
+"""ORM model for the ``candidate_leaders`` table (PRD §5.2, §6.1)."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Optional
+
+from sqlalchemy import DateTime, Numeric, Text, func
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from polyecho.shared.db import Base
+
+
+class CandidateLeader(Base):
+    """A Polymarket trader discovered as a potential leader to copy-trade.
+
+    Scores are recomputed daily by the ``discovery-worker`` service.
+
+    PRD §5.2 scoring formula::
+
+        final_score = profit_score × (replicability_score / 100)
+
+    ``user_status`` lifecycle: new → watching → following → rejected.
+    """
+
+    __tablename__ = "candidate_leaders"
+
+    wallet_address: Mapped[str] = mapped_column(Text, primary_key=True)
+    display_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Discovery provenance
+    sources: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list
+    )
+    first_discovered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_active_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Rolling stats snapshots (JSONB allows schema-free evolution)
+    stats_7d: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    stats_30d: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    stats_90d: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    frequency_stats: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+
+    # Strategy classification (scalper / day_trader / swing / position / hold_to_resolve)
+    strategy_type: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Default backtest params snapshot
+    backtest_default: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+
+    # Scoring (0–100 each)
+    profit_score: Mapped[Optional[float]] = mapped_column(Numeric(5, 2), nullable=True)
+    replicability_score: Mapped[Optional[float]] = mapped_column(Numeric(5, 2), nullable=True)
+    total_score: Mapped[Optional[float]] = mapped_column(Numeric(7, 4), nullable=True)
+
+    # Qualitative tagging
+    risk_flags: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list
+    )
+    specialization: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list
+    )
+
+    # User review status
+    user_status: Mapped[str] = mapped_column(Text, nullable=False, default="new")
+    user_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
