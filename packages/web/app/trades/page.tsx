@@ -1,35 +1,38 @@
 /**
- * /trades — Trade history
- * Phase 0 skeleton: my_trades table with filters comes in Phase 3.
+ * /trades — Copy-trade history (Phase 3, read-only)
+ *
+ * Server Component: reads my_trades via Drizzle, passes rows to a client
+ * island (TradesTable) that uses the shadcn data-table (TanStack) for
+ * sorting, faceted fill_status filter and pagination.
  */
 
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { desc } from "drizzle-orm";
 
-export default function TradesPage() {
+import { db } from "@/lib/db";
+import { myTrades } from "@/lib/db/schema";
+import { TradesTable } from "./trades-table";
+
+export const dynamic = "force-dynamic";
+
+// Drizzle-inferred row type (no `any`)
+export type MyTradeRow = typeof myTrades.$inferSelect;
+
+export default async function TradesPage() {
+  const rows: MyTradeRow[] = await db
+    .select()
+    .from(myTrades)
+    .orderBy(desc(myTrades.opened_at));
+
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold">Trades</h1>
         <p className="text-muted-foreground mt-1">
-          All copy trades — fill status, PnL, timestamps
+          All copy trades — {rows.length} record{rows.length === 1 ? "" : "s"}
         </p>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Trade History</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">
-            Paginated my_trades table with fill_status filter and CSV export
-            will appear here.
-          </p>
-          <Badge variant="outline" className="mt-3">
-            Phase 3
-          </Badge>
-        </CardContent>
-      </Card>
+      <TradesTable data={rows} />
     </div>
   );
 }
