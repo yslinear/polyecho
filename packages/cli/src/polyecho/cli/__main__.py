@@ -36,7 +36,11 @@ app = typer.Typer(
 app.add_typer(account_app, name="account", help="Manage PolyEcho trading accounts.")
 app.add_typer(discovery_app, name="discovery", help="Leader candidate pool discovery.")
 app.add_typer(backtest_app, name="backtest", help="Backtest engine.")
-app.add_typer(trader_app, name="trader", help="Trader-core process management.")
+app.add_typer(
+    trader_app,
+    name="trader",
+    help="Trader-core controls (DB-driven; never holds keys).",
+)
 app.add_typer(db_app, name="db", help="Database operations.")
 app.add_typer(logs_app, name="logs", help="View service logs.")
 
