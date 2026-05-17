@@ -1,0 +1,22 @@
+{
+  "name": "PolyEcho Dashboard",
+  "short_name": "PolyEcho",
+  "description": "Personal Polymarket copy-trading monitor",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "_note": "PWA Service Worker and Web Push (VAPID) are Phase 5 — not implemented yet. Add icons before Phase 5 deployment."
+}
