@@ -9,6 +9,9 @@
 #   scripts/dev.sh doctor      # Run `polyecho doctor` via the CLI container
 #   scripts/dev.sh logs [svc]  # Tail logs (all services or a specific one)
 #   scripts/dev.sh db          # Open a psql shell in the DB container
+#   scripts/dev.sh migrate     # Apply infra/migrations/0000_init.sql into the running DB
+#   scripts/dev.sh discovery   # Run discovery once in fixture mode (no network)
+#   scripts/dev.sh psql        # Alias for `db` — open psql in the DB container
 #   scripts/dev.sh build       # Rebuild all images
 #   scripts/dev.sh ps          # Show running containers
 
@@ -63,9 +66,27 @@ case "$CMD" in
     fi
     ;;
 
-  db)
+  db|psql)
     echo "Opening psql shell in DB container..."
     compose_prod exec db psql -U polyecho -d polyecho
+    ;;
+
+  migrate)
+    MIGRATION="$REPO_ROOT/infra/migrations/0000_init.sql"
+    echo "Applying $MIGRATION into the running DB container..."
+    # Pipe the SQL file through docker compose exec so no host psql needed
+    compose_prod exec -T db \
+      psql -U polyecho -d polyecho \
+      < "$MIGRATION"
+    echo "Migration applied successfully."
+    ;;
+
+  discovery)
+    echo "Running discovery once in fixture mode (POLYECHO_DATASOURCE=fixture)..."
+    compose_prod run --rm \
+      -e POLYECHO_DATASOURCE=fixture \
+      discovery \
+      python -m polyecho.discovery --once
     ;;
 
   build)

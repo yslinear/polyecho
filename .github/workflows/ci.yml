@@ -33,8 +33,50 @@ jobs:
       - name: Mypy type-check
         run: uv run mypy packages/
 
-      - name: Pytest
+      - name: Pytest (fixture datasource — hermetic, no network)
         run: uv run pytest
+        env:
+          POLYECHO_DATASOURCE: fixture
+
+  # ── Schema sanity: spin postgres:16, apply baseline, verify tables ───────────
+  schema:
+    name: Schema sanity (postgres:16 + 0000_init.sql)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_DB: polyecho
+          POSTGRES_USER: polyecho
+          POSTGRES_PASSWORD: polyecho
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U polyecho -d polyecho"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply baseline migration
+        run: |
+          psql postgresql://polyecho:polyecho@localhost:5432/polyecho \
+            -f infra/migrations/0000_init.sql
+
+      - name: Schema sanity check — list tables
+        run: |
+          psql postgresql://polyecho:polyecho@localhost:5432/polyecho \
+            -c "\dt" | tee /tmp/tables.txt
+          # Verify all 12 expected tables exist
+          for tbl in accounts candidate_leaders candidate_score_history \
+                     copy_templates follow_relations leader_trades my_trades \
+                     settings backtest_jobs pending_actions push_subscriptions \
+                     events; do
+            grep -q "$tbl" /tmp/tables.txt \
+              || { echo "MISSING TABLE: $tbl"; exit 1; }
+          done
+          echo "All 12 tables present."
 
   # ── Web: lint + build ────────────────────────────────────────────────────────
   web:
