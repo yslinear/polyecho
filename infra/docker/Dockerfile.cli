@@ -11,7 +11,11 @@ ARG UV_VERSION=0.5
 # ── Stage 1: builder ──────────────────────────────────────────────────────────
 FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-bookworm-slim AS builder
 
-WORKDIR /build
+# Build under the SAME path used at runtime (/app). `uv sync` installs the
+# uv-workspace members as EDITABLE installs whose .pth entries hard-code the
+# absolute src path; a /build builder + /app runtime dangles the `polyecho`
+# namespace and the `polyecho` console script (same class as Dockerfile.python).
+WORKDIR /app
 
 COPY pyproject.toml ./
 COPY uv.lock* ./
@@ -45,10 +49,13 @@ RUN groupadd --gid 1001 polyecho && \
 
 WORKDIR /app
 
-COPY --from=builder /build/.venv /app/.venv
-COPY --from=builder /build/packages /app/packages
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/packages /app/packages
 
 ENV PATH="/app/.venv/bin:$PATH"
+# Belt-and-suspenders: expose every package src so the PEP 420 `polyecho`
+# namespace resolves even if the editable finder is unhappy after the copy.
+ENV PYTHONPATH="/app/packages/shared/src:/app/packages/core/src:/app/packages/discovery/src:/app/packages/backtest/src:/app/packages/push/src:/app/packages/cli/src"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
