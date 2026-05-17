@@ -85,7 +85,7 @@ Polymarket 為全球最大去中心化預測市場，2026 年 5 月時點：
 - **G1** 自動發現並持續追蹤潛在的優質 Leader 候選池
 - **G2** 對任一 Leader 提供帶滑價/延遲模型的 PnL 回測
 - **G3** 對已選定的 Leader 進行自動跟單，含完整風控
-- **G4** 提供 Web 儀表板，戶外透過 Tailscale 可監控與簡單操作
+- **G4** 提供 Web 儀表板（綁定 `127.0.0.1`，僅限本機）以監控與簡單操作；遠端存取由維運者自行處理，屬專案範圍外
 - **G5** 私鑰處理達到「即使 Web UI 被入侵也無法盜取資金」的安全等級
 - **G6** 系統 7×24 運行，當機自動恢復、操作可追蹤
 
@@ -107,7 +107,7 @@ Polymarket 為全球最大去中心化預測市場，2026 年 5 月時點：
 |候選池規模                   |≥ 50 名活躍 leader        |DB query                      |
 |跟單延遲（leader 下單 → 你下單）   |< 5 秒（中位數）             |比對鏈上時間戳                       |
 |Replicability 模型誤差      |實盤 PnL 與回測 PnL 偏差 < 30%|月度回顧                          |
-|系統可用性                   |> 99%                  |Tailscale ping + bot heartbeat|
+|系統可用性                   |> 99%                  |本機健檢 + bot heartbeat        |
 |安全事件                    |0 起私鑰外洩                |持續監控                          |
 
 -----
@@ -134,16 +134,16 @@ Polymarket 為全球最大去中心化預測市場，2026 年 5 月時點：
 
 **情境 B：日常監控（每天，在家或在外）**
 
-1. iPhone 開 Tailscale → Safari → Dashboard
+1. 在家直接 `localhost` 開 Dashboard；在外則經由維運者自備的遠端存取方式（VPN / tunnel 等，專案範圍外）連線
 1. 看當日 PnL、開倉、leader 動態
 1. 偶爾調整 copy ratio 或暫停某個 leader
 
 **情境 C：緊急介入（隨時，任何地方）**
 
 1. 收到 Web Push 推播（虧損達門檻、leader 策略漂移、API 異常）
-1. 點推播 → iPhone Safari 直接開啟 Dashboard
-1. 用 Tailscale 連線後執行：全域暫停 / 暫停特定 leader / 手動賣出
-1. 嚴重時 SSH 進去（同樣走 Tailscale）做更深的介入
+1. 點推播 → iPhone Safari 直接開啟 Dashboard（在外經由維運者自備的遠端存取方式）
+1. 連線後執行：全域暫停 / 暫停特定 leader / 手動賣出
+1. 嚴重時 SSH 進去（遠端通道由維運者負責，專案範圍外）做更深的介入
 
 **情境 D：旅行模式（離家 > 7 天）**
 
@@ -182,11 +182,13 @@ Polymarket 為全球最大去中心化預測市場，2026 年 5 月時點：
 │  └────────┬────────┘   └─────────────────────┘     │
 │           │                                         │
 │  ┌────────▼──────────────────────────────┐         │
-│  │ Tailscale Serve (HTTPS, tailnet only) │         │
+│  │ Dashboard bind 127.0.0.1:3000 (本機)  │         │
+│  │ 無 auth（設計如此）                    │         │
 │  └────────────────────────────────────────┘         │
 └─────────────────────────────────────────────────────┘
               ↑
-              │ MagicDNS over Tailscale
+              │ 遠端存取（VPN / tunnel 等）
+              │ 由維運者自備，專案範圍外
               │
        ┌──────┴─────┐
        │  iPhone    │  ←  戶外存取
@@ -199,7 +201,7 @@ Polymarket 為全球最大去中心化預測市場，2026 年 5 月時點：
 |-------------------------|-----|-------------|-----------------------------|
 |`trader-core`            |✅    |❌            |只讀寫 Postgres                 |
 |`discovery-worker`       |❌    |❌            |只讀寫 Postgres                 |
-|`dashboard-web` (Next.js)|❌    |✅ (內網)       |讀寫 Postgres + Tailscale Serve|
+|`dashboard-web` (Next.js)|❌    |✅ (127.0.0.1) |讀寫 Postgres；綁本機，遠端存取屬範圍外    |
 |`web-push-sender`        |❌    |❌            |讀 events 表 + VAPID 推播至訂閱端點   |
 |`postgres`               |❌    |✅ (localhost)|TCP/IP                       |
 
@@ -246,7 +248,6 @@ polyecho/                              # GitHub repo
 ├── infra/
 │   ├── docker-compose.yml             # 一鍵起 Postgres + 全部 services
 │   ├── docker-compose.dev.yml         # 開發環境
-│   ├── tailscale/                     # Serve 設定
 │   └── migrations/                    # Drizzle schema 遷移
 ├── docs/
 │   ├── PRD.md
@@ -308,7 +309,7 @@ polyecho db backup                        # 立即備份
 polyecho db reconcile                     # 鏈上 vs DB 對帳
 
 # 系統
-polyecho doctor                           # 健檢：API、DB、tailnet
+polyecho doctor                           # 健檢：Config、DB、Polymarket API
 polyecho logs <service>                   # 查看服務 log
 ```
 
@@ -516,7 +517,7 @@ copy_templates (
 - Server Components 直接讀 Postgres（透過 Drizzle ORM）
 - shadcn/ui + Tailwind
 - Recharts 做圖表
-- 無 auth（依賴 Tailscale 網路層隔離）
+- 無 auth（依設計綁定 `127.0.0.1` 僅限本機；遠端存取由維運者自行處理，屬專案範圍外）
 
 **操作分級**
 
@@ -533,7 +534,7 @@ copy_templates (
 
 **訂閱流程**
 
-1. 第一次造訪 Dashboard（透過 Tailscale），授權通知權限
+1. 第一次造訪 Dashboard（在家 `localhost`，在外經由維運者自備的遠端存取方式），授權通知權限
 1. Service Worker 註冊 PushSubscription，存入 `push_subscriptions` 表
 1. 後端任何進程要推播時，呼叫 Web Push 協定（VAPID 認證）發送
 
@@ -557,7 +558,7 @@ copy_templates (
 **離線情境（外出無網路）**
 
 - iPhone Safari 即使關閉，Web Push 仍能喚醒通知
-- 沒網路時無法觸發遠端操作（這是 Tailscale 必然限制）
+- 沒網路時無法觸發遠端操作（Dashboard 僅綁本機，遠端通道為維運者責任，屬專案範圍外）
 - 系統會在離線期間累積事件，下次上線時補推
 
 **iOS 限制注意**
@@ -566,16 +567,11 @@ copy_templates (
 - 必須先把 Dashboard 加到「主畫面」當作 PWA，才能接收 Web Push
 - 推播樣式較陽春，但夠用
 
-### 5.9 Tailscale 存取
+### 5.9 遠端存取（專案範圍外）
 
-**設定**
+Dashboard 依設計只綁定 `127.0.0.1`（見 §4.2），預設**無 auth**——這是刻意的安全選擇：唯一握私鑰的進程不開任何 port，Web 介面也不暴露於網路。
 
-```bash
-# 在主節點
-tailscale serve --bg --https=443 http://localhost:3000  # Next.js
-```
-
-**ACL**：使用 Tailscale ACL 限制只有自己的裝置（Mac + iPhone）能存取主節點的服務。**絕不啟用 Funnel**（公開到網際網路）。
+私有 / 遠端存取（VPN、reverse tunnel、SSH port-forward 等任一機制）**由維運者在 repo 之外自行建置與維護，屬本專案範圍外**。本 PRD 不規定、不內建、也不背書任何特定工具；專案只保證 Dashboard 綁本機且不對外公開。
 
 -----
 
@@ -691,13 +687,13 @@ events (
 - 跟單延遲（中位數）：< 5 秒
 - 候選池每日全量重算：< 30 分鐘
 - 單筆回測（90 天，預設參數）：< 60 秒
-- Web 頁面首屏渲染：< 1 秒（Tailscale 內網）
+- Web 頁面首屏渲染：< 1 秒（本機存取）
 
 ### 7.2 安全
 
 - 私鑰加密儲存（passphrase-derived AES-256-GCM）
 - 私鑰永不出現於 Web 進程記憶體
-- Web UI 僅在 Tailscale tailnet 可達
+- Web UI 依設計只綁定 `127.0.0.1`，不對外公開；遠端存取由維運者自行處理，屬專案範圍外
 - 所有 API 呼叫使用 HTTPS
 - 危險操作必須在 Web UI 二次確認（5 秒倒數 + Passphrase）
 - 系統 log 不含私鑰、API secret、訂單簽名
@@ -736,7 +732,7 @@ events (
 |Polymarket API 變更（如 V1 → V2 cutover）|用官方 SDK，密切關注 changelog  |
 |市場流動性不足，跟不到單                        |回測時模擬，實盤時 FOK 失敗即放棄     |
 |Leader 策略改變                         |策略漂移偵測 + 自動暫停           |
-|私鑰外洩                                |分層隔離 + 加密 + Tailscale 隔離|
+|私鑰外洩                                |分層隔離 + 加密 + Web 介面綁本機不對外  |
 |鏈上 reorg                            |等待 N 個確認後才認可 leader 成交  |
 
 ### 8.3 操作風險
@@ -744,7 +740,7 @@ events (
 |風險                |緩解                                  |
 |------------------|------------------------------------|
 |家裡電腦掛掉            |UPS + 自動重啟 + GCE 備援                 |
-|旅行中無法介入           |Web Push + Tailscale + 保守模式 + 風控自動觸發|
+|旅行中無法介入           |Web Push + 維運者自備遠端存取（範圍外）+ 保守模式 + 風控自動觸發|
 |資金鎖在 USDC，遇到 depeg|限制單個帳號最大資金量                         |
 
 -----
@@ -760,8 +756,8 @@ events (
 - [x] Postgres schema + Drizzle migrations（DB 名 `polyecho`，`infra/migrations/0000_init.sql`）
 - [x] CI/CD（GitHub Actions：python / web / docker / schema jobs）
 - [x] Docker images：`polyecho/core`、`polyecho/web`、`polyecho/push`、`polyecho/cli`
-- [x] Tailscale Serve 設定（serve.json + ACL，警告勿開 Funnel）
-- [x] `polyecho doctor` 健檢指令（Config/DB/API/Tailnet 真實檢查）
+- [x] Web 介面綁定 `127.0.0.1`，不對外公開（遠端存取由維運者負責，屬專案範圍外）
+- [x] `polyecho doctor` 健檢指令（Config/DB/Polymarket API 真實檢查）
 
 ### Phase 1：Discovery + 評分（2 週）✅ 完成（2026-05-17）
 
@@ -793,7 +789,7 @@ events (
 - [x] 4 種錢包類型偵測（`polyecho.shared.accounts`：derive_wallets 4 候選 + 依「持倉≫餘額≫活動」evidence 排序的 detect；factory/CREATE2 常數官方未公開 → `# TODO(verify)`，type-0 精確、偵測以鏈上證據排序故不受影響）
 - [x] CLI 私鑰匯入工具（`polyecho account detect/import/list/balance`：隱藏 passphrase＋私鑰輸入、AES-256-GCM、CLI-only、絕不記錄；status pending_key_import→ready）
 - [x] Dashboard 主頁、交易歷史、持倉頁面（`/` `/trades` `/positions` `/accounts` 唯讀 shadcn；`encrypted_private_key` 永不查詢）
-- [x] Tailscale Serve 正式上線（`docs/operations/tailscale.md` 完整 runbook；實際在主機 `tailscale serve` 上線為使用者動作）
+- [x] Web 介面綁定 `127.0.0.1`，不對外公開（任何遠端存取機制由維運者於 repo 外自備，屬專案範圍外）
 
 > **進度註記（2026-05-17）**：Phase 0–3 完成並 push，GitHub CI 4 job 全綠（run 25990373652 @ 65aa99a）。容器 `uv run pytest` **369 passed / 89.62% cov**；web vitest 132 passed。Phase 3 由並行 swarm（p3-accounts ∥ p3-dashboard）完成。
 
@@ -833,7 +829,7 @@ events (
 |推播              |Web Push API（Service Worker）         |直接推到 iPhone Safari，零第三方依賴          |
 |部署              |Docker Compose                       |簡單、可移植                             |
 |監控              |systemd + journalctl + Dashboard 警示中心|不裝額外監控系統                           |
-|隔離              |Tailscale Serve                      |你熟、零信任、自動 HTTPS                    |
+|隔離              |Web 綁定 `127.0.0.1`                   |localhost-bound，不對外公開；遠端存取屬專案範圍外      |
 |Secret 管理       |passphrase + 加密 DB column            |個人用足夠                              |
 |密碼學             |cryptography (Python)                |AES-256-GCM 標準                     |
 
@@ -899,8 +895,6 @@ events (
 - [Drizzle ORM](https://orm.drizzle.team)
 - [Recharts](https://recharts.org)
 - [Tailwind CSS](https://tailwindcss.com)
-- [Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve)
-- [Tailscale ACL](https://tailscale.com/kb/1018/acls)
 - [PostgreSQL LISTEN/NOTIFY](https://www.postgresql.org/docs/current/sql-listen.html)
 - [SQLAlchemy 2.0 Async](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html)
 - [pywebpush](https://github.com/web-push-libs/pywebpush)

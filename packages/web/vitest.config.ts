@@ -46,7 +46,6 @@ export default defineConfig({
         "components/ui/sheet.tsx",
         "components/ui/chart.tsx", // vendored recharts wrapper
         "components/ui/sonner.tsx",
-        "components/nav-sidebar.tsx", // legacy, superseded by app-sidebar
         "components/data-chart.tsx",
       ],
       // Thresholds based on the suite actually written here. Kept modest so a

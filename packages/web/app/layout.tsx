@@ -1,7 +1,8 @@
 /**
  * Root layout — App Router.
- * No authentication: access is restricted at the network layer via Tailscale
- * (see infra/tailscale/ for ACL & Serve config). Do NOT add auth middleware.
+ * No authentication by design: the dashboard binds to 127.0.0.1 only and is
+ * never exposed to the network. Private/remote access is the operator's
+ * responsibility, out of project scope. Do NOT add auth middleware.
  */
 
 import type { Metadata } from "next";

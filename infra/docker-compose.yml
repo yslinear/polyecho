@@ -95,7 +95,7 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
-    # Bind to localhost only — Tailscale Serve proxies inbound (PRD §5.9)
+    # Bind to localhost only — not exposed; remote access out of scope (PRD §5.9)
     ports:
       - "127.0.0.1:3000:3000"
 

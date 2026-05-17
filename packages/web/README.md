@@ -19,8 +19,9 @@ container via:
 node .next/standalone/server.js
 ```
 
-Tailscale Serve proxies HTTPS on port 443 → container port 3000. See
-`infra/tailscale/` for ACL and Serve config.
+The server binds to `127.0.0.1` only and is never exposed to the network.
+Private/remote access (VPN, tunnel, etc.) is the operator's responsibility,
+out of project scope.
 
 ## Environment Variables
 
@@ -56,7 +57,7 @@ polyecho db migrate
 - **@tanstack/react-table v8** via shadcn `data-table` wrapper
 - **react-hook-form + zod + @hookform/resolvers** — backtest form
 - **sonner** — toast notifications (Toaster wired in root layout)
-- No auth — access restricted by Tailscale network isolation (PRD §5.9)
+- No auth by design — binds `127.0.0.1` only; remote access is out of project scope (PRD §5.9)
 
 ## shadcn/ui Component Set (Phase 2)
 

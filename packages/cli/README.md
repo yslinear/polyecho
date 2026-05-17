@@ -163,18 +163,16 @@ Reads `infra/migrations/0000_init.sql` from the repo root and executes it agains
 ## `polyecho doctor`
 
 The `doctor` command is the only fully-implemented command in Phase 0. It
-runs four checks and renders a table:
+runs three checks and renders a table:
 
 | Check | Critical | What it tests |
 |---|---|---|
 | Config | yes | `get_settings()` loads; DB URL + Polymarket URLs present |
 | Database | yes | Async `SELECT 1` via `polyecho.shared.db`; reports latency |
 | Polymarket API | no | `GET <clob_url>/time`; reports HTTP status + latency |
-| Tailnet | no | `tailscale status --json`; handles not-installed gracefully |
 
 Exit code is **non-zero** when any critical check fails (Config or Database).
-Polymarket API and Tailnet failures are warnings — the system can still start
-without them.
+Polymarket API failures are warnings — the system can still start without it.
 
 ### Behaviour when DB is down
 
@@ -185,21 +183,11 @@ PolyEcho — System Health Check
   Config              ✓     DB driver=asyncpg  log_level=INFO
   Database            ✗     Connection failed: ...
   Polymarket API      ✓     GET https://clob.polymarket.com/time  HTTP 200  (210 ms)
-  Tailnet             ✓     Running  hostname=shan-mac  dns=shan-mac.tail1234.ts.net
 
 One or more critical checks failed.
 ```
 
 Exit code: **1**
-
-### Tailscale not installed (e.g. inside a container)
-
-```
-  Tailnet             ⚠     tailscale binary not found — not installed or not in PATH.
-```
-
-The command does **not** crash; it prints a warning and continues. If Config
-and Database both pass, exit code is 0.
 
 ## Development
 

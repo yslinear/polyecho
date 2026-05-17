@@ -3,15 +3,14 @@ polyecho.cli.doctor
 ===================
 Phase 0 health-check command — ``polyecho doctor``.
 
-Runs four checks and renders results in a Rich table:
+Runs three checks and renders results in a Rich table:
 
 1. **Config**      — settings load; required env vars present.
 2. **Database**    — async ``SELECT 1`` via ``polyecho.shared.db``; reports latency.
 3. **Polymarket**  — HTTP GET to CLOB health/time endpoint; reports reachable + status.
-4. **Tailnet**     — ``tailscale status --json``; gracefully handles not-installed.
 
 Exit code is non-zero if any *critical* check fails (Config, Database).
-Polymarket and Tailnet failures are warnings only (non-zero but labelled).
+Polymarket failures are warnings only (non-zero but labelled).
 
 Secrets are NEVER printed.
 """
@@ -19,10 +18,7 @@ Secrets are NEVER printed.
 from __future__ import annotations
 
 import asyncio
-import json
-import subprocess
 import time
-from typing import Any
 
 import httpx
 import typer
@@ -160,84 +156,13 @@ def _check_polymarket() -> _CheckResult:
         )
 
 
-def _check_tailnet() -> _CheckResult:
-    """Run ``tailscale status --json`` and report tailnet connectivity."""
-    try:
-        result = subprocess.run(  # noqa: S603
-            ["tailscale", "status", "--json"],  # noqa: S607
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except FileNotFoundError:
-        return _CheckResult(
-            "Tailnet",
-            ok=False,
-            detail="tailscale binary not found — not installed or not in PATH.",
-            critical=False,
-        )
-    except subprocess.TimeoutExpired:
-        return _CheckResult(
-            "Tailnet",
-            ok=False,
-            detail="tailscale status timed out after 5 s.",
-            critical=False,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return _CheckResult(
-            "Tailnet",
-            ok=False,
-            detail=f"Unexpected error running tailscale: {exc}",
-            critical=False,
-        )
-
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        return _CheckResult(
-            "Tailnet",
-            ok=False,
-            detail=f"tailscale exited {result.returncode}: {stderr or '(no stderr)'}",
-            critical=False,
-        )
-
-    try:
-        data: dict[str, Any] = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return _CheckResult(
-            "Tailnet",
-            ok=False,
-            detail="Could not parse tailscale status JSON.",
-            critical=False,
-        )
-
-    backend_state: str = data.get("BackendState", "unknown")
-    self_node: dict[str, Any] = data.get("Self", {})
-    hostname: str = self_node.get("HostName", "unknown")
-    dns_name: str = self_node.get("DNSName", "").rstrip(".")
-
-    if backend_state == "Running":
-        return _CheckResult(
-            "Tailnet",
-            ok=True,
-            detail=f"Running  hostname={hostname}  dns={dns_name or 'n/a'}",
-            critical=False,
-        )
-
-    return _CheckResult(
-        "Tailnet",
-        ok=False,
-        detail=f"BackendState={backend_state}  (not on tailnet)",
-        critical=False,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Typer command
 # ---------------------------------------------------------------------------
 
 
 def doctor() -> None:
-    """Run system health checks: Config, Database, Polymarket API, Tailnet.
+    """Run system health checks: Config, Database, Polymarket API.
 
     Exit code is non-zero if any *critical* check (Config, Database) fails.
     """
@@ -249,7 +174,6 @@ def doctor() -> None:
         _check_config(),
         _check_db(),
         _check_polymarket(),
-        _check_tailnet(),
     ]
 
     table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 2))

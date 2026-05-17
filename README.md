@@ -19,7 +19,7 @@ Full specification: [`docs/PRD.md`](docs/PRD.md).
 | `packages/push`      | `polyecho.push`      | web-push-sender (VAPID)                    |
 | `packages/cli`       | `polyecho.cli`       | `polyecho` command-line tool              |
 | `packages/web`       | `@polyecho/web`      | Next.js 15 dashboard (Drizzle ORM)        |
-| `infra/`             | —               | docker-compose, Dockerfiles, Tailscale       |
+| `infra/`             | —               | docker-compose, Dockerfiles, migrations      |
 
 Python packages share the implicit-namespace package `polyecho` (PEP 420) and are
 managed as a **uv workspace**. The web app is a separate **pnpm workspace**.
@@ -49,5 +49,7 @@ Phase 0 (infrastructure scaffolding). See PRD §9 for the roadmap.
 - `trader-core` holds private keys and opens **no** network port.
 - The private key **never** enters any web process.
 - All control flows through DB setting changes.
-- Web UI is reachable **only** via the Tailscale tailnet (no auth layer by design).
+- The Web UI binds to `127.0.0.1` only and has **no auth layer by design** — it is
+  never exposed to the network. Private/remote access (VPN, tunnel, etc.) is the
+  **operator's responsibility, out of project scope**.
 - Private-key import is **CLI-only**.
