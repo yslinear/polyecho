@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import BigInteger, DateTime, Identity, Numeric, Text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -32,7 +32,7 @@ class LeaderTrade(Base):
     trade_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     leader_address: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     market_id: Mapped[str] = mapped_column(Text, nullable=False)
-    condition_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    condition_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     side: Mapped[str] = mapped_column(Text, nullable=False)  # BUY | SELL
     size: Mapped[float] = mapped_column(Numeric(20, 6), nullable=False)
@@ -40,4 +40,4 @@ class LeaderTrade(Base):
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
     )
-    raw: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    raw: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

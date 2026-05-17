@@ -14,13 +14,11 @@ Fixture wallet archetypes tested (see shared/datasource/fixtures/README.md):
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from polyecho.shared.datasource import ActivityRecord, FixtureDataSource, PositionRecord
 
 from polyecho.discovery.frequency import (
     FrequencyStats,
@@ -32,6 +30,7 @@ from polyecho.discovery.frequency import (
 from polyecho.discovery.riskflags import detect_risk_flags
 from polyecho.discovery.scoring import final_score, profit_score, replicability_score
 from polyecho.discovery.worker import DiscoveryWorker, _compute_stats
+from polyecho.shared.datasource import ActivityRecord, FixtureDataSource, PositionRecord
 
 # ---------------------------------------------------------------------------
 # Wallet addresses (exact filenames from fixture directory)
@@ -64,7 +63,7 @@ def _make_record(
     ts: datetime | None = None,
 ) -> ActivityRecord:
     if ts is None:
-        ts = datetime.now(tz=timezone.utc)
+        ts = datetime.now(tz=UTC)
     return ActivityRecord(
         wallet=wallet,
         activity_type=activity_type,
@@ -114,7 +113,7 @@ class TestComputeFrequencyStats:
         condition_id: str = "0xcond_a",
     ) -> list[ActivityRecord]:
         """Return n BUY trades evenly spaced by gap_hours."""
-        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        base = datetime(2026, 1, 1, tzinfo=UTC)
         records = []
         for i in range(n):
             ts = base + timedelta(hours=i * gap_hours)
@@ -151,7 +150,7 @@ class TestComputeFrequencyStats:
 
     def test_burstiness_clustered_is_higher(self) -> None:
         """Trades in tight clusters separated by long gaps → high burstiness."""
-        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        base = datetime(2026, 1, 1, tzinfo=UTC)
         records: list[ActivityRecord] = []
         # Cluster 1: 5 trades 1 min apart
         for i in range(5):
@@ -190,7 +189,7 @@ class TestComputeFrequencyStats:
         assert expected_keys == set(d.keys())
 
     def test_hold_to_resolution_pct_with_redeems(self) -> None:
-        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        base = datetime(2026, 1, 1, tzinfo=UTC)
         records = [
             _make_record(side="BUY", ts=base, condition_id="cond_x"),
             ActivityRecord(
@@ -428,7 +427,7 @@ class TestDetectRiskFlags:
         )
 
     def test_clean_leader_no_flags(self) -> None:
-        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        base = datetime(2026, 1, 1, tzinfo=UTC)
         activity = [
             _make_record(side="BUY", ts=base + timedelta(days=i), usdc_size=200.0)
             for i in range(60)
@@ -444,7 +443,7 @@ class TestDetectRiskFlags:
         assert "strategy_drift" not in flags
 
     def test_strategy_drift_flag(self) -> None:
-        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        base = datetime(2026, 1, 1, tzinfo=UTC)
         activity = [
             _make_record(side="BUY", ts=base + timedelta(days=i), usdc_size=200.0)
             for i in range(60)
@@ -461,7 +460,7 @@ class TestDetectRiskFlags:
         assert "strategy_drift" in flags
 
     def test_new_account_flag(self) -> None:
-        base = datetime.now(tz=timezone.utc) - timedelta(days=10)
+        base = datetime.now(tz=UTC) - timedelta(days=10)
         activity = [
             _make_record(side="BUY", ts=base + timedelta(hours=i), usdc_size=200.0)
             for i in range(5)
@@ -474,7 +473,7 @@ class TestDetectRiskFlags:
         assert "new_account" in flags
 
     def test_high_concentration_flag(self) -> None:
-        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        base = datetime(2026, 1, 1, tzinfo=UTC)
         # All volume in single condition
         activity = [
             _make_record(
@@ -494,7 +493,7 @@ class TestDetectRiskFlags:
 
     def test_insider_suspect_flag(self) -> None:
         """Rare + large + near-resolution + high win-rate = insider_suspect."""
-        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        base = datetime(2026, 1, 1, tzinfo=UTC)
         cond = "0xcond_insider"
         # 5 BUY trades within 24h of resolution, very large
         activity: list[ActivityRecord] = []
@@ -541,7 +540,7 @@ class TestDetectRiskFlags:
             _make_position(current_value=30.0, condition_id="0xb"),   # thin
             _make_position(current_value=20.0, condition_id="0xc"),   # thin
         ]
-        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        base = datetime(2026, 1, 1, tzinfo=UTC)
         activity = [
             _make_record(side="BUY", ts=base + timedelta(days=i)) for i in range(40)
         ]
@@ -585,9 +584,7 @@ class TestSwingArchetype:
 
     def test_final_score_reasonable(self, ds: FixtureDataSource) -> None:
         activity = _fetch_activity(ds, W_SWING)
-        positions = _fetch_positions(ds, W_SWING)
 
-        now = datetime.now(tz=timezone.utc)
         # Use full window since fixture spans 90d
         stats = compute_frequency_stats(activity, window_days=90)
         computed_stats = _compute_stats(activity, window_days=90)
@@ -625,7 +622,7 @@ class TestDriftedArchetype:
     def test_drift_detected(self, ds: FixtureDataSource) -> None:
         activity = _fetch_activity(ds, W_DRIFTED)
 
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         # The fixture records span 90d; treat last timestamp as "now" for windows
         if activity:
             now = max(r.timestamp for r in activity)
@@ -701,8 +698,8 @@ class TestInsiderArchetype:
 
     def test_insider_causes_rejected_status(self, ds: FixtureDataSource) -> None:
         """Verify the worker's _upsert_candidate sets user_status='rejected'."""
-        from polyecho.discovery.worker import _upsert_candidate
         from polyecho.discovery.frequency import StrategyType
+        from polyecho.discovery.worker import _upsert_candidate
 
         activity = _fetch_activity(ds, W_INSIDER)
         if not activity:
@@ -722,7 +719,7 @@ class TestInsiderArchetype:
                 patch(
                     "polyecho.discovery.worker.session_scope"
                 ) as mock_scope,
-                patch("polyecho.discovery.worker.select") as mock_select,
+                patch("polyecho.discovery.worker.select"),
             ):
                 mock_session = AsyncMock()
                 mock_session.execute = AsyncMock(
@@ -769,11 +766,11 @@ class TestScoreHistoryPersistence:
     """Verify _upsert_candidate appends a CandidateScoreHistory row for today."""
 
     def test_score_history_row_created(self) -> None:
-        from polyecho.discovery.worker import _upsert_candidate
-        from polyecho.discovery.frequency import StrategyType
-        from polyecho.shared.models import CandidateScoreHistory
-
         import datetime as _dt
+
+        from polyecho.discovery.frequency import StrategyType
+        from polyecho.discovery.worker import _upsert_candidate
+        from polyecho.shared.models import CandidateScoreHistory
 
         today = _dt.date.today()
 

@@ -31,7 +31,7 @@ import asyncio
 import logging
 import math
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -98,7 +98,7 @@ class LiveDataSource:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def __aenter__(self) -> "LiveDataSource":
+    async def __aenter__(self) -> LiveDataSource:
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=self._timeout,
@@ -194,11 +194,11 @@ class LiveDataSource:
         if value is None:
             return None
         if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+            return datetime.fromtimestamp(float(value), tz=UTC)
         try:
             dt = datetime.fromisoformat(str(value))
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             return dt
         except ValueError:
             return None
@@ -301,7 +301,7 @@ class LiveDataSource:
             for row in rows:
                 ts = self._parse_utc(row.get("timestamp"))
                 if ts is None:
-                    ts = datetime.now(tz=timezone.utc)
+                    ts = datetime.now(tz=UTC)
                 record = ActivityRecord(
                     wallet=self._addr(row.get("proxyWallet") or wallet),
                     activity_type=str(row.get("type") or "UNKNOWN"),

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Optional
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Identity, Numeric, Text
 from sqlalchemy.dialects.postgresql import UUID
@@ -34,7 +33,7 @@ class MyTrade(Base):
         nullable=False,
     )
     leader_address: Mapped[str] = mapped_column(Text, nullable=False)
-    copy_of_trade_id: Mapped[Optional[int]] = mapped_column(
+    copy_of_trade_id: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey("leader_trades.id", ondelete="SET NULL"),
         nullable=True,
@@ -47,11 +46,11 @@ class MyTrade(Base):
 
     # pending | filled | rejected | partial
     fill_status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
-    pnl_usd: Mapped[Optional[float]] = mapped_column(Numeric(14, 4), nullable=True)
+    pnl_usd: Mapped[float | None] = mapped_column(Numeric(14, 4), nullable=True)
 
-    opened_at: Mapped[Optional[datetime]] = mapped_column(
+    opened_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    closed_at: Mapped[Optional[datetime]] = mapped_column(
+    closed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

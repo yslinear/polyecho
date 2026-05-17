@@ -47,9 +47,9 @@ def get_datasource(settings: Any = None) -> DataSource:
     mode: str = settings.datasource.lower()
 
     if mode == "fixture":
-        return FixtureDataSource()  # type: ignore[return-value]
+        return FixtureDataSource()
     elif mode == "live":
-        return LiveDataSource(settings=settings)  # type: ignore[return-value]
+        return LiveDataSource(settings=settings)
     else:
         raise ValueError(
             f"Unknown POLYECHO_DATASOURCE={settings.datasource!r}. "

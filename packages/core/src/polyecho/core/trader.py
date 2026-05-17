@@ -14,12 +14,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from polyecho.shared.config import get_settings
-from polyecho.shared.db import session_scope
-from polyecho.shared.logging import configure_logging
 from polyecho.shared.polymarket.client import PolymarketClient
 
 logger = logging.getLogger(__name__)
@@ -30,7 +28,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-class DecisionOutcome(str, Enum):
+class DecisionOutcome(StrEnum):
     """Result of the copy-trade evaluation."""
 
     EXECUTE = "execute"

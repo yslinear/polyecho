@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from typing import Optional
 
 from sqlalchemy import Boolean, Integer, Numeric, Text
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
@@ -32,14 +31,14 @@ class CopyTemplate(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
 
     # Sizing (mutually exclusive)
-    copy_ratio: Mapped[Optional[float]] = mapped_column(Numeric(10, 6), nullable=True)
-    fixed_size_usd: Mapped[Optional[float]] = mapped_column(Numeric(12, 2), nullable=True)
+    copy_ratio: Mapped[float | None] = mapped_column(Numeric(10, 6), nullable=True)
+    fixed_size_usd: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
 
     # Risk limits
-    max_position_usd: Mapped[Optional[float]] = mapped_column(Numeric(12, 2), nullable=True)
-    min_trade_size_usd: Mapped[Optional[float]] = mapped_column(Numeric(12, 2), nullable=True)
-    max_concurrent_positions: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    daily_loss_limit_usd: Mapped[Optional[float]] = mapped_column(Numeric(12, 2), nullable=True)
+    max_position_usd: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    min_trade_size_usd: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    max_concurrent_positions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    daily_loss_limit_usd: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
 
     # Market filters
     category_whitelist: Mapped[list[str]] = mapped_column(

@@ -24,10 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from pywebpush import WebPusher  # type: ignore[import-untyped]
-
 from polyecho.shared.config import get_settings
-from polyecho.shared.db import session_scope
 
 logger = logging.getLogger(__name__)
 

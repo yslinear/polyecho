@@ -13,10 +13,9 @@ import argparse
 import asyncio
 import logging
 
+from polyecho.backtest.jobs import process_pending_jobs
 from polyecho.shared.datasource import get_datasource
 from polyecho.shared.logging import configure_logging
-
-from polyecho.backtest.jobs import process_pending_jobs
 
 logger = logging.getLogger(__name__)
 

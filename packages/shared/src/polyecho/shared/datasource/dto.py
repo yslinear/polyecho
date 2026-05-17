@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,7 @@ class ActivityRecord:
     price: float | None
     usdc_size: float | None
     timestamp: datetime
-    raw: dict = field(default_factory=dict, compare=False)
+    raw: dict[str, Any] = field(default_factory=dict, compare=False)
 
 
 @dataclass(frozen=True)
@@ -88,7 +89,7 @@ class PositionRecord:
     percent_pnl: float
     title: str | None
     outcome: str | None
-    raw: dict = field(default_factory=dict, compare=False)
+    raw: dict[str, Any] = field(default_factory=dict, compare=False)
 
 
 @dataclass(frozen=True)
@@ -111,5 +112,5 @@ class MarketSummary:
     question: str
     volume_24h: float
     end_date: datetime | None
-    tokens: list[dict]
-    raw: dict = field(default_factory=dict, compare=False)
+    tokens: list[dict[str, Any]]
+    raw: dict[str, Any] = field(default_factory=dict, compare=False)

@@ -14,10 +14,8 @@ Coverage:
 from __future__ import annotations
 
 import asyncio
-import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import patch
 
 import httpx
 import pytest
@@ -33,12 +31,14 @@ from polyecho.shared.datasource import (
     get_datasource,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def run(coro: Any) -> Any:
+    # A fresh, usable thread event loop is guaranteed by the autouse
+    # `_isolated_event_loop` fixture in the repo-root conftest.py (this keeps
+    # the full pytest collection order-independent on Python 3.12).
     return asyncio.get_event_loop().run_until_complete(coro)
 
 
@@ -100,7 +100,7 @@ class TestFixtureActivity:
         ds = FixtureDataSource()
         records = run(ds.get_user_activity(self.SWING))
         for r in records[:10]:
-            assert r.timestamp.tzinfo == timezone.utc
+            assert r.timestamp.tzinfo == UTC
 
     def test_time_window_filter_start(self) -> None:
         ds = FixtureDataSource()
@@ -125,7 +125,7 @@ class TestFixtureActivity:
         """Drifted fixture should have more activity in 30d window than 7d."""
         DRIFTED = "0xdrifted500000000000000000000000000000005"
         ds = FixtureDataSource()
-        now = datetime(2026, 5, 17, 12, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 5, 17, 12, 0, 0, tzinfo=UTC)
         w7 = run(ds.get_user_activity(DRIFTED, start=now - timedelta(days=7), activity_type=None))
         w30 = run(ds.get_user_activity(DRIFTED, start=now - timedelta(days=30), activity_type=None))
         assert len(w30) > len(w7)
@@ -382,14 +382,18 @@ class TestLiveDataSourceMock:
 
     def test_activity_maps_to_dto(self) -> None:
         ds = self._make_ds({"/activity": _ACTIVITY_PAYLOAD})
-        records = run(ds.get_user_activity("0xabc000000000000000000000000000000000001", activity_type=None))
+        records = run(
+            ds.get_user_activity(
+                "0xabc000000000000000000000000000000000001", activity_type=None
+            )
+        )
         assert len(records) == 1
         r = records[0]
         assert isinstance(r, ActivityRecord)
         assert r.condition_id == "0xcond_test"
         assert r.side == "BUY"
         assert r.size == pytest.approx(100.0)
-        assert r.timestamp.tzinfo == timezone.utc
+        assert r.timestamp.tzinfo == UTC
 
     def test_positions_maps_to_dto(self) -> None:
         ds = self._make_ds({"/positions": _POSITIONS_PAYLOAD})
@@ -424,6 +428,10 @@ class TestLiveDataSourceMock:
 
     def test_raw_dict_preserved(self) -> None:
         ds = self._make_ds({"/activity": _ACTIVITY_PAYLOAD})
-        records = run(ds.get_user_activity("0xabc000000000000000000000000000000000001", activity_type=None))
+        records = run(
+            ds.get_user_activity(
+                "0xabc000000000000000000000000000000000001", activity_type=None
+            )
+        )
         assert isinstance(records[0].raw, dict)
         assert "type" in records[0].raw

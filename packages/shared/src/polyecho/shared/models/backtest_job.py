@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import date as date_type
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import Date, DateTime, Integer, Numeric, Text, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
@@ -34,7 +34,7 @@ class BacktestJob(Base):
     leader_addresses: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False
     )
-    template_params: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    template_params: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     start_date: Mapped[date_type] = mapped_column(Date, nullable=False)
     end_date: Mapped[date_type] = mapped_column(Date, nullable=False)
@@ -45,7 +45,7 @@ class BacktestJob(Base):
     # pending | running | completed | failed
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     progress: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0)
-    result: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

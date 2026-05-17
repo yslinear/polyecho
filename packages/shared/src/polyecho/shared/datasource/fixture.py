@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -79,7 +79,7 @@ def _load_json(relative_path: str) -> Any:
             f"Fixture file not found: {relative_path!r}.  "
             "Ensure fixture JSON files are present in "
             "packages/shared/src/polyecho/shared/datasource/fixtures/."
-        )
+        ) from None
 
 
 def _load_json_optional(relative_path: str) -> Any | None:
@@ -97,11 +97,11 @@ def _parse_utc(value: int | float | str | None) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        return datetime.fromtimestamp(float(value), tz=UTC)
     try:
         dt = datetime.fromisoformat(str(value))
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt
     except ValueError:
         return None
@@ -110,7 +110,7 @@ def _parse_utc(value: int | float | str | None) -> datetime | None:
 def _require_utc(value: int | float | str | None) -> datetime:
     dt = _parse_utc(value)
     if dt is None:
-        return datetime.now(tz=timezone.utc)
+        return datetime.now(tz=UTC)
     return dt
 
 

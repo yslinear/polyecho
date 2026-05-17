@@ -19,7 +19,6 @@ import os
 import pytest
 from cryptography.exceptions import InvalidTag
 
-
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
@@ -38,6 +37,7 @@ def _set_minimal_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class TestModelImports:
     def test_all_models_importable(self) -> None:
+        from polyecho.shared.db import Base
         from polyecho.shared.models import (
             Account,
             BacktestJob,
@@ -52,7 +52,6 @@ class TestModelImports:
             PushSubscription,
             Setting,
         )
-        from polyecho.shared.db import Base
 
         for model_cls in (
             Account,
@@ -121,7 +120,7 @@ class TestSettings:
     def test_get_settings_with_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_minimal_env(monkeypatch)
 
-        from polyecho.shared.config import Settings, get_settings
+        from polyecho.shared.config import get_settings
 
         get_settings.cache_clear()
         settings = get_settings()

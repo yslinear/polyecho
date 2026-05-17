@@ -26,12 +26,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 
+from polyecho.discovery.worker import DiscoveryWorker
 from polyecho.shared.datasource import get_datasource
 from polyecho.shared.logging import configure_logging
-
-from polyecho.discovery.worker import DiscoveryWorker
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,11 @@ async def _scheduled_loop(worker: DiscoveryWorker) -> None:
     Tasks are staggered slightly to avoid thundering-herd on startup.
     Each task loop is independent; an exception in one does not stop others.
     """
-    async def _loop(coro_factory, interval: timedelta, name: str) -> None:
+    async def _loop(
+        coro_factory: Callable[[], Awaitable[None]],
+        interval: timedelta,
+        name: str,
+    ) -> None:
         while True:
             try:
                 await coro_factory()

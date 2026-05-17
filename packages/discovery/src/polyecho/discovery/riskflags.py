@@ -36,14 +36,12 @@ high_concentration
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
-from datetime import timedelta, timezone
+from collections import defaultdict
+from datetime import datetime, timedelta
 from typing import Any
 
-from polyecho.shared.datasource import ActivityRecord, PositionRecord
-
 from polyecho.discovery.frequency import FrequencyStats
-
+from polyecho.shared.datasource import ActivityRecord, PositionRecord
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -134,7 +132,7 @@ def detect_risk_flags(
     near_res_total = 0
 
     # Group REDEEMs by condition_id to estimate resolution time
-    redeem_times: dict[str, list] = defaultdict(list)
+    redeem_times: dict[str, list[datetime]] = defaultdict(list)
     for r in redeems:
         if r.condition_id:
             redeem_times[r.condition_id].append(r.timestamp)
@@ -212,7 +210,7 @@ def detect_risk_flags(
     # ── high_concentration ────────────────────────────────────────────────────
     # Single condition_id accounts for > 50 % of total USDC traded volume.
     if trades:
-        vol_by_cond: Counter[str] = Counter()
+        vol_by_cond: dict[str, float] = defaultdict(float)
         for r in trades:
             cid = r.condition_id or "__unknown__"
             vol = r.usdc_size if r.usdc_size is not None else r.size
@@ -220,7 +218,7 @@ def detect_risk_flags(
 
         total_vol = sum(vol_by_cond.values())
         if total_vol > 0:
-            top_cond, top_vol = vol_by_cond.most_common(1)[0]
+            top_vol = max(vol_by_cond.values())
             if top_vol / total_vol > _HIGH_CONCENTRATION_THRESHOLD:
                 flags.append("high_concentration")
 

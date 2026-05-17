@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import statistics
 from collections import defaultdict
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 import numpy as np
@@ -23,7 +23,7 @@ import numpy as np
 from polyecho.shared.datasource import ActivityRecord
 
 
-class StrategyType(str, Enum):
+class StrategyType(StrEnum):
     """Leader strategy classification (PRD §5.3)."""
 
     SCALPER = "Scalper"

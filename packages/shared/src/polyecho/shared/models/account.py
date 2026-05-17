@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Optional
 
 from sqlalchemy import DateTime, Integer, LargeBinary, Text, func
 from sqlalchemy.dialects.postgresql import UUID
@@ -37,9 +36,9 @@ class Account(Base):
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     eoa_address: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
-    funder_address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    funder_address: Mapped[str | None] = mapped_column(Text, nullable=True)
     signature_type: Mapped[int] = mapped_column(Integer, nullable=False)
-    encrypted_private_key: Mapped[Optional[bytes]] = mapped_column(
+    encrypted_private_key: Mapped[bytes | None] = mapped_column(
         LargeBinary, nullable=True
     )
     # pending_key_import | ready | disabled

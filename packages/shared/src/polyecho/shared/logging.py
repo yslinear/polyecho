@@ -112,7 +112,11 @@ def configure_logging(log_level: str = "INFO") -> None:
 
     root_logger = logging.getLogger()
     # Avoid adding duplicate handlers if called more than once.
-    if not any(isinstance(h, logging.StreamHandler) and h.formatter is formatter for h in root_logger.handlers):
+    already_configured = any(
+        isinstance(h, logging.StreamHandler) and h.formatter is formatter
+        for h in root_logger.handlers
+    )
+    if not already_configured:
         root_logger.handlers.clear()
         root_logger.addHandler(handler)
 

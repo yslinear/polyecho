@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import DateTime, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -32,7 +32,7 @@ class PendingAction(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     action_type: Mapped[str] = mapped_column(Text, nullable=False)
-    params: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    params: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     # awaiting_confirm | confirmed | expired | rejected
     status: Mapped[str] = mapped_column(
@@ -40,9 +40,9 @@ class PendingAction(Base):
     )
 
     # Salted hash of the passphrase supplied for authorisation (NOT plaintext)
-    confirm_passphrase_hash: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    confirm_passphrase_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    expires_at: Mapped[Optional[datetime]] = mapped_column(
+    expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(

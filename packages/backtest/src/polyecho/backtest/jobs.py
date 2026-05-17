@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import traceback
 import uuid
 from datetime import date
 from typing import Any
@@ -23,12 +22,11 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from polyecho.backtest.engine import BacktestEngine, BacktestParams
+from polyecho.backtest.scenarios import run_triple
 from polyecho.shared.datasource import DataSource
 from polyecho.shared.db import session_scope
 from polyecho.shared.models import BacktestJob
-
-from polyecho.backtest.engine import BacktestEngine, BacktestParams
-from polyecho.backtest.scenarios import run_triple
 
 logger = logging.getLogger(__name__)
 

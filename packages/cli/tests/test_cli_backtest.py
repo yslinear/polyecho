@@ -10,12 +10,12 @@ Design
 
 from __future__ import annotations
 
-import asyncio
 import uuid
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import UTC, date, timedelta
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -139,7 +139,7 @@ class TestBacktestNew:
         assert result.exit_code == 0, result.output
         assert "enqueued" in result.output.lower() or str(_FAKE_JOB_ID) in result.output
 
-        session = scope._captured.get("session")  # type: ignore[attr-defined]
+        session = scope._captured.get("session")
         assert session is not None
         session.add.assert_called_once()
         added: Any = session.add.call_args[0][0]
@@ -175,7 +175,7 @@ class TestBacktestNew:
             )
 
         assert result.exit_code == 0, result.output
-        session = scope._captured["session"]  # type: ignore[attr-defined]
+        session = scope._captured["session"]
         added = session.add.call_args[0][0]
         assert added.leader_addresses == ["0xAAA", "0xBBB"]
 
@@ -199,7 +199,7 @@ class TestBacktestNew:
             )
 
         assert result.exit_code == 0, result.output
-        session = scope._captured["session"]  # type: ignore[attr-defined]
+        session = scope._captured["session"]
         added = session.add.call_args[0][0]
         assert added.template_params["category_whitelist"] == ["politics", "sports"]
 
@@ -213,7 +213,7 @@ class TestBacktestNew:
                 ["backtest", "new", "--leader", "0xABC", "--days", "30"],
             )
 
-        session = scope._captured["session"]  # type: ignore[attr-defined]
+        session = scope._captured["session"]
         added = session.add.call_args[0][0]
         today = date.today()
         assert added.end_date == today
@@ -374,8 +374,6 @@ class TestDbMigrate:
         engine_mock.connect.return_value = conn_mock
 
         import polyecho.cli.db as db_module
-
-        original_migration_path = db_module._migration_path
 
         def fake_migration_path() -> Path:
             return sql_file

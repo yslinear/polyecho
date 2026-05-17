@@ -37,27 +37,24 @@ import json
 import logging
 import math
 from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 from datetime import date as date_type
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-
-from polyecho.shared.datasource import DataSource, ActivityRecord, PositionRecord
-from polyecho.shared.db import session_scope
-from polyecho.shared.models import CandidateLeader, CandidateScoreHistory, Event
 
 from polyecho.discovery.frequency import (
     FrequencyStats,
     StrategyType,
     classify_strategy,
     compute_frequency_stats,
-    detect_drift,
 )
 from polyecho.discovery.riskflags import detect_risk_flags
 from polyecho.discovery.scoring import final_score, profit_score, replicability_score
+from polyecho.shared.datasource import ActivityRecord, DataSource
+from polyecho.shared.db import session_scope
+from polyecho.shared.models import CandidateLeader, CandidateScoreHistory, Event
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +76,7 @@ def _window_activity(
     reference: datetime | None = None,
 ) -> list[ActivityRecord]:
     """Return only the ActivityRecord items within the most recent *days*."""
-    ref = reference or datetime.now(tz=timezone.utc)
+    ref = reference or datetime.now(tz=UTC)
     cutoff = ref - timedelta(days=days)
     return [r for r in activity if r.timestamp >= cutoff]
 
@@ -246,7 +243,7 @@ async def _upsert_candidate(
                 wallet_address=wallet,
                 display_name=display_name,
                 sources=[source],
-                first_discovered_at=datetime.now(tz=timezone.utc),
+                first_discovered_at=datetime.now(tz=UTC),
                 last_active_at=last_active_at,
                 stats_7d=stats_7d,
                 stats_30d=stats_30d,
@@ -408,7 +405,7 @@ class DiscoveryWorker:
 
         self._known_wallets.add(wallet)
 
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         act_7d = _window_activity(all_activity, days=7, reference=now)
         act_30d = _window_activity(all_activity, days=30, reference=now)
 
@@ -568,7 +565,7 @@ class DiscoveryWorker:
             except Exception:
                 logger.warning("could not fetch leaderboard for large-position scan")
 
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
+        cutoff = datetime.now(tz=UTC) - timedelta(hours=24)
         new_wallets: set[str] = set()
 
         for wallet in wallet_pool:

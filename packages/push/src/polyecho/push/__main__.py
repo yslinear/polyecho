@@ -8,9 +8,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from polyecho.shared.logging import configure_logging
-
 from polyecho.push.sender import WebPushSender
+from polyecho.shared.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 

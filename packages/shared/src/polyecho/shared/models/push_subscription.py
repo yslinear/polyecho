@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Optional
 
 from sqlalchemy import DateTime, Text, func
 from sqlalchemy.dialects.postgresql import UUID
@@ -31,13 +30,13 @@ class PushSubscription(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     endpoint: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
-    p256dh_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    auth_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    device_label: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    p256dh_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    auth_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    device_label: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    last_used_at: Mapped[Optional[datetime]] = mapped_column(
+    last_used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

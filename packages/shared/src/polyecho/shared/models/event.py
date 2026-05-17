@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import BigInteger, DateTime, Identity, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
@@ -34,8 +34,8 @@ class Event(Base):
     )
     event_type: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     severity: Mapped[str] = mapped_column(Text, nullable=False, default="info")
-    payload: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
-    pushed_at: Mapped[Optional[datetime]] = mapped_column(
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    pushed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(

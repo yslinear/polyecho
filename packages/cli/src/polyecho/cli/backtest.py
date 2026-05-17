@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, date, timedelta
-from typing import Annotated, Optional
+from datetime import date, timedelta
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -63,15 +63,15 @@ def new(
         typer.Option("--copy-ratio", help="Copy ratio (e.g. 0.001 = 0.1%)."),
     ] = 0.001,
     max_position: Annotated[
-        Optional[float],
+        float | None,
         typer.Option("--max-position", help="Max position size in USD."),
     ] = None,
     min_trade: Annotated[
-        Optional[float],
+        float | None,
         typer.Option("--min-trade", help="Minimum trade size in USD."),
     ] = None,
     daily_loss: Annotated[
-        Optional[float],
+        float | None,
         typer.Option("--daily-loss", help="Daily loss limit in USD."),
     ] = None,
     slippage_bps: Annotated[
@@ -83,7 +83,7 @@ def new(
         typer.Option("--delay", help="Execution delay in seconds (default 30)."),
     ] = 30,
     category: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         typer.Option("--category", help="Category whitelist entry. Repeatable."),
     ] = None,
 ) -> None:
@@ -118,7 +118,7 @@ def new(
             )
             session.add(job)
             await session.flush()  # populate job.id before commit
-            return job.id  # type: ignore[return-value]
+            return job.id
 
     job_id = asyncio.run(_insert())
 
@@ -226,7 +226,7 @@ def show(
             # Fall back to prefix search
             result = await session.execute(
                 select(BacktestJob).where(
-                    BacktestJob.id.cast(  # type: ignore[union-attr]
+                    BacktestJob.id.cast(
                         __import__("sqlalchemy").Text
                     ).like(f"{job_id}%")
                 )

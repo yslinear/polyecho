@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import DateTime, Numeric, Text, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
@@ -27,7 +27,7 @@ class CandidateLeader(Base):
     __tablename__ = "candidate_leaders"
 
     wallet_address: Mapped[str] = mapped_column(Text, primary_key=True)
-    display_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Discovery provenance
     sources: Mapped[list[str]] = mapped_column(
@@ -36,26 +36,26 @@ class CandidateLeader(Base):
     first_discovered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    last_active_at: Mapped[Optional[datetime]] = mapped_column(
+    last_active_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
     # Rolling stats snapshots (JSONB allows schema-free evolution)
-    stats_7d: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
-    stats_30d: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
-    stats_90d: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
-    frequency_stats: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    stats_7d: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    stats_30d: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    stats_90d: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    frequency_stats: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     # Strategy classification (scalper / day_trader / swing / position / hold_to_resolve)
-    strategy_type: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    strategy_type: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Default backtest params snapshot
-    backtest_default: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    backtest_default: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     # Scoring (0–100 each)
-    profit_score: Mapped[Optional[float]] = mapped_column(Numeric(5, 2), nullable=True)
-    replicability_score: Mapped[Optional[float]] = mapped_column(Numeric(5, 2), nullable=True)
-    total_score: Mapped[Optional[float]] = mapped_column(Numeric(7, 4), nullable=True)
+    profit_score: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
+    replicability_score: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
+    total_score: Mapped[float | None] = mapped_column(Numeric(7, 4), nullable=True)
 
     # Qualitative tagging
     risk_flags: Mapped[list[str]] = mapped_column(
@@ -67,7 +67,7 @@ class CandidateLeader(Base):
 
     # User review status
     user_status: Mapped[str] = mapped_column(Text, nullable=False, default="new")
-    user_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    user_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

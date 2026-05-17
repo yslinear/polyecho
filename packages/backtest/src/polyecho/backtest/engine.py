@@ -42,7 +42,7 @@ import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 import numpy as np
@@ -169,7 +169,7 @@ class BacktestResult:
     def to_dict(self) -> dict[str, Any]:
         """Serialise to a JSONB-compatible dict for storage in backtest_jobs.result."""
         # Convert pnl_curve pd.Series → list of [date_str, value] pairs
-        def series_to_list(s: pd.Series) -> list[list]:
+        def series_to_list(s: pd.Series) -> list[list[Any]]:
             if s.empty:
                 return []
             return [[str(idx), float(v)] for idx, v in s.items()]
@@ -385,7 +385,6 @@ class BacktestEngine:
             side = trade.side or "BUY"
             leader_price = trade.price or 0.0
             leader_usdc = trade.usdc_size or 0.0
-            leader_size = trade.size or 0.0
             cond_id = trade.condition_id or ""
 
             # ---- Track leader's own PnL (no slippage, no risk gate) --------
@@ -526,7 +525,7 @@ class BacktestEngine:
                     "timestamp": datetime.combine(
                         params.end_date, datetime.min.time()
                     )
-                    .replace(tzinfo=timezone.utc)
+                    .replace(tzinfo=UTC)
                     .isoformat(),
                     "date": str(params.end_date),
                     "condition_id": cond_id,
@@ -565,7 +564,9 @@ class BacktestEngine:
             avg_hold_hours=stats["avg_hold_hours"],
             skip_stats=skip_stats,
             leader_pnl_curve=leader_pnl_curve,
-            leader_total_return_usd=float(leader_pnl_curve.sum()) if not leader_pnl_curve.empty else 0.0,
+            leader_total_return_usd=(
+                float(leader_pnl_curve.sum()) if not leader_pnl_curve.empty else 0.0
+            ),
             trade_log=trade_log,
         )
 
@@ -592,10 +593,10 @@ class BacktestEngine:
     ) -> list[ActivityRecord]:
         """Retrieve all leader TRADE records for the backtest window, time-ordered."""
         start_dt = datetime.combine(start_date, datetime.min.time()).replace(
-            tzinfo=timezone.utc
+            tzinfo=UTC
         )
         end_dt = datetime.combine(end_date, datetime.max.time()).replace(
-            tzinfo=timezone.utc
+            tzinfo=UTC
         )
         records = await self._ds.get_user_activity(
             leader_address,
@@ -630,7 +631,7 @@ class BacktestEngine:
             if p.size > 0.0:
                 return p.current_value / p.size
         # Fallback: no new information → use fill price (zero MTM PnL)
-        return pos["fill_price"]
+        return float(pos["fill_price"])
 
     def _update_leader_tracking(
         self,
@@ -789,8 +790,8 @@ class BacktestEngine:
                 continue
             try:
                 opened = datetime.fromisoformat(str(ts_str))
-                closed = datetime.fromisoformat(str(closed_str))
-                hours = (closed - opened).total_seconds() / 3600.0
+                closed_dt = datetime.fromisoformat(str(closed_str))
+                hours = (closed_dt - opened).total_seconds() / 3600.0
                 if hours >= 0:
                     hold_hours.append(hours)
             except ValueError:
