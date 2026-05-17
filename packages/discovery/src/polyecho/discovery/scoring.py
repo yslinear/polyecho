@@ -48,6 +48,22 @@ def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
+def _sigmoid(x: float) -> float:
+    """Numerically-stable logistic sigmoid in (0, 1).
+
+    The naive form ``1 / (1 + exp(-x))`` raises :class:`OverflowError` for
+    large negative ``x`` because ``exp(-x)`` overflows ``float``.  A leader
+    with a catastrophic loss (e.g. ``pnl_usd = -1e9``) is entirely realistic
+    and must *saturate to 0*, never crash the discovery pipeline.  We branch
+    on the sign so the exponent argument is always <= 0 and therefore bounded
+    in ``(0, 1]``.
+    """
+    if x >= 0.0:
+        return 1.0 / (1.0 + math.exp(-x))
+    z = math.exp(x)
+    return z / (1.0 + z)
+
+
 def profit_score(stats: dict[str, Any]) -> float:
     """Compute the profit dimension score (0–100).
 
@@ -84,7 +100,9 @@ def profit_score(stats: dict[str, Any]) -> float:
     # ── normalise each sub-metric to [0, 100] ─────────────────────────────────
     # PnL: sigmoid centred at 0 with scale $10K.
     # $0 → 50 pts; $10K → ~73 pts; $50K → ~99 pts; −$10K → ~27 pts.
-    pnl_norm = 100.0 / (1.0 + math.exp(-pnl_usd / 10_000.0))
+    # Numerically stable: huge negative PnL saturates to 0 instead of
+    # raising OverflowError (see :func:`_sigmoid`).
+    pnl_norm = 100.0 * _sigmoid(pnl_usd / 10_000.0)
 
     # Win-rate: linear. 0.5 → 50 pts; 0.65 → 65 pts; 1.0 → 100 pts.
     win_norm = _clamp(win_rate * 100.0, 0.0, 100.0)

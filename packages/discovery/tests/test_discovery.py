@@ -830,6 +830,442 @@ class TestScoreHistoryPersistence:
 
 
 # ---------------------------------------------------------------------------
+# §7 — profit_score numerical-stability regression
+#
+# profit_score is called for every wallet in DiscoveryWorker._process_wallet.
+# A leader with a catastrophic loss (pnl_usd hugely negative) is entirely
+# realistic.  The original sigmoid 100/(1+exp(-pnl/1e4)) raised
+# OverflowError for large negative pnl, which would crash the whole
+# discovery pipeline.  It must instead saturate toward 0.
+# ---------------------------------------------------------------------------
+
+
+class TestProfitScoreNumericalStability:
+    def _stats(self, **kw: Any) -> dict[str, Any]:
+        d = {
+            "pnl_usd": 0.0,
+            "win_rate": 0.0,
+            "sharpe": 0.0,
+            "max_drawdown": 1.0,
+            "consistency": 0.0,
+            "specialization": 0.0,
+        }
+        d.update(kw)
+        return d
+
+    def test_huge_negative_pnl_does_not_raise(self) -> None:
+        # REGRESSION: previously raised OverflowError("math range error").
+        s = profit_score(self._stats(pnl_usd=-1e9))
+        assert 0.0 <= s <= 100.0
+
+    def test_huge_negative_pnl_saturates_to_zero_component(self) -> None:
+        # All other components are 0 → score is dominated by the PnL term,
+        # which must collapse toward 0 for an enormous loss.
+        s = profit_score(self._stats(pnl_usd=-1e12))
+        assert s == pytest.approx(0.0, abs=1e-6)
+
+    def test_huge_positive_pnl_saturates_to_max_component(self) -> None:
+        # PnL term → 100; with PnL weight 0.25 and all else 0 → ~25.
+        s = profit_score(self._stats(pnl_usd=1e12))
+        assert s == pytest.approx(25.0, abs=1e-3)
+
+    def test_monotonic_non_decreasing_in_pnl(self) -> None:
+        pnls = [-1e9, -1e6, -1e5, -1e4, 0.0, 1e4, 1e5, 1e6, 1e9]
+        scores = [profit_score(self._stats(pnl_usd=p)) for p in pnls]
+        for a, b in zip(scores[:-1], scores[1:], strict=True):
+            assert a <= b + 1e-9
+
+    def test_zero_pnl_midpoint(self) -> None:
+        # sigmoid(0) = 0.5 → 100 * 0.5 * 0.25 weight = 12.5 (all else 0).
+        s = profit_score(self._stats(pnl_usd=0.0))
+        assert s == pytest.approx(12.5, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# §8 — classify_strategy boundary & gap behaviour (PRD §5.3 matrix edges)
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyStrategyEdges:
+    def _fs(
+        self, *, tpd: float, hold_h: float, htr: float = 0.0
+    ) -> FrequencyStats:
+        return FrequencyStats(
+            trades_per_day=tpd,
+            active_days=30,
+            median_gap_minutes=100.0,
+            avg_hold_hours=hold_h,
+            hold_to_resolution_pct=htr,
+            concurrent_positions_avg=2.0,
+            concurrent_positions_max=5,
+            burstiness=0.2,
+            active_hours_utc=[1, 2, 3],
+        )
+
+    def test_hold_to_resolve_takes_priority_over_counts(self) -> None:
+        # Even with scalper-like counts, >=60 % redemptions wins.
+        st = self._fs(tpd=25.0, hold_h=0.2, htr=60.0)
+        assert classify_strategy(st) == StrategyType.HOLD_TO_RESOLVE
+
+    def test_hold_to_resolve_threshold_is_inclusive_at_60(self) -> None:
+        assert classify_strategy(self._fs(tpd=1.0, hold_h=10.0, htr=60.0)) == (
+            StrategyType.HOLD_TO_RESOLVE
+        )
+        # Just below threshold must NOT be Hold-to-Resolve.
+        assert classify_strategy(self._fs(tpd=3.0, hold_h=48.0, htr=59.9)) == (
+            StrategyType.SWING
+        )
+
+    def test_scalper_requires_both_high_freq_and_short_hold(self) -> None:
+        assert classify_strategy(self._fs(tpd=25.0, hold_h=0.5)) == StrategyType.SCALPER
+        # >20/day but hold >= 1h → not a scalper; falls back to Day Trader.
+        assert classify_strategy(self._fs(tpd=21.0, hold_h=1.5)) == (
+            StrategyType.DAY_TRADER
+        )
+
+    def test_swing_lower_boundary_inclusive(self) -> None:
+        # tpd exactly 1.0, hold exactly 24h (1 day) → Swing sweet-spot.
+        assert classify_strategy(self._fs(tpd=1.0, hold_h=24.0)) == StrategyType.SWING
+        # tpd exactly 5.0 with multi-day hold → Swing (1–5/day band).
+        assert classify_strategy(self._fs(tpd=5.0, hold_h=24.0)) == StrategyType.SWING
+
+    def test_position_requires_hold_over_seven_days(self) -> None:
+        # < 1/day but only ~1 day hold → NOT Position (gap → Unknown).
+        assert classify_strategy(self._fs(tpd=0.5, hold_h=24.0)) == (
+            StrategyType.UNKNOWN
+        )
+        # < 1/day and > 7 day hold → Position.
+        assert classify_strategy(self._fs(tpd=0.5, hold_h=200.0)) == (
+            StrategyType.POSITION
+        )
+
+    def test_prd_matrix_gap_is_unknown_not_misclassified(self) -> None:
+        # tpd=4/day, hold=8h: Day-Trader band needs tpd>=5; Swing needs
+        # hold>=1d; the PRD matrix has no row here → honest UNKNOWN.
+        assert classify_strategy(self._fs(tpd=4.0, hold_h=8.0)) == (
+            StrategyType.UNKNOWN
+        )
+
+    def test_drift_false_when_both_windows_degenerate_unknown(self) -> None:
+        # Two different degenerate inputs that both classify UNKNOWN must
+        # NOT be reported as drift (UNKNOWN == UNKNOWN).
+        assert detect_drift(
+            self._fs(tpd=4.0, hold_h=8.0),
+            self._fs(tpd=0.1, hold_h=0.5),
+        ) is False
+
+
+# ---------------------------------------------------------------------------
+# §9 — riskflags strict-threshold boundaries & insider heuristic lock-in
+# ---------------------------------------------------------------------------
+
+
+class TestRiskFlagBoundaries:
+    def _stats(self, **kw: Any) -> dict[str, Any]:
+        d = {
+            "pnl_usd": 5000.0,
+            "win_rate": 0.6,
+            "total_trades": 60,
+            "trades_per_day": 3.0,
+            "first_trade_at": "2026-01-01T00:00:00+00:00",
+        }
+        d.update(kw)
+        return d
+
+    def _old_activity(self, n: int = 60) -> list[ActivityRecord]:
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        return [
+            _make_record(side="BUY", ts=base + timedelta(days=i), usdc_size=200.0)
+            for i in range(n)
+        ]
+
+    def test_low_liquidity_strictly_greater_than_60pct(self) -> None:
+        # Exactly 3/5 thin = 0.60 → NOT > 0.60 → no flag.
+        p_eq = [
+            _make_position(current_value=50.0, condition_id="a"),
+            _make_position(current_value=50.0, condition_id="b"),
+            _make_position(current_value=50.0, condition_id="c"),
+            _make_position(current_value=500.0, condition_id="d"),
+            _make_position(current_value=500.0, condition_id="e"),
+        ]
+        assert "low_liquidity" not in detect_risk_flags(
+            self._stats(), self._old_activity(), p_eq
+        )
+        # 4/5 thin = 0.80 → > 0.60 → flag.
+        p_gt = [
+            _make_position(current_value=50.0, condition_id="a"),
+            _make_position(current_value=50.0, condition_id="b"),
+            _make_position(current_value=50.0, condition_id="c"),
+            _make_position(current_value=50.0, condition_id="d"),
+            _make_position(current_value=500.0, condition_id="e"),
+        ]
+        assert "low_liquidity" in detect_risk_flags(
+            self._stats(), self._old_activity(), p_gt
+        )
+
+    def test_high_concentration_strictly_greater_than_50pct(self) -> None:
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        # Exactly 50/50 across two conditions → top share 0.50, NOT > 0.50.
+        even = [
+            _make_record(
+                side="BUY", ts=base + timedelta(days=i),
+                usdc_size=1000.0, condition_id="A",
+            )
+            for i in range(10)
+        ] + [
+            _make_record(
+                side="BUY", ts=base + timedelta(days=i),
+                usdc_size=1000.0, condition_id="B",
+            )
+            for i in range(10)
+        ]
+        assert "high_concentration" not in detect_risk_flags(
+            self._stats(total_trades=20), even, []
+        )
+        # 60/40 → top 0.60 > 0.50 → flag.
+        skew = [
+            _make_record(
+                side="BUY", ts=base + timedelta(days=i),
+                usdc_size=1000.0, condition_id="A",
+            )
+            for i in range(12)
+        ] + [
+            _make_record(
+                side="BUY", ts=base + timedelta(days=i),
+                usdc_size=1000.0, condition_id="B",
+            )
+            for i in range(8)
+        ]
+        assert "high_concentration" in detect_risk_flags(
+            self._stats(total_trades=20), skew, []
+        )
+
+    def test_insider_suspect_clean_case_flags(self) -> None:
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        cond = "0xcond_ins"
+        act: list[ActivityRecord] = [
+            ActivityRecord(
+                wallet=W_INSIDER, activity_type="TRADE", condition_id=cond,
+                side="BUY", size=2000.0, price=0.05, usdc_size=8000.0,
+                timestamp=base + timedelta(hours=i), raw={},
+            )
+            for i in range(5)
+        ]
+        act.append(
+            ActivityRecord(
+                wallet=W_INSIDER, activity_type="REDEEM", condition_id=cond,
+                side=None, size=1e4, price=None, usdc_size=1e4,
+                timestamp=base + timedelta(hours=20), raw={},
+            )
+        )
+        stats = {
+            "pnl_usd": 5e4, "win_rate": 0.95,
+            "total_trades": 5, "trades_per_day": 1.0,
+        }
+        assert "insider_suspect" in detect_risk_flags(stats, act, [])
+
+    def test_insider_near_resolution_loss_suppresses_flag(self) -> None:
+        """LOCK-IN of intended conservative policy (riskflags docstring).
+
+        A near-resolution losing SELL on the same condition drags
+        near_res_wr below the 0.80 gate, so insider_suspect is *not*
+        raised.  insider_suspect triggers an irreversible auto-reject, so
+        the heuristic deliberately favours false negatives over false
+        positives.  This test documents and pins that behaviour.
+        """
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        cond = "0xcond_ins2"
+        act: list[ActivityRecord] = [
+            ActivityRecord(
+                wallet=W_INSIDER, activity_type="TRADE", condition_id=cond,
+                side="BUY", size=2000.0, price=0.05, usdc_size=8000.0,
+                timestamp=base + timedelta(hours=i), raw={},
+            )
+            for i in range(5)
+        ]
+        act.append(
+            ActivityRecord(
+                wallet=W_INSIDER, activity_type="TRADE", condition_id=cond,
+                side="SELL", size=100.0, price=0.9, usdc_size=5000.0,
+                timestamp=base + timedelta(hours=18), raw={},
+            )
+        )
+        act.append(
+            ActivityRecord(
+                wallet=W_INSIDER, activity_type="REDEEM", condition_id=cond,
+                side=None, size=1e4, price=None, usdc_size=1e4,
+                timestamp=base + timedelta(hours=20), raw={},
+            )
+        )
+        stats = {
+            "pnl_usd": 5e4, "win_rate": 0.95,
+            "total_trades": 6, "trades_per_day": 1.0,
+        }
+        assert "insider_suspect" not in detect_risk_flags(stats, act, [])
+
+    def test_insider_requires_low_total_trades(self) -> None:
+        # Same large near-resolution pattern but a deep history
+        # (total_trades > 50) must NOT be flagged.
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        cond = "0xcond_ins3"
+        act: list[ActivityRecord] = [
+            ActivityRecord(
+                wallet=W_INSIDER, activity_type="TRADE", condition_id=cond,
+                side="BUY", size=2000.0, price=0.05, usdc_size=8000.0,
+                timestamp=base + timedelta(hours=i), raw={},
+            )
+            for i in range(5)
+        ]
+        act.append(
+            ActivityRecord(
+                wallet=W_INSIDER, activity_type="REDEEM", condition_id=cond,
+                side=None, size=1e4, price=None, usdc_size=1e4,
+                timestamp=base + timedelta(hours=20), raw={},
+            )
+        )
+        stats = {
+            "pnl_usd": 5e4, "win_rate": 0.95,
+            "total_trades": 200, "trades_per_day": 1.0,  # deep history
+        }
+        assert "insider_suspect" not in detect_risk_flags(stats, act, [])
+
+
+# ---------------------------------------------------------------------------
+# §10 — worker._upsert_candidate: source-merge, non-insider status, update path
+# ---------------------------------------------------------------------------
+
+
+class TestUpsertCandidateBehaviour:
+    def _fs(self) -> FrequencyStats:
+        return FrequencyStats(
+            trades_per_day=2.0,
+            active_days=25,
+            median_gap_minutes=120.0,
+            avg_hold_hours=36.0,
+            hold_to_resolution_pct=10.0,
+            concurrent_positions_avg=2.0,
+            concurrent_positions_max=5,
+            burstiness=0.2,
+            active_hours_utc=[0, 1, 2, 3],
+        )
+
+    def test_non_insider_status_is_new(self) -> None:
+        from polyecho.discovery.worker import _upsert_candidate
+        from polyecho.shared.models import CandidateLeader as CL
+
+        added: list[Any] = []
+
+        async def _run() -> None:
+            with patch("polyecho.discovery.worker.session_scope") as ms:
+                sess = AsyncMock()
+                sess.execute = AsyncMock(
+                    side_effect=[
+                        MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
+                        MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
+                    ]
+                )
+                ms.return_value.__aenter__ = AsyncMock(return_value=sess)
+                ms.return_value.__aexit__ = AsyncMock(return_value=False)
+                sess.add = lambda o: added.append(o)
+
+                await _upsert_candidate(
+                    W_SWING, "leaderboard", display_name="X",
+                    stats_7d={}, stats_30d={"pnl_usd": 1.0}, stats_90d={},
+                    freq_stats_30d=self._fs(),
+                    strategy_type=StrategyType.SWING,
+                    p_score=60.0, r_score=50.0, f_score=30.0,
+                    risk_flags=["new_account"],  # NOT insider
+                    last_active_at=None,
+                )
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        leaders = [o for o in added if isinstance(o, CL)]
+        assert leaders and leaders[0].user_status == "new"
+
+    def test_existing_record_merges_sources_and_keeps_first_discovered(
+        self,
+    ) -> None:
+        from polyecho.discovery.worker import _upsert_candidate
+
+        existing = MagicMock()
+        existing.sources = ["leaderboard"]
+        existing.user_status = "new"
+        sentinel_first = object()
+        existing.first_discovered_at = sentinel_first
+
+        async def _run() -> None:
+            with patch("polyecho.discovery.worker.session_scope") as ms:
+                sess = AsyncMock()
+                sess.execute = AsyncMock(
+                    side_effect=[
+                        MagicMock(
+                            scalar_one_or_none=MagicMock(return_value=existing)
+                        ),
+                        MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
+                    ]
+                )
+                ms.return_value.__aenter__ = AsyncMock(return_value=sess)
+                ms.return_value.__aexit__ = AsyncMock(return_value=False)
+                sess.add = MagicMock()
+
+                await _upsert_candidate(
+                    W_SWING, "smart_money_seed", display_name=None,
+                    stats_7d={}, stats_30d={"pnl_usd": 2.0}, stats_90d={},
+                    freq_stats_30d=self._fs(),
+                    strategy_type=StrategyType.SWING,
+                    p_score=70.0, r_score=60.0, f_score=42.0,
+                    risk_flags=[],
+                    last_active_at=None,
+                )
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        # Source merged & deduplicated + sorted; first_discovered_at untouched.
+        assert existing.sources == ["leaderboard", "smart_money_seed"]
+        assert existing.first_discovered_at is sentinel_first
+        assert existing.total_score == pytest.approx(42.0)
+        # Never auto-unrejects, but a clean record stays "new".
+        assert existing.user_status == "new"
+
+    def test_existing_rejected_record_stays_rejected_on_clean_rerun(
+        self,
+    ) -> None:
+        """Once rejected, a clean re-run must NOT silently un-reject."""
+        from polyecho.discovery.worker import _upsert_candidate
+
+        existing = MagicMock()
+        existing.sources = ["leaderboard"]
+        existing.user_status = "rejected"
+
+        async def _run() -> None:
+            with patch("polyecho.discovery.worker.session_scope") as ms:
+                sess = AsyncMock()
+                sess.execute = AsyncMock(
+                    side_effect=[
+                        MagicMock(
+                            scalar_one_or_none=MagicMock(return_value=existing)
+                        ),
+                        MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
+                    ]
+                )
+                ms.return_value.__aenter__ = AsyncMock(return_value=sess)
+                ms.return_value.__aexit__ = AsyncMock(return_value=False)
+                sess.add = MagicMock()
+
+                await _upsert_candidate(
+                    W_SWING, "leaderboard", display_name=None,
+                    stats_7d={}, stats_30d={}, stats_90d={},
+                    freq_stats_30d=self._fs(),
+                    strategy_type=StrategyType.SWING,
+                    p_score=70.0, r_score=60.0, f_score=42.0,
+                    risk_flags=[],  # clean now
+                    last_active_at=None,
+                )
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert existing.user_status == "rejected"
+
+
+# ---------------------------------------------------------------------------
 # §6 — Worker pipeline smoke test (end-to-end with mocked DB)
 # ---------------------------------------------------------------------------
 
