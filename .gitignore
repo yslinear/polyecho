@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# uv
+uv.lock
+
+# Node / Next.js
+node_modules/
+packages/web/.next/
+packages/web/out/
+packages/web/next-env.d.ts
+.pnpm-store/
+
+# Env & secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+*.pem
+secrets/
+
+# Database & backups
+*.sqlite
+*.sqlite3
+backups/
+pgdata/
+
+# Logs
+*.log
+logs/
+
+# OS / editors / iCloud
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,15 @@
+{
+  "name": "polyecho",
+  "private": true,
+  "packageManager": "pnpm@10.10.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "web:dev": "pnpm --filter @polyecho/web dev",
+    "web:build": "pnpm --filter @polyecho/web build",
+    "web:lint": "pnpm --filter @polyecho/web lint",
+    "db:generate": "pnpm --filter @polyecho/web db:generate",
+    "db:migrate": "pnpm --filter @polyecho/web db:migrate"
+  }
+}

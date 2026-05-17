@@ -1,0 +1,46 @@
+# PolyEcho — Python workspace root (uv virtual workspace).
+# Per PRD §4.4: all Python packages share the implicit-namespace package `polyecho` (PEP 420).
+# `packages/web` is a Node package and is intentionally NOT a uv workspace member.
+
+[tool.uv.workspace]
+members = [
+    "packages/shared",
+    "packages/core",
+    "packages/discovery",
+    "packages/backtest",
+    "packages/push",
+    "packages/cli",
+]
+
+[tool.uv.sources]
+polyecho-shared = { workspace = true }
+polyecho-core = { workspace = true }
+polyecho-discovery = { workspace = true }
+polyecho-backtest = { workspace = true }
+polyecho-push = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9",
+    "mypy>=1.13",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["packages/*/src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+namespace_packages = true
+explicit_package_bases = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["packages"]
