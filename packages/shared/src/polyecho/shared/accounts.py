@@ -25,33 +25,52 @@ Type (int)    Name                 Funder (the address that holds funds / positi
 ============  ===================  ====================================================
 
 Sources consulted (via context7 ``/llmstxt/polymarket_llms_txt`` /
-``/websites/polymarket_api-reference``):
+``/websites/polymarket_api-reference`` / ``/polymarket/py-clob-client-v2``;
+verification pass 2026-05-17):
 
 * https://docs.polymarket.com/trading/overview — signature-type table
   (0 EOA / 1 POLY_PROXY / 2 GNOSIS_SAFE), "funder is the proxy wallet
-  displayed on polymarket.com".
+  displayed on polymarket.com".  CONFIRMS the 0/1/2 enum + funder semantics.
 * https://docs.polymarket.com/api-reference/authentication — "these proxy
   wallets are automatically deployed on first login; developers can derive
-  them deterministically **or** deploy them on behalf of the user".
-* https://docs.polymarket.com/resources/contract-addresses — collateral
-  (USDC.e) / CTF / exchange addresses (used by the optional balance helper).
-* ``py_clob_client_v2.order_utils.model.signature_type_v1`` — confirms the
-  integer enum 0/1/2; type 3 (POLY_1271) is PRD-specific.
+  them deterministically **or** deploy them on behalf of the user".  States
+  determinism but publishes **no** factory address / salt / init-code.
+* https://docs.polymarket.com/trading/gasless — Safe/Proxy wallets are
+  deployed via ``@polymarket/builder-relayer-client``
+  (``relayer-v2.polymarket.com``); the relayer owns the factory bytecode —
+  the factory address / salt are **not** exposed in the SDK or docs.
+* https://docs.polymarket.com/api-reference/core/get-total-value-of-a-users-positions
+  — ``GET /value?user=<addr>`` → ``[{"user": ..., "value": <usd>}]``
+  (CONFIRMS the optional-balance probe's endpoint + response shape).
+* ``py_clob_client_v2.order_utils.model.signature_type_v2.SignatureTypeV2``
+  (installed v1.0.1) — **CONFIRMS the full integer enum incl.
+  ``POLY_1271 = 3``** ("EIP1271 signatures signed by smart contracts
+  (smart contract wallets or vaults)").  ``signature_type_v1`` confirms
+  0/1/2.  Neither ships a proxy-derivation helper; ``ClobClient`` takes
+  ``funder`` as an explicit address argument
+  (https://github.com/polymarket/py-clob-client-v2).
 
-.. warning:: **TODO(verify) — exact CREATE2 inputs are NOT in the official docs.**
+.. warning:: **TODO(verify) — exact CREATE2 inputs are NOT in any official
+   source (re-verified 2026-05-17).**
 
    The official documentation states the proxy addresses are *deterministic*
    but does **not** publish the factory contract addresses, the CREATE2 salt
-   pre-image, or the proxy init-code hash.  ``py-clob-client-v2`` does not
-   ship a derivation helper either (it takes ``funder`` as an explicit
-   argument).  The factory / singleton constants below are the
+   pre-image, or the proxy init-code hash.  ``py-clob-client-v2`` v1.0.1 does
+   not ship a derivation helper either (``config.py`` carries only exchange /
+   collateral / CTF addresses; ``ClobClient`` takes ``funder`` as an explicit
+   argument), and the gasless docs delegate deployment to the off-chain
+   relayer (``relayer-v2.polymarket.com``), so the factory bytecode is never
+   exposed.  The factory / singleton constants below are therefore the
    widely-circulated community values for Polymarket on Polygon mainnet and
-   are marked ``# TODO(verify)``.  They are isolated as module constants so
-   that, once confirmed against the on-chain factory, a one-line change makes
+   remain ``# TODO(verify)`` — what WAS checked is cited above; they could
+   not be confirmed from official sources, so they are **not** silently
+   "promoted" to verified.  They are isolated as module constants so that,
+   once confirmed against the on-chain factory, a one-line change makes
    :func:`derive_wallets` exact.  Detection (:func:`detect_signature_type`)
    does **not** depend on the constants being correct — it ranks whatever
    addresses are derived purely by observed on-chain evidence (positions /
-   activity), so the feature is useful and fully testable today.
+   activity), so the feature is useful and fully testable today.  Type 0
+   (EOA) is always exact and is independently verified.
 
 This module performs **no network or DB I/O** on import.  Detection consumes
 the frozen ``DataSource`` protocol (``get_positions`` / ``get_user_activity``)
@@ -114,9 +133,14 @@ class _DetectionDataSource(Protocol):
 class SignatureType(IntEnum):
     """Polymarket signature types (PRD §5.1).
 
-    0/1/2 mirror ``py_clob_client_v2.order_utils.model.signature_type_v1``.
-    3 (POLY_1271, "deposit wallet") is defined by the PRD; on-chain it shares
-    the type-2 Gnosis-Safe proxy address.
+    All four values are **confirmed** against
+    ``py_clob_client_v2.order_utils.model.signature_type_v2.SignatureTypeV2``
+    (installed v1.0.1): ``EOA=0``, ``POLY_PROXY=1``, ``POLY_GNOSIS_SAFE=2``,
+    ``POLY_1271=3`` ("EIP1271 signatures signed by smart contracts (smart
+    contract wallets or vaults)").  ``signature_type_v1`` (V1 exchange) omits
+    3 but confirms 0/1/2.  On-chain, the type-3 deposit/1271 holder is the
+    same Gnosis-Safe proxy as type 2 (the 1271 flag only changes how the
+    order signature is *verified*, not the funder address).
     """
 
     EOA = 0
@@ -144,24 +168,40 @@ SIGNATURE_TYPE_DESCRIPTIONS: dict[int, str] = {
 # TODO(verify) — Polygon-mainnet factory / singleton constants
 # ---------------------------------------------------------------------------
 # These are the community-documented Polymarket proxy infrastructure addresses
-# on Polygon (chain id 137).  They are NOT published in the official docs that
-# context7 surfaced (docs.polymarket.com/{trading/overview,api-reference/
-# authentication}), so each is flagged for on-chain verification.  Detection
-# does not rely on these being correct.
+# on Polygon (chain id 137).  Verification pass 2026-05-17 — what was checked:
+#   * docs.polymarket.com/trading/overview — enum + funder semantics only.
+#   * docs.polymarket.com/api-reference/authentication — "derive
+#     deterministically" but NO factory address / salt / init-code published.
+#   * docs.polymarket.com/trading/gasless — deployment is delegated to the
+#     off-chain relayer (relayer-v2.polymarket.com via
+#     @polymarket/builder-relayer-client); factory bytecode never exposed.
+#   * py_clob_client_v2 v1.0.1 — config.py carries only exchange/collateral/
+#     CTF addresses; ClobClient takes `funder` explicitly, no derivation API.
+# None of these confirm the factory/salt/init-code, so each constant stays
+# `# TODO(verify)` (NOT silently promoted to verified).  Detection does not
+# rely on these being correct (it ranks by observed on-chain evidence); type 0
+# (EOA) is always exact and independently verified.
 #
 # proxy-wallet factory (POLY_PROXY, type 1) — 1-of-1 EOA-owned proxy.
-_POLY_PROXY_FACTORY: str = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"  # TODO(verify)
+# TODO(verify): unconfirmed (see verification block above).
+_POLY_PROXY_FACTORY: str = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"
 # gnosis-safe proxy factory (POLY_GNOSIS_SAFE, type 2) used by polymarket.com.
-_POLY_SAFE_FACTORY: str = "0xaacFeEa03eb1561C4e67d661e40682Bd20E3541b"  # TODO(verify)
+# TODO(verify): unconfirmed (see verification block above).
+_POLY_SAFE_FACTORY: str = "0xaacFeEa03eb1561C4e67d661e40682Bd20E3541b"
 # gnosis-safe singleton / master copy the factory clones via CREATE2.
-_GNOSIS_SAFE_SINGLETON: str = "0x3E5c63644E683549055b9Be8653de26E0B4CD36E"  # TODO(verify)
+# TODO(verify): unconfirmed (see verification block above).
+_GNOSIS_SAFE_SINGLETON: str = "0x3E5c63644E683549055b9Be8653de26E0B4CD36E"
 # Minimal EIP-1167 proxy creation prefix/suffix wrapping the singleton; the
 # real Polymarket proxy bytecode is not published, hence TODO(verify).
 _EIP1167_PREFIX = bytes.fromhex("3d602d80600a3d3981f3363d3d373d3d3d363d73")
 _EIP1167_SUFFIX = bytes.fromhex("5af43d82803e903d91602b57fd5bf3")
 
 # Polymarket collateral on Polygon — USDC.e — for the optional balance probe.
-# Source: https://docs.polymarket.com/resources/contract-addresses (verified).
+# Widely-published Polygon USDC.e; the contract-addresses doc page was not
+# resurfaced in the 2026-05-17 pass (it lists exchange/CTF/collateral), so
+# this remains the well-known Polygon USDC.e bridged token address.  Only used
+# as an informational constant — the balance probe uses the data-api /value
+# endpoint (confirmed), not an on-chain ERC-20 call.
 USDC_E_POLYGON: str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 
 
@@ -485,9 +525,12 @@ async def fetch_usdc_balance(
 
     This is a small standalone helper — deliberately **not** part of the
     frozen ``DataSource`` protocol (which must not be extended).  It hits the
-    Polymarket data-api ``/value?user=<address>`` endpoint, which returns the
-    account's USD value.  Any error returns ``None`` (callers treat balance as
-    optional / best-effort per PRD §5.1).
+    Polymarket data-api ``GET /value?user=<address>`` endpoint, which returns
+    the account's USD position value.  The endpoint + response shape are
+    **confirmed** (verification 2026-05-17) against
+    https://docs.polymarket.com/api-reference/core/get-total-value-of-a-users-positions
+    → ``[{"user": "0x…", "value": <number>}]``.  Any error returns ``None``
+    (callers treat balance as optional / best-effort per PRD §5.1).
 
     Args:
         address:  Wallet address to query (``0x…``).
@@ -504,9 +547,10 @@ async def fetch_usdc_balance(
     Returns:
         The USD/USDC value as a float, or ``None`` on any failure.
 
-    .. note:: TODO(verify): the exact data-api balance/value endpoint shape
-       is not pinned in the verified docs; mapping is defensive and the whole
-       call is optional, so an unexpected schema simply yields ``None``.
+    .. note:: The data-api ``/value`` shape is now confirmed (``[{"user":
+       …, "value": <usd>}]``).  Mapping is still defensive (accepts a bare
+       dict and alternate keys) and the whole call is optional, so any
+       unexpected schema simply yields ``None``.
     """
     if base_url is None:
         from polyecho.shared.config import get_settings

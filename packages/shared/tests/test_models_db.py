@@ -25,7 +25,9 @@ db
 * ``AsyncSessionLocal()`` returns a *session* (regression: it previously
   aliased the factory-getter, so the call returned a ``sessionmaker``).
 * ``get_engine`` / factory are lazily memoised singletons.
-* ``pg_listen`` is an explicit ``NotImplementedError`` stub.
+* ``pg_listen`` / ``pg_listen_iter`` wire a *mocked* asyncpg connection
+  (``add_listener`` / ``remove_listener`` / ``close``) — DSN normalisation,
+  notification delivery, clean close, and reconnect-on-drop (no real DB).
 
 Deterministic & order-independent: DB engine objects are monkeypatched
 to module-level ``None`` after each relevant test so no real connection
@@ -34,6 +36,7 @@ is ever opened and global state never leaks.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -443,12 +446,269 @@ class TestEngineAndFactory:
         factory.assert_called_once_with()
 
 
-class TestPgListenStub:
-    def test_pg_listen_raises_not_implemented(self) -> None:
+class _FakeAsyncpgConn:
+    """Mocked asyncpg connection — no real DB, fully deterministic.
+
+    Records ``add_listener`` / ``remove_listener`` / ``close`` calls and lets
+    a test ``fire()`` a notification into the registered callback (the same
+    contract asyncpg's reader task uses: ``cb(conn, pid, channel, payload)``,
+    sync or coroutine).
+    """
+
+    def __init__(self) -> None:
+        self.listeners: dict[str, Any] = {}
+        self.term_listeners: list[Any] = []
+        self.closed = False
+        self.add_calls: list[str] = []
+        self.remove_calls: list[str] = []
+        self.close_calls = 0
+
+    async def add_listener(self, channel: str, cb: Any) -> None:
+        self.listeners[channel] = cb
+        self.add_calls.append(channel)
+
+    async def remove_listener(self, channel: str, _cb: Any) -> None:
+        self.listeners.pop(channel, None)
+        self.remove_calls.append(channel)
+
+    def add_termination_listener(self, cb: Any) -> None:
+        self.term_listeners.append(cb)
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    async def close(self) -> None:
+        self.closed = True
+        self.close_calls += 1
+
+    def terminate(self) -> None:
+        """Simulate the server dropping the dedicated connection."""
+        self.closed = True
+        for cb in self.term_listeners:
+            cb(self)
+
+    async def fire(self, channel: str, pid: int, payload: str) -> None:
+        cb = self.listeners[channel]
+        res = cb(self, pid, channel, payload)
+        if res is not None:  # support async callbacks
+            await res
+
+
+class TestPgListenDsn:
+    def test_strips_driver_suffix(self) -> None:
+        from polyecho.shared.db import _asyncpg_dsn
+
+        assert (
+            _asyncpg_dsn("postgresql+asyncpg://u:p@h:5432/db")
+            == "postgresql://u:p@h:5432/db"
+        )
+
+    def test_plain_url_unchanged(self) -> None:
+        from polyecho.shared.db import _asyncpg_dsn
+
+        assert (
+            _asyncpg_dsn("postgresql://u:p@h/db") == "postgresql://u:p@h/db"
+        )
+
+    def test_defaults_to_settings_db_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import polyecho.shared.db as dbmod
+
+        class _S:
+            db_url = "postgresql+asyncpg://x:y@host:1/zz"
+
+        monkeypatch.setattr(dbmod, "get_settings", lambda: _S())
+        assert dbmod._asyncpg_dsn() == "postgresql://x:y@host:1/zz"
+
+
+class TestPgListenIter:
+    def test_listens_yields_and_closes_cleanly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import polyecho.shared.db as dbmod
+        from polyecho.shared.db import Notification, pg_listen_iter
+
+        conn = _FakeAsyncpgConn()
+
+        async def _fake_connect(_dsn: str) -> Any:
+            return conn
+
+        monkeypatch.setattr(dbmod, "_connect_asyncpg", _fake_connect)
+
+        async def _flow() -> list[Notification]:
+            got: list[Notification] = []
+            async with pg_listen_iter(
+                "leader_trade", db_url="postgresql://x@h/db"
+            ) as notes:
+                # Listener registered on entry.
+                assert conn.add_calls == ["leader_trade"]
+                await conn.fire("leader_trade", 42, "hello")
+                got.append(await notes.__anext__())
+            return got
+
+        out = run(_flow())
+        assert len(out) == 1
+        assert out[0] == Notification(
+            pid=42, channel="leader_trade", payload="hello"
+        )
+        # Cleanly torn down on context exit.
+        assert conn.remove_calls == ["leader_trade"]
+        assert conn.close_calls == 1
+
+    def test_close_runs_even_on_exception(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import polyecho.shared.db as dbmod
+        from polyecho.shared.db import pg_listen_iter
+
+        conn = _FakeAsyncpgConn()
+        monkeypatch.setattr(
+            dbmod, "_connect_asyncpg", lambda _dsn: _ret(conn)
+        )
+
+        class _Boom(RuntimeError):
+            pass
+
+        async def _flow() -> None:
+            async with pg_listen_iter("c", db_url="postgresql://x@h/db"):
+                raise _Boom("inner")
+
+        with pytest.raises(_Boom, match="inner"):
+            run(_flow())
+        assert conn.close_calls == 1
+        assert conn.remove_calls == ["c"]
+
+
+async def _ret(value: Any) -> Any:
+    return value
+
+
+class _Settings:
+    db_url = "postgresql+asyncpg://u@h/db"
+
+
+class TestPgListenLoop:
+    def test_subscribes_then_cancel_closes_cleanly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """pg_listen subscribes via add_listener + termination listener,
+        idles on the Event, and on task cancellation removes the listener
+        and closes the dedicated connection (no real DB)."""
+        import polyecho.shared.db as dbmod
         from polyecho.shared.db import pg_listen
 
-        async def _cb(*_a: Any) -> None:  # pragma: no cover - never called
-            return None
+        conn = _FakeAsyncpgConn()
+        monkeypatch.setattr(
+            dbmod, "_connect_asyncpg", lambda _dsn: _ret(conn)
+        )
+        monkeypatch.setattr(dbmod, "get_settings", lambda: _Settings())
 
-        with pytest.raises(NotImplementedError, match="pg_listen"):
-            run(pg_listen("leader_trade", _cb))
+        received: list[Any] = []
+
+        def _cb(_c: Any, pid: int, ch: str, payload: str) -> None:
+            received.append((pid, ch, payload))
+
+        async def _flow() -> None:
+            task = asyncio.ensure_future(
+                pg_listen("leader_trade", _cb, reconnect_delay=0.01)
+            )
+            # Let the loop connect + subscribe + reach `await terminated`.
+            for _ in range(5):
+                await asyncio.sleep(0)
+                if conn.add_calls:
+                    break
+            assert conn.add_calls == ["leader_trade"]
+            # A notification is delivered via the registered callback.
+            await conn.fire("leader_trade", 7, "payload-x")
+            assert received == [(7, "leader_trade", "payload-x")]
+            # Cancel → clean teardown.
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        run(_flow())
+        assert conn.remove_calls == ["leader_trade"]
+        assert conn.close_calls == 1
+
+    def test_reconnects_after_connection_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed connect is retried after ``reconnect_delay``; the second
+        attempt succeeds and subscribes, then the loop is cancelled."""
+        import polyecho.shared.db as dbmod
+        from polyecho.shared.db import pg_listen
+
+        good = _FakeAsyncpgConn()
+        attempts = {"n": 0}
+
+        async def _flaky_connect(_dsn: str) -> Any:
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise RuntimeError("connection refused")
+            return good
+
+        monkeypatch.setattr(dbmod, "_connect_asyncpg", _flaky_connect)
+        monkeypatch.setattr(dbmod, "get_settings", lambda: _Settings())
+
+        async def _flow() -> None:
+            task = asyncio.ensure_future(
+                pg_listen("c", lambda *_a: None, reconnect_delay=0.0)
+            )
+            # Drive: fail → backoff sleep(0) → reconnect → subscribe.
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if good.add_calls:
+                    break
+            assert attempts["n"] == 2  # retried after the failure
+            assert good.add_calls == ["c"]  # second (good) conn subscribed
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        run(_flow())
+        assert good.close_calls == 1  # cleaned up on cancel
+
+    def test_reconnects_after_connection_drop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the dedicated connection drops (termination listener fires),
+        the loop closes it and reconnects with a fresh connection."""
+        import polyecho.shared.db as dbmod
+        from polyecho.shared.db import pg_listen
+
+        conns = [_FakeAsyncpgConn(), _FakeAsyncpgConn()]
+        idx = {"i": 0}
+
+        async def _connect(_dsn: str) -> Any:
+            c = conns[idx["i"]]
+            idx["i"] = min(idx["i"] + 1, len(conns) - 1)
+            return c
+
+        monkeypatch.setattr(dbmod, "_connect_asyncpg", _connect)
+        monkeypatch.setattr(dbmod, "get_settings", lambda: _Settings())
+
+        async def _flow() -> None:
+            task = asyncio.ensure_future(
+                pg_listen("c", lambda *_a: None, reconnect_delay=0.0)
+            )
+            for _ in range(10):
+                await asyncio.sleep(0)
+                if conns[0].add_calls:
+                    break
+            # Simulate the first connection dropping.
+            conns[0].terminate()
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if conns[1].add_calls:
+                    break
+            assert conns[1].add_calls == ["c"]  # reconnected + re-subscribed
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        run(_flow())
+        # The dropped connection ends up closed (the drop itself closed it);
+        # the loop did not redundantly re-close an already-dead socket.
+        assert conns[0].is_closed() is True
+        assert conns[1].close_calls == 1  # fresh conn closed on cancel

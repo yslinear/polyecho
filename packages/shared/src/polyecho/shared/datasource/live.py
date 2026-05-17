@@ -429,19 +429,116 @@ class LiveDataSource:
         *,
         limit: int = 10,
     ) -> list[PositionRecord]:
-        """Not implemented in the live data source.
+        """Return up to *limit* top holders for *condition_id*.
 
-        # TODO(verify): This endpoint is not present in the verified Polymarket
-        # Data API documentation (https://data-api.polymarket.com).  When
-        # Polymarket publishes a per-market top-holders endpoint, implement it
-        # here by mapping the response to ``PositionRecord`` DTOs.
-        #
-        # Discovery (Wave 2) should use ``FixtureDataSource`` (the default)
-        # until this is verified and implemented.
+        Implemented against the confirmed Polymarket data-api endpoint
+        (verification 2026-05-17, context7
+        ``/websites/polymarket_api-reference`` →
+        https://docs.polymarket.com/api-reference/core/get-top-holders-for-markets):
+
+        ``GET /holders``
+            * ``market``     — required, comma-separated **condition IDs**.
+            * ``limit``      — optional, **server-capped at 20** (per token);
+                               we forward ``min(limit, 20)`` and slice locally
+                               so callers asking for fewer get exactly that.
+            * ``minBalance`` — optional (default 1); left at the server
+                               default.
+
+        Response shape (defensively handled)::
+
+            [
+              {"token": "0x…",
+               "holders": [
+                 {"proxyWallet": "0x…", "amount": <number>,
+                  "asset": "…", "outcomeIndex": <int>, "name": "…", …},
+                 …]},
+              …  # one object per token (Yes/No) of the market
+            ]
+
+        Each holder is mapped to a :class:`PositionRecord` (``size`` ←
+        ``amount``; the holders endpoint carries no avg-price / PnL fields, so
+        the numeric PnL/value fields default to ``0.0`` and the full holder
+        dict is preserved in ``raw``).  Holders across all returned tokens are
+        flattened, the strongest holders first (the API already returns each
+        token's holders largest-first), and the combined list is sliced to
+        *limit*.  Goes through the shared ``_get`` helper, so retry +
+        circuit-breaker behaviour is identical to every other endpoint.
+
+        Args:
+            condition_id: The market condition ID (``0x…`` 64-hex).
+            limit:        Max holders to return overall (server caps the
+                          per-token page at 20).
+
+        Returns:
+            A list of :class:`PositionRecord` (length ≤ ``limit``).
         """
-        raise NotImplementedError(
-            "get_market_top_holders is not yet available in the verified "
-            "Polymarket Data API.  Use FixtureDataSource (env "
-            "POLYECHO_DATASOURCE=fixture) or implement once the endpoint "
-            "is confirmed.  See TODO(verify) in live.py."
+        if limit <= 0:
+            return []
+
+        # Server caps `limit` at 20 per token; never request more than that.
+        page_limit = min(limit, 20)
+        data = await self._get(
+            "/holders",
+            params={
+                "market": condition_id,
+                "limit": page_limit,
+            },
         )
+
+        # Response is a list of {token, holders:[...]} objects (one per
+        # outcome token).  Be defensive: also accept a bare holders list or a
+        # single object, and skip anything malformed without raising.
+        token_groups: list[dict[str, Any]]
+        if isinstance(data, list):
+            # A token-group response has dict items carrying a "holders" key.
+            # If *any* item looks like that, treat the whole thing as
+            # token-groups (skipping malformed entries).  Only when *no*
+            # item is a holders-group dict do we treat the list as an
+            # already-flat holders array.
+            if any(
+                isinstance(x, dict) and "holders" in x for x in data
+            ):
+                token_groups = [
+                    x
+                    for x in data
+                    if isinstance(x, dict) and "holders" in x
+                ]
+            else:
+                token_groups = [{"token": "", "holders": data}]
+        elif isinstance(data, dict):
+            token_groups = [data] if "holders" in data else []
+        else:
+            token_groups = []
+
+        results: list[PositionRecord] = []
+        for group in token_groups:
+            token = str(group.get("token") or "")
+            holders = group.get("holders")
+            if not isinstance(holders, list):
+                continue
+            for row in holders:
+                if not isinstance(row, dict):
+                    continue
+                # The holders endpoint exposes `amount` (token quantity) and
+                # `outcomeIndex`; it carries no avg-price / mark / PnL data,
+                # so those PositionRecord fields default to 0.0.  The raw
+                # holder dict (bio, pseudonym, profileImage, …) is preserved.
+                outcome_idx = row.get("outcomeIndex")
+                record = PositionRecord(
+                    wallet=self._addr(row.get("proxyWallet")),
+                    condition_id=condition_id,
+                    asset=str(row.get("asset") or token or ""),
+                    size=float(row.get("amount") or 0.0),
+                    avg_price=0.0,
+                    current_value=0.0,
+                    cash_pnl=0.0,
+                    percent_pnl=0.0,
+                    title=row.get("name") or row.get("pseudonym") or None,
+                    outcome=(
+                        str(outcome_idx) if outcome_idx is not None else None
+                    ),
+                    raw=dict(row),
+                )
+                results.append(record)
+
+        return results[:limit]

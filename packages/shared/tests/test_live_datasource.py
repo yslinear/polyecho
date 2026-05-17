@@ -17,6 +17,9 @@ smoke-tests:
 * Circuit breaker: opens after 5 consecutive failures, then short-circuits
   with ``CircuitOpenError`` and resets after the cool-down window.
 * Wallet lowercasing on every DTO and ``raw`` dict preservation.
+* ``get_market_top_holders`` (confirmed ``GET /holders``): token-group
+  flattening, field mapping, ``limit`` slicing + server 20-cap, flat-array
+  and dict envelopes, malformed-row skipping, and shared retry/breaker.
 * ``_ensure_client`` guard when used without ``async with``.
 
 ``asyncio.sleep`` is monkeypatched to a no-op so backoff adds no wall time
@@ -490,10 +493,9 @@ class TestMappingInvariants:
         # ``raw=dict(row)`` → a copy, not the literal payload object.
         assert raw is not payload[0]
 
-    def test_market_top_holders_raises_not_implemented(self) -> None:
+    def test_market_top_holders_empty_when_no_groups(self) -> None:
         ds = _ds_with_handler(lambda _r: httpx.Response(200, json=[]))
-        with pytest.raises(NotImplementedError, match="get_market_top_holders"):
-            run(ds.get_market_top_holders("0xcond"))
+        assert run(ds.get_market_top_holders("0xcond")) == []
 
     def test_missing_optional_fields_default_safely(self) -> None:
         """Sparse rows must not raise — numeric coercion handles ``None``."""
@@ -506,6 +508,128 @@ class TestMappingInvariants:
         assert pos[0].size == 0.0
         assert pos[0].avg_price == 0.0
         assert pos[0].title is None
+
+
+class TestMarketTopHolders:
+    """Coverage for the confirmed ``GET /holders`` mapping (no network)."""
+
+    COND = "0xcond123"
+
+    def _group(self, token: str, n: int, *, start: int = 0) -> dict[str, Any]:
+        return {
+            "token": token,
+            "holders": [
+                {
+                    "proxyWallet": f"0xHOLDER{token}{start + i}",
+                    "amount": float((start + i + 1) * 100),
+                    "asset": token,
+                    "outcomeIndex": 0 if token == "yes" else 1,
+                    "name": f"whale{start + i}",
+                    "bio": "a polymarket whale",
+                    "pseudonym": "WhaleHunter",
+                }
+                for i in range(n)
+            ],
+        }
+
+    def test_flattens_token_groups_and_maps_fields(self) -> None:
+        captured: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/holders"
+            captured.update(dict(request.url.params))
+            return httpx.Response(
+                200,
+                json=[self._group("yes", 2), self._group("no", 2)],
+            )
+
+        ds = _ds_with_handler(handler)
+        holders = run(ds.get_market_top_holders(self.COND, limit=10))
+
+        assert captured["market"] == self.COND
+        assert captured["limit"] == "10"  # forwarded (<= 20)
+        assert len(holders) == 4
+        first = holders[0]
+        assert first.wallet == first.wallet.lower()
+        assert first.condition_id == self.COND
+        assert first.size == 100.0  # ← amount
+        assert first.avg_price == 0.0 and first.cash_pnl == 0.0
+        assert first.outcome == "0"  # ← str(outcomeIndex)
+        assert first.title == "whale0"
+        # Raw holder dict preserved (and copied).
+        assert first.raw["bio"] == "a polymarket whale"
+
+    def test_limit_slices_overall_and_caps_page_at_20(self) -> None:
+        captured: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.update(dict(request.url.params))
+            return httpx.Response(200, json=[self._group("yes", 20)])
+
+        ds = _ds_with_handler(handler)
+        holders = run(ds.get_market_top_holders(self.COND, limit=5))
+        assert len(holders) == 5  # sliced locally
+        assert captured["limit"] == "5"
+
+        holders2 = run(ds.get_market_top_holders(self.COND, limit=50))
+        assert captured["limit"] == "20"  # server cap honoured
+        assert len(holders2) == 20
+
+    def test_zero_or_negative_limit_short_circuits(self) -> None:
+        calls = {"n": 0}
+
+        def handler(_r: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(200, json=[])
+
+        ds = _ds_with_handler(handler)
+        assert run(ds.get_market_top_holders(self.COND, limit=0)) == []
+        assert calls["n"] == 0  # no HTTP performed
+
+    def test_accepts_flat_holders_array(self) -> None:
+        flat = [
+            {"proxyWallet": "0xABC", "amount": 7.0},
+            {"proxyWallet": "0xDEF", "amount": 3.0},
+        ]
+
+        ds = _ds_with_handler(lambda _r: httpx.Response(200, json=flat))
+        holders = run(ds.get_market_top_holders(self.COND))
+        assert [h.wallet for h in holders] == ["0xabc", "0xdef"]
+        assert holders[0].size == 7.0
+
+    def test_malformed_rows_skipped_not_raised(self) -> None:
+        payload = [
+            {
+                "token": "yes",
+                "holders": [
+                    "not-a-dict",
+                    {"proxyWallet": "0xGOOD", "amount": 1.0},
+                ],
+            },
+            {"token": "no", "holders": "not-a-list"},
+            "garbage",
+        ]
+        ds = _ds_with_handler(lambda _r: httpx.Response(200, json=payload))
+        holders = run(ds.get_market_top_holders(self.COND))
+        assert len(holders) == 1
+        assert holders[0].wallet == "0xgood"
+
+    def test_dict_envelope_single_group(self) -> None:
+        ds = _ds_with_handler(
+            lambda _r: httpx.Response(200, json=self._group("yes", 3))
+        )
+        holders = run(ds.get_market_top_holders(self.COND, limit=2))
+        assert len(holders) == 2
+
+    def test_retry_and_circuit_breaker_apply(self) -> None:
+        """Goes through the shared ``_get`` → retry then RuntimeError."""
+
+        def handler(_r: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, json={"error": "down"})
+
+        ds = _ds_with_handler(handler)
+        with pytest.raises(RuntimeError, match="failed after 3 attempts"):
+            run(ds.get_market_top_holders(self.COND))
 
 
 class TestLifecycle:

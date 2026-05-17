@@ -416,10 +416,35 @@ class TestLiveDataSourceMock:
         assert m.end_date is not None
         assert m.end_date.tzinfo is not None
 
-    def test_market_top_holders_raises_not_implemented(self) -> None:
-        ds = self._make_ds({})
-        with pytest.raises(NotImplementedError, match="get_market_top_holders"):
-            run(ds.get_market_top_holders("0xcond_anything"))
+    def test_market_top_holders_maps_to_position_records(self) -> None:
+        ds = self._make_ds(
+            {
+                "/holders": [
+                    {
+                        "token": "0xtokyes",
+                        "holders": [
+                            {
+                                "proxyWallet": "0xHOLDER0000000000000000000000000000000001",
+                                "amount": 1000000,
+                                "asset": "0xtokyes",
+                                "outcomeIndex": 0,
+                                "name": "John Doe",
+                                "bio": "A Polymarket whale",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        holders = run(ds.get_market_top_holders("0xcond_anything", limit=5))
+        assert len(holders) == 1
+        h = holders[0]
+        assert isinstance(h, PositionRecord)
+        assert h.wallet == "0xholder0000000000000000000000000000000001"
+        assert h.size == pytest.approx(1000000.0)  # ← amount
+        assert h.condition_id == "0xcond_anything"
+        assert h.outcome == "0"  # ← str(outcomeIndex)
+        assert h.raw["bio"] == "A Polymarket whale"
 
     def test_wallet_normalised_to_lowercase(self) -> None:
         ds = self._make_ds({"/v1/leaderboard": _LEADERBOARD_PAYLOAD})
