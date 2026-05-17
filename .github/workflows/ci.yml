@@ -386,8 +386,13 @@ jobs:
         timeout-minutes: 3
         run: |
           set -e
-          docker run -d --name polyecho-web-smoke -p 3000:3000 \
-            -e POLYECHO_DB_URL_DRIZZLE=postgresql://u:p@localhost:5432/db \
+          # Every page is a DB-querying Server Component, so a reachable,
+          # migrated DB is required to serve 200. Use --network host to reach
+          # the smoke job's postgres:16 service (schema applied above) — the
+          # same wiring the discovery/backtest/doctor steps use. (-p is moot
+          # under host networking; the container binds the host :3000.)
+          docker run -d --name polyecho-web-smoke --network host \
+            -e POLYECHO_DB_URL_DRIZZLE=postgresql://polyecho:polyecho@localhost:5432/polyecho \
             polyecho/web:ci
           ok=0
           for i in $(seq 1 30); do
