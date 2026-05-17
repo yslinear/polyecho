@@ -44,3 +44,7 @@ explicit_package_bases = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["packages"]
+# Monorepo with per-package `tests/` dirs sharing module basenames:
+# importlib mode + namespace packages avoids the prepend-mode collision.
+addopts = "--import-mode=importlib"
+consider_namespace_packages = true
