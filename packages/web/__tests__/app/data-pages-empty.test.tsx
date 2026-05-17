@@ -66,13 +66,13 @@ describe("data-page empty states", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("/leaders: empty state points at Discovery + CLI follow", async () => {
+  it("/leaders: empty state points at Discovery + the real CLI next step", async () => {
     render(await LeadersPage());
     expect(
       screen.getByText(/Not following anyone yet\./i)
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/polyecho follow/i)
+      screen.getByText(/polyecho discovery promote/i)
     ).toBeInTheDocument();
   });
 });

@@ -71,6 +71,8 @@ export default async function PositionsPage() {
                 <TableHead>Side</TableHead>
                 <TableHead className="text-right">Size</TableHead>
                 <TableHead className="text-right">Entry</TableHead>
+                <TableHead className="text-right">Matched</TableHead>
+                <TableHead className="text-right">Remaining</TableHead>
                 <TableHead>Fill</TableHead>
                 <TableHead className="text-right">PnL</TableHead>
                 <TableHead className="text-right">Opened</TableHead>
@@ -80,6 +82,8 @@ export default async function PositionsPage() {
               {rows.map((r) => {
                 const size = toNum(r.size);
                 const price = toNum(r.price);
+                const matched = toNum(r.matched_qty);
+                const remaining = toNum(r.remaining_qty);
                 const buy = r.side?.toUpperCase() === "BUY";
                 return (
                   <TableRow key={r.id} className="hover:bg-muted/50">
@@ -112,6 +116,16 @@ export default async function PositionsPage() {
                     </TableCell>
                     <TableCell className="text-right tabular-nums text-sm">
                       {price === null ? "—" : price.toFixed(4)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums text-sm">
+                      {matched === null
+                        ? "—"
+                        : matched.toLocaleString("en-US")}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums text-sm">
+                      {remaining === null
+                        ? "—"
+                        : remaining.toLocaleString("en-US")}
                     </TableCell>
                     <TableCell>
                       <Badge

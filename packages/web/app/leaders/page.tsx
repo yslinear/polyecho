@@ -1,38 +1,37 @@
 /**
- * /leaders — Followed leaders and copy-trade status (read-only).
+ * /leaders — Followed leaders, copy-trade status, and the skip log.
  *
- * Server Component: reads follow_relations joined to accounts + copy
- * templates so each row shows which account copies which leader under
- * which template. Pause/resume is a deliberate write that lands later;
- * for now the empty state names the real next action (CLI follow).
+ * Server Component. Reads:
+ *  - follow_relations ⋈ accounts ⋈ copy_templates (which account copies
+ *    which leader under which template, plus the reconcile cursor).
+ *  - settings row keyed `live_trading_ack` (CLI-written audit record) for
+ *    the READ-ONLY live-trading status pill.
+ *  - recent copy_skips for the read-only skip log (PolyHermes brief §7).
+ *
+ * Writes: NONE here. The per-row Pause/Resume is a PRD §5.7 SAFE write in
+ * the LeadersTable client island via the `setFollowStatus` Server Action.
+ * Live-trading enable/disable is HIGH-DANGER and CLI-only — the dashboard
+ * deliberately shows only a read-only indicator (PRD §5.7 操作分級).
  */
 
-import { asc, eq } from "drizzle-orm";
+import { asc, desc, eq } from "drizzle-orm";
 
 import { db } from "@/lib/db";
-import { followRelations, accounts, copyTemplates } from "@/lib/db/schema";
-import { Badge } from "@/components/ui/badge";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { shortAddress, formatDateTime } from "@/lib/format";
+  followRelations,
+  accounts,
+  copyTemplates,
+  settings,
+  copySkips,
+} from "@/lib/db/schema";
+import { LiveTradingStatus } from "@/components/live-trading-status";
+import { LeadersTable, type LeaderRow } from "./leaders-table";
+import { SkipsTable, type SkipRow } from "./skips-table";
 
 export const dynamic = "force-dynamic";
 
-export type LeaderRow = {
-  id: string;
-  leader_address: string;
-  account_name: string | null;
-  template_name: string | null;
-  status: string;
-  created_at: Date;
-  paused_at: Date | null;
-};
+const LIVE_ACK_KEY = "live_trading_ack";
+const SKIPS_LIMIT = 50;
 
 export default async function LeadersPage() {
   const rows: LeaderRow[] = await db
@@ -43,13 +42,33 @@ export default async function LeadersPage() {
       template_name: copyTemplates.name,
       status: followRelations.status,
       created_at: followRelations.created_at,
-      paused_at: followRelations.paused_at,
+      last_seen_ts: followRelations.last_seen_ts,
     })
     .from(followRelations)
     .leftJoin(accounts, eq(followRelations.account_id, accounts.id))
     .leftJoin(copyTemplates, eq(followRelations.template_id, copyTemplates.id))
     .orderBy(asc(followRelations.created_at));
 
+  const [ackRow] = await db
+    .select({ key: settings.key })
+    .from(settings)
+    .where(eq(settings.key, LIVE_ACK_KEY))
+    .limit(1);
+
+  const skips: SkipRow[] = await db
+    .select({
+      id: copySkips.id,
+      leader_address: copySkips.leader_address,
+      condition_id: copySkips.condition_id,
+      skip_reason: copySkips.skip_reason,
+      detail: copySkips.detail,
+      created_at: copySkips.created_at,
+    })
+    .from(copySkips)
+    .orderBy(desc(copySkips.created_at))
+    .limit(SKIPS_LIMIT);
+
+  const acked = Boolean(ackRow);
   const active = rows.filter((r) => r.status === "active").length;
 
   return (
@@ -63,68 +82,27 @@ export default async function LeadersPage() {
         </p>
       </header>
 
+      <section className="rounded-lg border p-4">
+        <LiveTradingStatus acked={acked} variant="verbose" />
+      </section>
+
       {rows.length === 0 ? (
         <div className="rounded-lg border border-dashed py-16 text-center">
           <p className="text-sm text-muted-foreground">
-            Not following anyone yet. Pick a candidate on{" "}
-            <span className="font-medium text-foreground">Discovery</span>, then
-            start copying from the CLI with{" "}
+            Not following anyone yet. Promote a candidate from{" "}
+            <span className="font-medium text-foreground">Discovery</span>,
+            then start copying from the CLI with{" "}
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
-              polyecho follow &lt;leader&gt;
+              polyecho discovery promote &lt;wallet&gt;
             </code>
             .
           </p>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-lg border">
-          <Table>
-            <TableHeader className="sticky top-0 z-10 bg-muted/60 backdrop-blur supports-[backdrop-filter]:bg-muted/60">
-              <TableRow className="hover:bg-transparent">
-                <TableHead>Leader</TableHead>
-                <TableHead>Account</TableHead>
-                <TableHead>Template</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Followed</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map((r) => (
-                <TableRow key={r.id} className="hover:bg-muted/50">
-                  <TableCell
-                    className="font-mono text-xs"
-                    title={r.leader_address}
-                  >
-                    {shortAddress(r.leader_address)}
-                  </TableCell>
-                  <TableCell className="text-sm">
-                    {r.account_name ?? (
-                      <span className="text-muted-foreground">—</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-sm">
-                    {r.template_name ?? (
-                      <span className="text-muted-foreground">—</span>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={
-                        r.status === "active" ? "default" : "secondary"
-                      }
-                      className="capitalize text-xs"
-                    >
-                      {r.status}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="whitespace-nowrap text-right text-xs text-muted-foreground tabular-nums">
-                    {formatDateTime(r.created_at)}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+        <LeadersTable rows={rows} />
       )}
+
+      <SkipsTable rows={skips} limit={SKIPS_LIMIT} />
     </div>
   );
 }
