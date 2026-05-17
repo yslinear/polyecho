@@ -64,3 +64,25 @@ PolyHermes is a strong functional reference but has accepted-risk gaps a money-h
 ## 8. Explicit "do NOT copy"
 
 Hand-rolled EIP-712/HMAC/parseUnits/rounding (use the SDK); hardcoded exchange addresses / static tick-size; JPA + dual serializers + Retrofit-bean DI + Spring event bus + MySQL/BIGINT-epoch columns + `@Scheduled` annotations (use asyncio/APScheduler/SQLAlchemy/Postgres types); in-memory-only WS push; one WS connection per address; `bestBid×0.9` crude sell pricing (size against book depth); silent geo-restriction handling.
+
+## 9. Per-wallet-mode order logic & Redeem (deep dive R6 — Phase-4 binding)
+
+**Order signing is mode-AGNOSTIC.** Wallet mode only sets two things: the order's `signatureType` int and the `maker`/`funder` address. The EIP-712 hash/domain/exchange/rounding/salt are identical across modes. `py-clob-client-v2` does ALL of this natively — **do not reimplement signing/rounding/v-packing** (PolyHermes' own comments cite v-normalization & verifyingContract bugs as the top hazard). Phase-4 needs only a per-account resolver `wallet_mode → (signature_type, funder)`:
+
+| Mode | signature_type | funder (maker) |
+|---|---|---|
+| EOA | 0 | signer EOA itself |
+| MAGIC / email | 1 (POLY_PROXY) | Magic proxy = CREATE2: `keccak256(0xff ++ 0xaB45c5A4B0c941a2F231C04C3f49182e1A254052 ++ keccak256(eoaAddr) ++ 0xd21df8dc65880a8606f09fe0ce3df9b8869287ab0b058be05aa9e8af6330a00b)[12:]` |
+| SAFE / web3 | 2 (POLY_GNOSIS_SAFE) | Safe proxy via RPC `computeProxyAddress(eoa)` on Safe factory `0xaacFeEa03eb1561C4e67d661e40682Bd20E3541b` |
+| **POLY_1271** | **3** | **explicit operator-supplied funder** — NO PolyHermes reference; our differentiator |
+
+These CREATE2 constants partially resolve the earlier "factory undocumented" caveat for the Magic case, BUT the standing rule holds: **prefer an explicit operator-confirmed funder; treat derivation as a convenience to verify, never to trust blindly** (esp. type-3). NegRisk exchange is per-market (orthogonal to wallet mode) — pass through to py-clob-client-v2. Fail-closed on unknown wallet mode (PolyHermes silently defaults null→SAFE — we must NOT).
+
+**Redeem / claim-winnings (PolyEcho needs this; Phase-4 W1 contract):**
+- Trigger: poll Polymarket data-api `redeemable` flag (do NOT compute UMA/on-chain resolution — adopt their pragmatic API-trust). Gate on `auto_redeem_enabled` + relayer/key configured + quota-cooldown.
+- Call: `redeemPositions(collateral, 0x0(parentCollectionId), conditionId, [2^outcomeIndex...])` on **CTF `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045`**. **Collateral = pUSD `0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB` for normal markets vs WrappedCollateral `0x3A3BD7bb9528E159577F7C2e685CC81A765002E2` for NegRisk** — highest-risk detail to get right. NegRisk redeem pays WCOL → must then `unwrap(to,amount)` on WCOL (PolyHermes polls 20s).
+- Execution per mode: MAGIC → Builder-Relayer PROXY (EIP-191 personal_sign); SAFE → Builder-Relayer SafeTx (EIP-712) or manual `execTransaction` if no builder key; EOA → direct `web3.py` tx. **Use the official `py-builder-relayer-client` (PRD §11.2) for gasless; `web3.py` for EOA/manual — do NOT hand-roll the relayer/HMAC.** SAFE batches via MultiSend DELEGATECALL; MAGIC = sequential CALLs (no MultiSend).
+- **Improve on PolyHermes:** they use in-memory dedup only. PolyEcho W1 adds a durable `redeem_jobs` table — `(id, account_id, condition_id, outcome_index, index_set, is_neg_risk, status[pending|submitted|confirmed|failed], tx_hash, detected_at, confirmed_at)`, idempotent on `(account_id, condition_id, outcome_index)` (cf. `backtest_jobs`; survives restart, no double-redeem). USDC `approve(spender, 2^256-1)` once at account setup.
+- Relayer auth: HMAC builder creds — official client owns it; don't reimplement the interceptor.
+
+Confidence: HIGH for MAGIC/SAFE (full source). EOA(0)/POLY_1271(3): **confirmed absent in PolyHermes** — implement independently via py-clob-client-v2 native `signature_type=0/3` + explicit funder, no blueprint to follow.
