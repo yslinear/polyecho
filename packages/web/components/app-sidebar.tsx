@@ -31,6 +31,7 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar";
+import { isNavItemActive } from "@/lib/utils";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -65,10 +66,7 @@ export function AppSidebar() {
           <SidebarGroupContent>
             <SidebarMenu>
               {navItems.map(({ href, label, icon: Icon }) => {
-                const isActive =
-                  href === "/"
-                    ? pathname === "/"
-                    : pathname.startsWith(href);
+                const isActive = isNavItemActive(pathname, href);
                 return (
                   <SidebarMenuItem key={href}>
                     <SidebarMenuButton
@@ -91,7 +89,7 @@ export function AppSidebar() {
 
       <SidebarFooter>
         <div className="px-2 py-1 text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
-          v0.3 · Tailscale only
+          v0.3 · localhost only
         </div>
       </SidebarFooter>
 

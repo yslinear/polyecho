@@ -83,7 +83,7 @@ describe("AppSidebar", () => {
     expect(dashboard).toHaveAttribute("data-active", "false");
   });
 
-  it("marks the section active for nested routes via startsWith", () => {
+  it("marks the section active for nested discovery routes", () => {
     usePathname.mockReturnValue("/discovery/0xabc123");
     renderSidebar();
     const discovery = screen
@@ -106,16 +106,49 @@ describe("AppSidebar", () => {
     expect(backtest).toHaveAttribute("data-active", "true");
   });
 
-  it("does NOT highlight Backtest on /backtest/<id> detail routes (nav href is /backtest/new)", () => {
-    // Documents current behaviour: the nav item key is "/backtest/new", so
-    // startsWith("/backtest/new") is false for "/backtest/<uuid>". A backtest
-    // result page therefore shows no active sidebar item. Tracked as a known
-    // UX gap rather than asserted-correct.
+  it("highlights Backtest on /backtest/<id> detail routes (section match)", () => {
+    // Regression guard for the p3-dashboard UX gap: the nav href is
+    // "/backtest/new" but the section is "/backtest", so a backtest result
+    // page MUST still highlight the Backtest item.
     usePathname.mockReturnValue("/backtest/abc-123-uuid");
     renderSidebar();
     const backtest = screen
       .getByRole("link", { name: "Backtest" })
       .closest("[data-active]");
-    expect(backtest).toHaveAttribute("data-active", "false");
+    expect(backtest).toHaveAttribute("data-active", "true");
   });
+
+  // Exactly one item is active for each canonical route, and it is the
+  // correct one. Guards against the "/" matching everything and against
+  // sibling sections leaking into each other.
+  const ACTIVE_MATRIX: Array<[string, string]> = [
+    ["/", "Dashboard"],
+    ["/discovery", "Discovery"],
+    ["/discovery/0xabc", "Discovery"],
+    ["/backtest/new", "Backtest"],
+    ["/backtest/abc-123-uuid", "Backtest"],
+    ["/trades", "Trades"],
+    ["/positions", "Positions"],
+    ["/accounts", "Accounts"],
+  ];
+
+  it.each(ACTIVE_MATRIX)(
+    "on %s exactly one item is active and it is %s",
+    (path, expectedLabel) => {
+      usePathname.mockReturnValue(path);
+      renderSidebar();
+
+      const activeLabels: string[] = [];
+      for (const [label] of EXPECTED_NAV) {
+        const el = screen
+          .getByRole("link", { name: label })
+          .closest("[data-active]");
+        if (el?.getAttribute("data-active") === "true") {
+          activeLabels.push(label);
+        }
+      }
+
+      expect(activeLabels).toEqual([expectedLabel]);
+    }
+  );
 });
