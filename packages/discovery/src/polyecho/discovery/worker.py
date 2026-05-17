@@ -56,11 +56,69 @@ from polyecho.discovery.riskflags import detect_risk_flags
 from polyecho.discovery.scoring import final_score, profit_score, replicability_score
 from polyecho.shared.datasource import ActivityRecord, DataSource
 from polyecho.shared.db import session_scope
+from polyecho.shared.events import (
+    EventType,
+    PushPayload,
+    Severity,
+    emit_event,
+)
 from polyecho.shared.models import CandidateLeader, CandidateScoreHistory, Event
 
 logger = logging.getLogger(__name__)
 
 _SEED_PATH = Path(__file__).parent / "smart_money_seed.json"
+
+# --- High-score candidate notification threshold (PRD §5.2 / §8.1) --------
+# The PRD ties the dashboard "watching" tier to a strong dual-dimension
+# score; there is no hard-coded number in the PRD, so we pick a sensible
+# bar on the 0–100 ``total_score`` scale (profit × replicability/100).  The
+# event fires once per candidate per UPWARD crossing of this line (a state
+# transition — NOT every run), so it never spams.
+HIGH_SCORE_THRESHOLD: float = 70.0
+
+
+async def _safe_emit_high_score(
+    *,
+    wallet: str,
+    display_name: str | None,
+    f_score: float,
+    p_score: float,
+    r_score: float,
+) -> None:
+    """Emit CANDIDATE_HIGH_SCORE (best-effort) — never crash discovery.
+
+    Wraps the FROZEN :func:`polyecho.shared.events.emit_event` so a NOTIFY
+    / DB hiccup is logged and swallowed (the discovery pipeline keeps
+    running), mirroring core's ``safe_emit`` discipline.
+    """
+    try:
+        await emit_event(
+            event_type=EventType.CANDIDATE_HIGH_SCORE,
+            severity=Severity.INFO,
+            payload={
+                "wallet": wallet,
+                "display_name": display_name,
+                "total_score": f_score,
+                "profit_score": p_score,
+                "replicability_score": r_score,
+                "threshold": HIGH_SCORE_THRESHOLD,
+            },
+            push=PushPayload(
+                title="發現高分候選領單者",
+                body=(
+                    f"{display_name or wallet[:10]}… 綜合評分 {f_score:.1f} "
+                    f"（獲利 {p_score:.0f} × 可複製 {r_score:.0f}）"
+                ),
+                url=f"/discovery/{wallet}",
+                tag=f"candidate_high_score:{wallet}",
+                data={"wallet": wallet},
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort: never crash discovery
+        logger.warning(
+            "candidate_high_score_emit_failed_continuing",
+            extra={"wallet": wallet, "error": str(exc)},
+        )
 
 # --- Large-new-position discovery thresholds (PRD §5.2) --------------------
 # A wallet qualifies when a *single* recent trade has notional above this
@@ -261,6 +319,18 @@ async def _upsert_candidate(
         )
         existing: CandidateLeader | None = result.scalar_one_or_none()
 
+        # Capture the PRIOR score BEFORE mutation so CANDIDATE_HIGH_SCORE
+        # fires once per UPWARD crossing of the threshold (a state
+        # transition), not on every run while the leader stays high.
+        prev_score: float | None = (
+            float(existing.total_score)
+            if existing is not None and existing.total_score is not None
+            else None
+        )
+        crossed_high = f_score >= HIGH_SCORE_THRESHOLD and (
+            prev_score is None or prev_score < HIGH_SCORE_THRESHOLD
+        )
+
         if existing is None:
             leader = CandidateLeader(
                 wallet_address=wallet,
@@ -334,6 +404,17 @@ async def _upsert_candidate(
             "user_status": user_status,
         },
     )
+
+    # CANDIDATE_HIGH_SCORE — once per UPWARD threshold crossing only, and
+    # never for an auto-rejected (insider-suspect) candidate.
+    if crossed_high and user_status != "rejected":
+        await _safe_emit_high_score(
+            wallet=wallet,
+            display_name=display_name,
+            f_score=f_score,
+            p_score=p_score,
+            r_score=r_score,
+        )
 
 
 async def _insert_drift_event(wallet: str, strategy_30d: str, strategy_7d: str) -> None:

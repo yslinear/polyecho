@@ -31,6 +31,7 @@ from polyecho.discovery.riskflags import detect_risk_flags
 from polyecho.discovery.scoring import final_score, profit_score, replicability_score
 from polyecho.discovery.worker import DiscoveryWorker, _compute_stats
 from polyecho.shared.datasource import ActivityRecord, FixtureDataSource, PositionRecord
+from polyecho.shared.events import EventType, Severity
 
 # ---------------------------------------------------------------------------
 # Wallet addresses (exact filenames from fixture directory)
@@ -1133,6 +1134,121 @@ class TestRiskFlagBoundaries:
 # ---------------------------------------------------------------------------
 # §10 — worker._upsert_candidate: source-merge, non-insider status, update path
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Phase-5 Wave-2 — CANDIDATE_HIGH_SCORE event emission (state-transition only)
+# ---------------------------------------------------------------------------
+
+
+class TestCandidateHighScoreEvent:
+    """``_upsert_candidate`` emits CANDIDATE_HIGH_SCORE once per UPWARD
+    crossing of :data:`HIGH_SCORE_THRESHOLD` — never every run, never for
+    an auto-rejected (insider) candidate, and best-effort (a raising
+    ``emit_event`` must not crash discovery).
+    """
+
+    def _fs(self) -> FrequencyStats:
+        return FrequencyStats(
+            trades_per_day=2.0,
+            active_days=25,
+            median_gap_minutes=120.0,
+            avg_hold_hours=36.0,
+            hold_to_resolution_pct=10.0,
+            concurrent_positions_avg=2.0,
+            concurrent_positions_max=5,
+            burstiness=0.2,
+            active_hours_utc=[0, 1, 2, 3],
+        )
+
+    def _scope(self, existing: Any) -> MagicMock:
+        ms: MagicMock = patch("polyecho.discovery.worker.session_scope").start()
+        sess = AsyncMock()
+        sess.execute = AsyncMock(
+            side_effect=[
+                MagicMock(
+                    scalar_one_or_none=MagicMock(return_value=existing)
+                ),
+                MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
+            ]
+        )
+        ms.return_value.__aenter__ = AsyncMock(return_value=sess)
+        ms.return_value.__aexit__ = AsyncMock(return_value=False)
+        sess.add = MagicMock()
+        return ms
+
+    def _emit_spy(self) -> AsyncMock:
+        spy = AsyncMock()
+        patch("polyecho.discovery.worker.emit_event", spy).start()
+        return spy
+
+    def teardown_method(self) -> None:
+        patch.stopall()
+
+    async def _upsert(self, *, f_score: float, risk_flags: list[str]) -> None:
+        from polyecho.discovery.worker import _upsert_candidate
+
+        await _upsert_candidate(
+            W_SWING, "leaderboard", display_name="Swing",
+            stats_7d={}, stats_30d={"pnl_usd": 1.0}, stats_90d={},
+            freq_stats_30d=self._fs(),
+            strategy_type=StrategyType.SWING,
+            p_score=90.0, r_score=80.0, f_score=f_score,
+            risk_flags=risk_flags,
+            last_active_at=None,
+        )
+
+    def test_emits_on_new_candidate_crossing_high(self) -> None:
+        self._scope(existing=None)
+        spy = self._emit_spy()
+        asyncio.get_event_loop().run_until_complete(
+            self._upsert(f_score=85.0, risk_flags=[])
+        )
+        assert spy.await_count == 1
+        assert spy.await_args is not None
+        kw = spy.await_args.kwargs
+        assert kw["event_type"] is EventType.CANDIDATE_HIGH_SCORE
+        assert kw["severity"] is Severity.INFO
+        assert kw["push"].url == f"/discovery/{W_SWING}"
+        assert kw["push"].tag == f"candidate_high_score:{W_SWING}"
+
+    def test_no_emit_below_threshold(self) -> None:
+        self._scope(existing=None)
+        spy = self._emit_spy()
+        asyncio.get_event_loop().run_until_complete(
+            self._upsert(f_score=42.0, risk_flags=[])
+        )
+        spy.assert_not_awaited()
+
+    def test_no_emit_when_already_above_no_recrossing(self) -> None:
+        existing = MagicMock()
+        existing.sources = ["leaderboard"]
+        existing.user_status = "new"
+        existing.total_score = 82.0  # already above ⇒ no new crossing
+        self._scope(existing=existing)
+        spy = self._emit_spy()
+        asyncio.get_event_loop().run_until_complete(
+            self._upsert(f_score=88.0, risk_flags=[])
+        )
+        spy.assert_not_awaited()
+
+    def test_no_emit_for_insider_rejected_candidate(self) -> None:
+        self._scope(existing=None)
+        spy = self._emit_spy()
+        asyncio.get_event_loop().run_until_complete(
+            self._upsert(f_score=95.0, risk_flags=["insider_suspect"])
+        )
+        spy.assert_not_awaited()
+
+    def test_emit_failure_does_not_crash_discovery(self) -> None:
+        self._scope(existing=None)
+        boom = AsyncMock(side_effect=RuntimeError("NOTIFY down"))
+        patch("polyecho.discovery.worker.emit_event", boom).start()
+        # Must complete despite emit_event raising (best-effort wrapper).
+        asyncio.get_event_loop().run_until_complete(
+            self._upsert(f_score=90.0, risk_flags=[])
+        )
+        boom.assert_awaited_once()
 
 
 class TestUpsertCandidateBehaviour:

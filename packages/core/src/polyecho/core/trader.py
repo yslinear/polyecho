@@ -41,7 +41,9 @@ from polyecho.core.detection import (
     UserChannelListener,
 )
 from polyecho.core.evaluator import TemplateConfig, TraderCopyEvaluator
+from polyecho.core.events import EventType, PushPayload, Severity, safe_emit
 from polyecho.core.execution import BuyLot, FifoLedger, OrderExecutor
+from polyecho.core.pending import PendingActionExecutor
 from polyecho.core.reconcile import Reconciler
 from polyecho.core.redeem import RedeemCandidate, RedeemWorker
 from polyecho.core.risk import LayeredRiskGate, RiskContext
@@ -58,10 +60,17 @@ from polyecho.shared.copytrading import (
 )
 from polyecho.shared.datasource import get_datasource
 from polyecho.shared.datasource.protocol import DataSource
+from polyecho.shared.risk_mode import RiskMode, apply_conservative, get_risk_mode
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Decision", "DecisionOutcome", "TraderCore", "FollowSpec"]
+__all__ = [
+    "Decision",
+    "DecisionOutcome",
+    "TraderCore",
+    "FollowSpec",
+    "PendingActionExecutor",
+]
 
 
 @dataclass(frozen=True)
@@ -124,6 +133,7 @@ class TraderCore:
         orderbook_for: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
         market_end_for: Callable[[str], datetime | None] | None = None,
         redeem_candidate_source: Callable[[], Awaitable[list[RedeemCandidate]]] | None = None,
+        pending_action_executor: PendingActionExecutor | None = None,
     ) -> None:
         self._settings = get_settings()
         self._ds: DataSource = datasource if datasource is not None else get_datasource()
@@ -161,6 +171,12 @@ class TraderCore:
         )
         self._executor = OrderExecutor(ledger=self._ledger)
         self._redeem_candidate_source = redeem_candidate_source
+        # Confirmed-pending-action executor (web confirms; core executes
+        # through the same chokepoint).  Optional / injected so the engine
+        # stays DB-free in tests.
+        self._pending_executor = pending_action_executor
+        # SYSTEM_BOT_RESTART fires exactly once per process start.
+        self._bot_restart_emitted = False
 
     # ------------------------------------------------------------------
     # Evaluator / risk hooks
@@ -175,12 +191,56 @@ class TraderCore:
     def _is_following(self, account_id: uuid.UUID, leader: str) -> bool:
         return (str(account_id), leader.lower()) in self._follow_index
 
+    async def _resolve_template(self, tpl: TemplateConfig) -> TemplateConfig:
+        """風控收斂: tighten the template when the dashboard is CONSERVATIVE.
+
+        Reads the FROZEN :func:`polyecho.shared.risk_mode.get_risk_mode`
+        (fail-safe NORMAL).  When ``CONSERVATIVE`` the snapshot is run
+        through the PURE :func:`apply_conservative` (tighten-only, never
+        loosen) BEFORE the LayeredRiskGate evaluates it, so a trade that
+        passes under NORMAL can be clamped / rejected under CONSERVATIVE.
+
+        ``TemplateConfig`` structurally satisfies the contract's
+        ``ConservativeTemplate`` :class:`typing.Protocol` (all nine clamped
+        field names + types match exactly: ``copy_ratio``,
+        ``max_position_usd``, ``daily_loss_limit_usd``, ``daily_order_cap``,
+        ``min_price``, ``max_price``, ``min_depth``, ``max_spread``,
+        ``price_tolerance_pct``), and ``apply_conservative`` uses
+        ``dataclasses.replace`` so the extra core-only fields
+        (``fixed_size_usd`` etc.) are carried through untouched — no
+        adapter is needed and ``shared`` is never edited.
+        """
+        try:
+            mode = await get_risk_mode()
+        except Exception:  # noqa: BLE001 - fail-safe (get_risk_mode also is)
+            mode = RiskMode.NORMAL
+        if mode is RiskMode.CONSERVATIVE:
+            tightened = apply_conservative(tpl)
+            logger.info(
+                "risk_mode_conservative_applied",
+                extra={
+                    "max_position_usd": str(tightened.max_position_usd),
+                    "daily_loss_limit_usd": str(tightened.daily_loss_limit_usd),
+                    "daily_order_cap": tightened.daily_order_cap,
+                    "min_price": str(tightened.min_price),
+                    "max_price": str(tightened.max_price),
+                    "min_depth": str(tightened.min_depth),
+                    "max_spread": str(tightened.max_spread),
+                    "price_tolerance_pct": str(tightened.price_tolerance_pct),
+                },
+            )
+            return tightened
+        return tpl
+
     async def _default_risk_context(self, evaluated: EvaluatedCopy) -> RiskContext:
         tpl = self._template_for(evaluated.account_id, evaluated.leader_address)
         if tpl is None:
             # Fail-closed: a missing template is treated as data-unavailable
             # by raising, which the gate converts to DATA_UNAVAILABLE.
             raise RuntimeError("no template snapshot for risk context")
+        # 風控收斂: resolve the EFFECTIVE template (Conservative tighten-only)
+        # right where the gate consumes it — before any gate runs.
+        tpl = await self._resolve_template(tpl)
         # The tx is already claimed in process_detected before the gate
         # runs, so the dup gate here is a no-op (False) on the first pass;
         # the durable dup defence is the leader_trades UNIQUE + LRU.
@@ -236,6 +296,192 @@ class TraderCore:
         logger.info("event", extra={"event_type": event_type, **payload})
         if self._event_emitter is not None:
             await self._event_emitter(event_type, payload)
+
+    async def _emit_push_event(
+        self,
+        *,
+        event_type: EventType,
+        severity: Severity = Severity.INFO,
+        payload: dict[str, Any],
+        push: PushPayload | None = None,
+    ) -> None:
+        """Emit a PRD §5.8 push event (best-effort) + keep the in-mem log.
+
+        Routes through :func:`polyecho.core.events.safe_emit` so a NOTIFY /
+        DB hiccup can never crash or stall the trading loop.  The in-memory
+        ``self.events`` mirror + injected ``event_emitter`` hook are kept
+        so existing tests / observers still see every event.
+        """
+        self.events.append((str(event_type), payload))
+        logger.info(
+            "push_event",
+            extra={"event_type": str(event_type), "severity": str(severity)},
+        )
+        if self._event_emitter is not None:
+            await self._event_emitter(str(event_type), payload)
+        await safe_emit(
+            event_type=event_type,
+            severity=severity,
+            payload=payload,
+            push=push,
+        )
+
+    # ------------------------------------------------------------------
+    # PRD §5.8 push-event builders (zh-TW copy, deep-links, dedupe tags)
+    # ------------------------------------------------------------------
+
+    async def _emit_fill_events(
+        self,
+        *,
+        spec: FollowSpec,
+        tx_hash: str,
+        side: TradeSide | None,
+        size: Decimal,
+        price: Decimal,
+        outcome: str,
+        sell_match: Any | None,
+    ) -> None:
+        """COPY_FILL on every fill; on a SELL also POSITION_CLOSED /
+        STOP_LOSS / TARGET_HIT depending on the realised PnL.
+        """
+        leader = spec.leader_address
+        side_zh = "買入" if side is TradeSide.BUY else "賣出"
+        base_payload: dict[str, Any] = {
+            "leader": leader,
+            "tx_hash": tx_hash,
+            "account_id": str(spec.account_id),
+            "side": side.value if side else None,
+            "size": str(size),
+            "price": str(price),
+            "market": outcome,
+        }
+        await self._emit_push_event(
+            event_type=EventType.COPY_FILL,
+            severity=Severity.INFO,
+            payload=base_payload,
+            push=PushPayload(
+                title=f"已跟單成交 · {side_zh}",
+                body=(
+                    f"領單者 {leader[:10]}… 市場 {outcome} "
+                    f"{side_zh} {size} 股 @ {price}"
+                ),
+                url="/trades",
+                tag=f"copy_fill:{tx_hash}",
+                data={"tx_hash": tx_hash},
+            ),
+        )
+
+        if side is not TradeSide.SELL or sell_match is None:
+            return
+
+        realised: Decimal = getattr(sell_match, "realised_pnl_usd", Decimal(0))
+        closed_payload: dict[str, Any] = {
+            **base_payload,
+            "realised_pnl_usd": str(realised),
+        }
+        if realised < 0:
+            await self._emit_push_event(
+                event_type=EventType.STOP_LOSS,
+                severity=Severity.WARNING,
+                payload=closed_payload,
+                push=PushPayload(
+                    title="停損出場",
+                    body=(
+                        f"市場 {outcome} 已停損平倉，"
+                        f"已實現損益 ${realised}"
+                    ),
+                    url="/trades",
+                    tag=f"position:{spec.account_id}:{outcome}",
+                    data={"tx_hash": tx_hash},
+                ),
+            )
+        elif realised > 0:
+            await self._emit_push_event(
+                event_type=EventType.TARGET_HIT,
+                severity=Severity.INFO,
+                payload=closed_payload,
+                push=PushPayload(
+                    title="達標獲利出場",
+                    body=(
+                        f"市場 {outcome} 已停利平倉，"
+                        f"已實現損益 ${realised}"
+                    ),
+                    url="/trades",
+                    tag=f"position:{spec.account_id}:{outcome}",
+                    data={"tx_hash": tx_hash},
+                ),
+            )
+        await self._emit_push_event(
+            event_type=EventType.POSITION_CLOSED,
+            severity=Severity.INFO,
+            payload=closed_payload,
+            push=PushPayload(
+                title="部位已平倉",
+                body=(
+                    f"市場 {outcome} 部位已平倉，"
+                    f"已實現損益 ${realised}"
+                ),
+                url="/trades",
+                tag=f"position:{spec.account_id}:{outcome}",
+                data={"tx_hash": tx_hash},
+            ),
+        )
+
+    async def _emit_risk_event(
+        self,
+        spec: FollowSpec,
+        tx_hash: str,
+        reason: SkipReason,
+        detail: str,
+    ) -> None:
+        """Map a risk-gate reject to RISK_DAILY_LOSS / RISK_STRATEGY_DRIFT.
+
+        ``DAILY_LOSS_CAP`` ⇒ RISK_DAILY_LOSS (WARNING; CRITICAL when the
+        detail marks the hard MtM breaker).  ``STRATEGY_DRIFT`` ⇒
+        RISK_STRATEGY_DRIFT (WARNING — the PRD §5.3 auto-pause behaviour is
+        unchanged; this only ADDS the event).  Other reasons are
+        non-actionable internal skips → no push event.
+        """
+        payload = {
+            "leader": spec.leader_address,
+            "tx_hash": tx_hash,
+            "account_id": str(spec.account_id),
+            "skip_reason": reason.value,
+            "detail": detail,
+        }
+        if reason is SkipReason.DAILY_LOSS_CAP:
+            hard = "MtM breaker" in detail
+            await self._emit_push_event(
+                event_type=EventType.RISK_DAILY_LOSS,
+                severity=Severity.CRITICAL if hard else Severity.WARNING,
+                payload=payload,
+                push=PushPayload(
+                    title="每日虧損熔斷觸發",
+                    body=(
+                        f"領單者 {spec.leader_address[:10]}… "
+                        f"已觸發每日虧損上限，已暫停跟單"
+                    ),
+                    url="/dashboard",
+                    tag=f"risk_daily_loss:{spec.account_id}",
+                    data={"skip_reason": reason.value},
+                ),
+            )
+        elif reason is SkipReason.STRATEGY_DRIFT:
+            await self._emit_push_event(
+                event_type=EventType.RISK_STRATEGY_DRIFT,
+                severity=Severity.WARNING,
+                payload=payload,
+                push=PushPayload(
+                    title="策略偏移偵測",
+                    body=(
+                        f"領單者 {spec.leader_address[:10]}… "
+                        f"策略已偏離追蹤輪廓，已暫停跟單"
+                    ),
+                    url=f"/discovery/{spec.leader_address}",
+                    tag=f"strategy_drift:{spec.leader_address}",
+                    data={"skip_reason": reason.value},
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Pipeline: one detected trade → fully processed
@@ -312,6 +558,7 @@ class TraderCore:
                     "skip_reason": reason.value,
                 },
             )
+            await self._emit_risk_event(spec, tx_hash, reason, risk.detail or "")
             return
 
         self.stats.copied += 1
@@ -351,6 +598,15 @@ class TraderCore:
                 "trade_opened" if side is TradeSide.BUY else "trade_closed",
                 {"leader": spec.leader_address, "tx_hash": tx_hash},
             )
+            await self._emit_fill_events(
+                spec=spec,
+                tx_hash=tx_hash,
+                side=side,
+                size=size or Decimal(0),
+                price=price,
+                outcome=outcome_name,
+                sell_match=result.sell_match,
+            )
         else:
             # Default dry-run: still record the FIFO BUY lot so PnL/limits
             # accounting is correct, log the LIVE_LOCKED intent as a skip.
@@ -382,6 +638,7 @@ class TraderCore:
         through the full pipeline, then a single reconcile + redeem pass.
         Returns the per-run :class:`_Stats`.  Places nothing (live lock).
         """
+        await self._emit_bot_restart_once()
         leaders = sorted({f.leader_address.lower() for f in self._follows})
         ws = UserChannelListener(leaders, self._queue, datasource=self._ds, live=False)
         chain = ChainCrossCheckListener(
@@ -403,6 +660,7 @@ class TraderCore:
 
         await self._reconcile_once()
         await self._redeem_once()
+        await self._pending_actions_once()
         logger.info(
             "run_once_complete",
             extra={
@@ -458,6 +716,78 @@ class TraderCore:
         for o in outcomes:
             self.events.append(("redeem_intent", {"condition_id": o.spec.condition_id}))
         return len(outcomes)
+
+    async def _emit_bot_restart_once(self) -> None:
+        """Emit SYSTEM_BOT_RESTART exactly once per process start (INFO)."""
+        if self._bot_restart_emitted:
+            return
+        self._bot_restart_emitted = True
+        await self._emit_push_event(
+            event_type=EventType.SYSTEM_BOT_RESTART,
+            severity=Severity.INFO,
+            payload={
+                "datasource": self._settings.datasource,
+                "live_trading": is_live_enabled(),
+            },
+            push=PushPayload(
+                title="跟單引擎已啟動",
+                body="trader-core 已啟動並開始監控領單者",
+                url="/dashboard",
+                tag="system_bot_restart",
+            ),
+        )
+
+    async def pending_event_hook(self, kind: str, payload: dict[str, Any]) -> None:
+        """Bridge :class:`PendingActionExecutor` closes to push events.
+
+        Wire this as the executor's ``event_hook`` so a confirmed
+        MANUAL_SELL / EMERGENCY_LIQUIDATE close emits POSITION_CLOSED
+        (INFO) or STOP_LOSS (WARNING) just like a copy-trade exit.
+        """
+        outcome = str(payload.get("outcome") or payload.get("condition_id") or "")
+        realised = payload.get("realised_pnl_usd", "0")
+        acct = payload.get("account_id", "")
+        if kind == "stop_loss":
+            await self._emit_push_event(
+                event_type=EventType.STOP_LOSS,
+                severity=Severity.WARNING,
+                payload=payload,
+                push=PushPayload(
+                    title="停損出場（手動指令）",
+                    body=f"市場 {outcome} 已平倉，已實現損益 ${realised}",
+                    url="/trades",
+                    tag=f"position:{acct}:{outcome}",
+                    data={"action_id": payload.get("action_id")},
+                ),
+            )
+        else:
+            await self._emit_push_event(
+                event_type=EventType.POSITION_CLOSED,
+                severity=Severity.INFO,
+                payload=payload,
+                push=PushPayload(
+                    title="部位已平倉（手動指令）",
+                    body=f"市場 {outcome} 已平倉，已實現損益 ${realised}",
+                    url="/trades",
+                    tag=f"position:{acct}:{outcome}",
+                    data={"action_id": payload.get("action_id")},
+                ),
+            )
+
+    async def _pending_actions_once(self) -> int:
+        """Poll + execute web-confirmed danger-tier actions (PRD §5.7).
+
+        Delegates to the injected :class:`PendingActionExecutor` whose
+        order placement routes through the shared :class:`OrderExecutor`
+        chokepoint (``assert_live_allowed``) — default-OFF places nothing.
+        On each close it emits POSITION_CLOSED / STOP_LOSS as appropriate.
+        """
+        if self._pending_executor is None:
+            return 0
+        processed = await self._pending_executor.poll_once()
+        for action_id, _results in processed:
+            self.events.append(("pending_action_processed", {"action_id": action_id}))
+        return len(processed)
 
     async def run(self) -> None:
         """Supervised loop: detection / reconcile / redeem TaskGroup.
