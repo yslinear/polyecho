@@ -43,6 +43,9 @@ const config: Config = {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        // PnL semantics — paired with sign/arrow/figure, never color-only.
+        gain: "hsl(var(--gain))",
+        loss: "hsl(var(--loss))",
         sidebar: {
           DEFAULT: "hsl(var(--sidebar))",
           foreground: "hsl(var(--sidebar-foreground))",
@@ -58,6 +61,13 @@ const config: Config = {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
+      },
+      // Calm, instrument-grade motion: ease-out, no bounce (DESIGN.md).
+      transitionTimingFunction: {
+        calm: "cubic-bezier(0.22, 1, 0.36, 1)",
+      },
+      transitionDuration: {
+        180: "180ms",
       },
     },
   },

@@ -1,24 +1,31 @@
 /**
- * / — Dashboard overview (Phase 3, read-only)
+ * / — Dashboard overview (Phase 3, read-only).
  *
- * Server Component: reads my_trades, follow_relations and events via Drizzle
- * and renders summary cards + latest alerts. No fake data — every metric
- * degrades to a graceful empty/zero state when the DB has no rows.
+ * Information-led overview, NOT the banned SaaS hero-metric template and NOT
+ * four identical stat cards. One honest focal block (today's realized +
+ * unrealized PnL and current open risk) reading the real DB, then supporting
+ * context (recent events, coverage) in a deliberately varied layout. Every
+ * figure degrades to a calm, truthful empty/zero state — the fixture DB is
+ * often genuinely empty (PRODUCT.md "Honest empty states").
+ *
+ * Server Component: reads via the existing Drizzle client. Schema unchanged —
+ * my_trades has no dedicated unrealized column, so "unrealized" is honestly
+ * the PnL on still-open positions and "realized" is PnL on closed ones.
  */
 
 import { desc, isNull, and, isNotNull } from "drizzle-orm";
 
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Pnl } from "@/components/pnl";
 import { db } from "@/lib/db";
 import { myTrades, followRelations, events } from "@/lib/db/schema";
 import {
-  formatSignedUsd,
-  pnlColor,
+  toNum,
   sumPnl,
   sumPnlSince,
   startOfTodayUtc,
   formatDateTime,
+  formatUsd,
 } from "@/lib/format";
 
 // Reads the database on every request — never prerender at build time
@@ -36,128 +43,216 @@ const SEVERITY_VARIANT: Record<
 };
 
 export default async function DashboardPage() {
-  const [trades, openCount, following, latestEvents] = await Promise.all([
+  const [allTrades, openRows, following, latestEvents] = await Promise.all([
     db
       .select({
         pnl_usd: myTrades.pnl_usd,
         opened_at: myTrades.opened_at,
+        closed_at: myTrades.closed_at,
       })
       .from(myTrades),
     db
-      .select({ id: myTrades.id })
+      .select({
+        pnl_usd: myTrades.pnl_usd,
+        size: myTrades.size,
+        price: myTrades.price,
+        opened_at: myTrades.opened_at,
+      })
       .from(myTrades)
       .where(and(isNotNull(myTrades.opened_at), isNull(myTrades.closed_at))),
     db
       .select({ id: followRelations.id, status: followRelations.status })
       .from(followRelations),
-    db.select().from(events).orderBy(desc(events.created_at)).limit(10),
+    db.select().from(events).orderBy(desc(events.created_at)).limit(8),
   ]);
 
-  const totalPnl = sumPnl(trades.map((t) => t.pnl_usd));
-  const todayPnl = sumPnlSince(trades, startOfTodayUtc());
-  const openPositions = openCount.length;
+  const closed = allTrades.filter((t) => t.closed_at != null);
+  const realizedPnl = sumPnl(closed.map((t) => t.pnl_usd));
+  const unrealizedPnl = sumPnl(openRows.map((t) => t.pnl_usd));
+  const todayPnl = sumPnlSince(
+    allTrades.map((t) => ({ pnl_usd: t.pnl_usd, opened_at: t.opened_at })),
+    startOfTodayUtc()
+  );
+
+  // Open risk = entry notional still on the table (size * price), not PnL.
+  const openRisk = openRows.reduce((acc, r) => {
+    const size = toNum(r.size);
+    const price = toNum(r.price);
+    if (size === null || price === null) return acc;
+    return acc + Math.abs(size * price);
+  }, 0);
+
+  const openPositions = openRows.length;
   const activeFollows = following.filter((f) => f.status === "active").length;
+  const hasAnyTrades = allTrades.length > 0;
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold">Dashboard</h1>
-        <p className="text-muted-foreground mt-1">
-          Copy-trading overview — read-only
+    <div className="mx-auto max-w-6xl">
+      <header className="mb-8">
+        <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Copy-trading at a glance. Read-only; pauses and follows are explicit
+          actions on their own pages.
         </p>
-      </div>
+      </header>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Today&apos;s PnL
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className={`text-2xl font-bold ${pnlColor(todayPnl)}`}>
-              {formatSignedUsd(todayPnl)}
+      {/* FOCAL BLOCK — a single PnL ledger strip, not a hero number and not
+          a row of identical cards. Today's net is the lead; realized,
+          unrealized and open risk sit beside it as a connected reading. */}
+      <section
+        aria-label="Position and risk summary"
+        className="rounded-lg border bg-card"
+      >
+        <div className="grid gap-px overflow-hidden rounded-lg bg-border sm:grid-cols-[1.4fr_1fr_1fr_1fr]">
+          <div className="bg-card p-6">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Today&apos;s net PnL
             </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Total PnL
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className={`text-2xl font-bold ${pnlColor(totalPnl)}`}>
-              {formatSignedUsd(totalPnl)}
+            <Pnl
+              value={hasAnyTrades ? todayPnl : null}
+              emphasis="metric"
+              className="mt-2 block text-3xl"
+            />
+            <p className="mt-2 text-xs text-muted-foreground">
+              Trades opened since 00:00 UTC.
             </p>
-          </CardContent>
-        </Card>
+          </div>
 
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Open Positions
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-bold">{openPositions}</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Following Leaders
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-bold">{activeFollows}</p>
-            <p className="text-xs text-muted-foreground mt-1">
-              {following.length} total relation
-              {following.length === 1 ? "" : "s"}
+          <div className="bg-card p-6">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Realized
             </p>
-          </CardContent>
-        </Card>
-      </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Latest Alerts</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {latestEvents.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No events yet. Alerts from trader-core (fills, errors, risk
-              limits) will appear here.
+            <Pnl
+              value={closed.length > 0 ? realizedPnl : null}
+              className="mt-2 block text-xl"
+            />
+            <p className="mt-2 text-xs text-muted-foreground">
+              {closed.length} closed
             </p>
-          ) : (
-            <ul className="divide-y">
-              {latestEvents.map((e) => (
-                <li
-                  key={e.id}
-                  className="flex items-center justify-between gap-3 py-2 first:pt-0 last:pb-0"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <Badge
-                      variant={SEVERITY_VARIANT[e.severity] ?? "secondary"}
-                      className="capitalize shrink-0"
-                    >
-                      {e.severity}
-                    </Badge>
-                    <span className="text-sm font-medium truncate">
-                      {e.event_type}
-                    </span>
-                  </div>
-                  <span className="text-xs text-muted-foreground whitespace-nowrap shrink-0">
-                    {formatDateTime(e.created_at)}
+          </div>
+
+          <div className="bg-card p-6">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Unrealized
+            </p>
+            <Pnl
+              value={openPositions > 0 ? unrealizedPnl : null}
+              className="mt-2 block text-xl"
+            />
+            <p className="mt-2 text-xs text-muted-foreground">
+              {openPositions} open
+            </p>
+          </div>
+
+          <div className="bg-card p-6">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Open risk
+            </p>
+            <p className="mt-2 text-xl font-semibold tabular-nums">
+              {openPositions > 0 ? (
+                formatUsd(openRisk)
+              ) : (
+                <span className="text-muted-foreground">$0.00</span>
+              )}
+            </p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Entry notional at stake
+            </p>
+          </div>
+        </div>
+        {!hasAnyTrades && (
+          <p className="border-t px-6 py-3 text-sm text-muted-foreground">
+            No copy-trades recorded yet. Follow a leader, then trader-core fills
+            will populate this.
+          </p>
+        )}
+      </section>
+
+      {/* SUPPORTING — intentionally NOT a uniform grid. A wide activity feed
+          carries the weight; a narrow coverage rail sits beside it. */}
+      <div className="mt-8 grid gap-5 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+        <section aria-labelledby="activity-heading">
+          <div className="mb-3 flex items-baseline justify-between">
+            <h2
+              id="activity-heading"
+              className="text-sm font-semibold tracking-tight"
+            >
+              Recent activity
+            </h2>
+            <span className="text-xs text-muted-foreground">
+              Latest {Math.min(latestEvents.length, 8) || 0}
+            </span>
+          </div>
+          <div className="rounded-lg border bg-card">
+            {latestEvents.length === 0 ? (
+              <p className="px-5 py-8 text-center text-sm text-muted-foreground">
+                Quiet. Fills, errors and risk-limit alerts from trader-core will
+                stream in here.
+              </p>
+            ) : (
+              <ul className="divide-y">
+                {latestEvents.map((e) => (
+                  <li
+                    key={e.id}
+                    className="flex items-center justify-between gap-3 px-5 py-3"
+                  >
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <Badge
+                        variant={SEVERITY_VARIANT[e.severity] ?? "secondary"}
+                        className="shrink-0 capitalize"
+                      >
+                        {e.severity}
+                      </Badge>
+                      <span className="truncate text-sm font-medium">
+                        {e.event_type}
+                      </span>
+                    </div>
+                    <time className="shrink-0 whitespace-nowrap text-xs tabular-nums text-muted-foreground">
+                      {formatDateTime(e.created_at)}
+                    </time>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </section>
+
+        <section aria-labelledby="coverage-heading" className="space-y-3">
+          <h2
+            id="coverage-heading"
+            className="text-sm font-semibold tracking-tight"
+          >
+            Coverage
+          </h2>
+          <dl className="rounded-lg border bg-card">
+            <div className="flex items-center justify-between px-5 py-4">
+              <dt className="text-sm text-muted-foreground">
+                Leaders followed
+              </dt>
+              <dd className="text-base font-semibold tabular-nums">
+                {activeFollows}
+                {following.length !== activeFollows && (
+                  <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                    / {following.length}
                   </span>
-                </li>
-              ))}
-            </ul>
+                )}
+              </dd>
+            </div>
+            <div className="flex items-center justify-between border-t px-5 py-4">
+              <dt className="text-sm text-muted-foreground">Open positions</dt>
+              <dd className="text-base font-semibold tabular-nums">
+                {openPositions}
+              </dd>
+            </div>
+          </dl>
+          {following.length === 0 && (
+            <p className="text-xs text-muted-foreground">
+              Not following anyone yet. Vet candidates in Discovery, then
+              follow from Leaders.
+            </p>
           )}
-        </CardContent>
-      </Card>
+        </section>
+      </div>
     </div>
   );
 }

@@ -2,68 +2,82 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * PolyEcho design tokens — register: product, strategy: Restrained.
+ * shadcn `--token: H S% L%` mechanism kept; values retuned to DESIGN.md.
+ * Every neutral is tinted ~215deg (cool slate-azure). Never #000/#fff.
+ * PnL is the only extra saturated color and is always reinforced by
+ * sign + arrow + tabular figure (see components/pnl.tsx).
+ */
+
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --ring: 222.2 84% 4.9%;
+    --background: 215 30% 98%;
+    --foreground: 222 30% 13%;
+    --card: 215 36% 99%;
+    --card-foreground: 222 30% 13%;
+    --popover: 215 36% 99%;
+    --popover-foreground: 222 30% 13%;
+    --border: 215 20% 88%;
+    --input: 215 20% 88%;
+    --primary: 205 80% 41%;
+    --primary-foreground: 210 40% 99%;
+    --secondary: 215 24% 95%;
+    --secondary-foreground: 222 30% 13%;
+    --muted: 215 24% 95%;
+    --muted-foreground: 215 12% 42%;
+    --accent: 205 50% 93%;
+    --accent-foreground: 205 80% 26%;
+    --destructive: 8 68% 49%;
+    --destructive-foreground: 210 40% 99%;
+    --ring: 205 80% 45%;
     --radius: 0.5rem;
+    /* PnL semantics — reinforcement only, never the sole signal */
+    --gain: 158 62% 36%;
+    --loss: 8 68% 49%;
     /* Sidebar CSS vars */
-    --sidebar: 0 0% 98%;
-    --sidebar-foreground: 222.2 84% 4.9%;
-    --sidebar-primary: 222.2 47.4% 11.2%;
-    --sidebar-primary-foreground: 210 40% 98%;
-    --sidebar-accent: 210 40% 96.1%;
-    --sidebar-accent-foreground: 222.2 47.4% 11.2%;
-    --sidebar-border: 214.3 31.8% 91.4%;
-    --sidebar-ring: 222.2 84% 4.9%;
+    --sidebar: 215 28% 96%;
+    --sidebar-foreground: 222 30% 13%;
+    --sidebar-primary: 205 80% 41%;
+    --sidebar-primary-foreground: 210 40% 99%;
+    --sidebar-accent: 205 50% 93%;
+    --sidebar-accent-foreground: 205 80% 26%;
+    --sidebar-border: 215 20% 88%;
+    --sidebar-ring: 205 80% 45%;
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-    --ring: 212.7 26.8% 83.9%;
+    --background: 222 38% 8%;
+    --foreground: 215 22% 90%;
+    --card: 222 32% 11%;
+    --card-foreground: 215 22% 90%;
+    --popover: 222 32% 11%;
+    --popover-foreground: 215 22% 90%;
+    --border: 215 16% 22%;
+    --input: 215 16% 22%;
+    --primary: 200 74% 58%;
+    --primary-foreground: 222 40% 10%;
+    --secondary: 222 24% 16%;
+    --secondary-foreground: 215 22% 90%;
+    --muted: 222 24% 16%;
+    --muted-foreground: 215 14% 60%;
+    --accent: 205 40% 20%;
+    --accent-foreground: 205 60% 88%;
+    --destructive: 8 70% 62%;
+    --destructive-foreground: 222 40% 10%;
+    --ring: 200 74% 58%;
+    /* PnL semantics — reinforcement only, never the sole signal */
+    --gain: 158 52% 52%;
+    --loss: 8 70% 62%;
     /* Sidebar CSS vars dark */
-    --sidebar: 222.2 47.4% 8%;
-    --sidebar-foreground: 210 40% 98%;
-    --sidebar-primary: 210 40% 98%;
-    --sidebar-primary-foreground: 222.2 47.4% 11.2%;
-    --sidebar-accent: 217.2 32.6% 17.5%;
-    --sidebar-accent-foreground: 210 40% 98%;
-    --sidebar-border: 217.2 32.6% 17.5%;
-    --sidebar-ring: 212.7 26.8% 83.9%;
+    --sidebar: 222 34% 10%;
+    --sidebar-foreground: 215 22% 90%;
+    --sidebar-primary: 200 74% 58%;
+    --sidebar-primary-foreground: 222 40% 10%;
+    --sidebar-accent: 205 40% 20%;
+    --sidebar-accent-foreground: 205 60% 88%;
+    --sidebar-border: 215 16% 22%;
+    --sidebar-ring: 200 74% 58%;
   }
 }
 
@@ -73,5 +87,27 @@
   }
   body {
     @apply bg-background text-foreground;
+    /* anti-aliased rendering for Inter at the DESIGN.md scale */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  /* Tabular figures for every metric/price/score (DESIGN.md typography). */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  /* Motion: 150-220ms ease-out, no bounce; opacity/transform only.
+     Honor prefers-reduced-motion globally. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }

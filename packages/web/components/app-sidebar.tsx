@@ -50,12 +50,15 @@ export function AppSidebar() {
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader>
-        <div className="flex items-center gap-2 px-1 py-1">
+        <div className="flex flex-col gap-0.5 px-1 py-1">
           <span className="text-lg font-bold tracking-tight group-data-[collapsible=icon]:hidden">
             PolyEcho
           </span>
-          <span className="text-lg font-bold tracking-tight hidden group-data-[collapsible=icon]:block">
+          <span className="hidden text-lg font-bold tracking-tight group-data-[collapsible=icon]:block">
             PE
+          </span>
+          <span className="text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
+            跟單，是延遲的回聲
           </span>
         </div>
       </SidebarHeader>
@@ -64,7 +67,7 @@ export function AppSidebar() {
         <SidebarGroup>
           <SidebarGroupLabel>Navigation</SidebarGroupLabel>
           <SidebarGroupContent>
-            <SidebarMenu>
+            <SidebarMenu aria-label="Primary navigation">
               {navItems.map(({ href, label, icon: Icon }) => {
                 const isActive = isNavItemActive(pathname, href);
                 return (
@@ -74,8 +77,11 @@ export function AppSidebar() {
                       isActive={isActive}
                       tooltip={label}
                     >
-                      <Link href={href}>
-                        <Icon />
+                      <Link
+                        href={href}
+                        aria-current={isActive ? "page" : undefined}
+                      >
+                        <Icon aria-hidden="true" />
                         <span>{label}</span>
                       </Link>
                     </SidebarMenuButton>
@@ -89,7 +95,7 @@ export function AppSidebar() {
 
       <SidebarFooter>
         <div className="px-2 py-1 text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
-          v0.3 · localhost only
+          v0.3 · 127.0.0.1 only
         </div>
       </SidebarFooter>
 
