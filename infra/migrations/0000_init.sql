@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS candidate_leaders (
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS candidate_score_history (
   wallet_address  TEXT        NOT NULL,
-  date            TEXT        NOT NULL, -- ISO date string YYYY-MM-DD
+  date            DATE        NOT NULL, -- Postgres DATE — matches SQLAlchemy Date model
   total_score     NUMERIC(6,2),
   rank            INTEGER,
   stats           JSONB,
@@ -148,8 +148,8 @@ CREATE TABLE IF NOT EXISTS backtest_jobs (
   id                       UUID        NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
   leader_addresses         TEXT[]      NOT NULL,
   template_params          JSONB,
-  start_date               TEXT        NOT NULL, -- ISO date string
-  end_date                 TEXT        NOT NULL,
+  start_date               DATE        NOT NULL,
+  end_date                 DATE        NOT NULL,
   initial_capital_usd      NUMERIC(14,2),
   slippage_bps             INTEGER     DEFAULT 150,
   execution_delay_seconds  INTEGER     DEFAULT 30,

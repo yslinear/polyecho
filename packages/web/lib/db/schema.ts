@@ -7,6 +7,7 @@ import {
   pgTable,
   uuid,
   text,
+  date,
   integer,
   boolean,
   jsonb,
@@ -78,7 +79,7 @@ export const candidateScoreHistory = pgTable(
   "candidate_score_history",
   {
     wallet_address: text("wallet_address").notNull(),
-    date: text("date").notNull(), // ISO date string YYYY-MM-DD
+    date: date("date").notNull(), // Postgres DATE — matches SQLAlchemy Date model
     total_score: numeric("total_score", { precision: 6, scale: 2 }),
     rank: integer("rank"),
     stats: jsonb("stats"),
@@ -186,8 +187,8 @@ export const backtestJobs = pgTable("backtest_jobs", {
   id: uuid("id").defaultRandom().primaryKey(),
   leader_addresses: text("leader_addresses").array().notNull(),
   template_params: jsonb("template_params"),
-  start_date: text("start_date").notNull(), // ISO date string
-  end_date: text("end_date").notNull(),
+  start_date: date("start_date").notNull(), // Postgres DATE — matches SQLAlchemy Date model
+  end_date: date("end_date").notNull(),
   initial_capital_usd: numeric("initial_capital_usd", {
     precision: 14,
     scale: 2,
