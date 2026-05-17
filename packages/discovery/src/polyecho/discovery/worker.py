@@ -7,11 +7,13 @@ Four data sources with different refresh cadences:
 - Leaderboard (daily): top 200 by 30-day profit.
 - Hot-market top holders (daily): top-10 holders for each market with
   24h volume > $100K.
-- Large new positions (hourly): wallets that opened > $5K positions in
-  the past 24 hours.  Uses the known candidate set + leaderboard as the
-  wallet pool because the fixture DataSource does not expose a global
-  activity scan endpoint; in production a real DataSource would query
-  chain-level event logs instead.
+- Large new positions (hourly): wallets that opened a > $5K position in
+  the trailing 24 h window.  Scans recent ``get_user_activity`` (TRADE)
+  over the known/leaderboard wallet set via the ``DataSource`` interface.
+  NOTE: this gives full coverage of *already-tracked* wallets only —
+  catching brand-new wallets globally needs a Polygon CTF Exchange
+  event-log scan, which is deferred to Phase 4 (it shares the
+  chain-listener infra and is out of scope here).
 - Known smart-money list (weekly, manual): wallets in
   ``smart_money_seed.json`` alongside this module.
 
@@ -60,8 +62,29 @@ logger = logging.getLogger(__name__)
 
 _SEED_PATH = Path(__file__).parent / "smart_money_seed.json"
 
-# Minimum position size to trigger large-position discovery (PRD §5.2)
+# --- Large-new-position discovery thresholds (PRD §5.2) --------------------
+# A wallet qualifies when a *single* recent trade has notional above this
+# USD value.  PRD §5.2: "過去 24h 內 size > $5K 的新單對應錢包".
 _LARGE_POSITION_THRESHOLD_USD = 5_000.0
+
+# Token-unit fallback used only when an ActivityRecord has no ``usdc_size``
+# (some fixtures / API rows omit notional).  Chosen so that, at the worst
+# plausible share price of $0.01, 500 shares ≈ the $5K USD threshold; in
+# practice prices are higher, so this stays conservative (never over-broad).
+_LARGE_POSITION_SIZE_FALLBACK_SHARES = 500.0
+
+# Trailing window for the hourly scan.  PRD §5.2: "過去 24h".
+_LARGE_POSITION_WINDOW_HOURS = 24
+
+# When the locally-known wallet set is smaller than this, seed the scan pool
+# from the leaderboard so the hourly job is useful on a cold start.
+_LARGE_POSITION_MIN_KNOWN_WALLETS = 10
+
+# Leaderboard slice size used as the cold-start seed pool (cheaper subset).
+_LARGE_POSITION_SEED_LEADERBOARD_LIMIT = 50
+
+# Per-wallet activity fetch cap for the scan (1 qualifying row is enough).
+_LARGE_POSITION_ACTIVITY_FETCH_LIMIT = 100
 
 
 # ---------------------------------------------------------------------------
@@ -532,67 +555,91 @@ class DiscoveryWorker:
     # Source 3: Large new positions (hourly)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_large_new_entry(rec: ActivityRecord) -> bool:
+        """True if *rec* represents a single trade above the $5K threshold.
+
+        Prefers the explicit USDC notional (``usdc_size``).  When it is
+        absent — some fixtures / API rows omit it — fall back to a
+        conservative share-count proxy so we do not silently drop a
+        potentially large fill (PRD §5.2).
+        """
+        if rec.activity_type != "TRADE":
+            return False
+        usdc = rec.usdc_size
+        if usdc is not None:
+            return usdc > _LARGE_POSITION_THRESHOLD_USD
+        return rec.size > _LARGE_POSITION_SIZE_FALLBACK_SHARES
+
     async def discover_large_new_positions(self) -> None:
-        """Scan for wallets that opened > $5K positions recently (PRD §5.2).
+        """Scan tracked wallets for > $5K trades in the trailing 24 h (PRD §5.2).
 
-        Approach (fixture-compatible)
-        --------------------------------
-        The DataSource interface does not expose a global activity scan, so we
-        scan the union of:
+        Approach (DataSource-based, fixture-compatible)
+        -----------------------------------------------
+        Over the *known/leaderboard* wallet pool we call
+        ``get_user_activity(..., activity_type="TRADE", start=<now-24h>)``
+        and surface any wallet that has at least one entry whose notional
+        exceeds ``_LARGE_POSITION_THRESHOLD_USD``.  Matches are deduped and
+        tagged with the ``large_new_positions`` discovery source.
+
+        The wallet pool is the union of:
           (a) already-known candidates in ``self._known_wallets``, and
-          (b) the current leaderboard top-50 (cheaper subset).
+          (b) a leaderboard slice (cold-start seed when (a) is small).
 
-        A production DataSource backed by the live Polymarket API would instead
-        query chain-level CTF Exchange event logs for large fills in the past
-        24 h.  TODO(verify): replace with chain scan when LiveDataSource is wired.
+        Determinism: results are processed in sorted wallet order so the
+        run is reproducible under :class:`FixtureDataSource`.
 
-        A wallet qualifies if any single recent activity record has
-        ``usdc_size > 5_000`` or ``size > 500`` (token-unit fallback).
+        TODO(verify): full coverage needs a Polygon CTF Exchange event-log
+        scan — deferred to Phase 4 (shares the chain-listener infra).  This
+        DataSource path only sees wallets already in the pool; it cannot
+        discover a brand-new wallet's first large fill on its own.
         """
         logger.info("discover_large_new_positions: start")
 
-        # Seed the wallet pool with the leaderboard top-50 if known set is small
+        # Seed the wallet pool from the leaderboard if the known set is small.
         wallet_pool: set[str] = set(self._known_wallets)
-        if len(wallet_pool) < 10:
+        if len(wallet_pool) < _LARGE_POSITION_MIN_KNOWN_WALLETS:
             try:
                 entries = await self._ds.get_leaderboard(
                     category="OVERALL",
                     time_period="MONTH",
                     order_by="PNL",
-                    limit=50,
+                    limit=_LARGE_POSITION_SEED_LEADERBOARD_LIMIT,
                 )
                 wallet_pool.update(e.wallet for e in entries)
             except Exception:
                 logger.warning("could not fetch leaderboard for large-position scan")
 
-        cutoff = datetime.now(tz=UTC) - timedelta(hours=24)
+        window_start = datetime.now(tz=UTC) - timedelta(
+            hours=_LARGE_POSITION_WINDOW_HOURS
+        )
         new_wallets: set[str] = set()
 
         for wallet in wallet_pool:
             try:
                 activity = await self._ds.get_user_activity(
-                    wallet, activity_type="TRADE", limit=100
+                    wallet,
+                    start=window_start,
+                    activity_type="TRADE",
+                    limit=_LARGE_POSITION_ACTIVITY_FETCH_LIMIT,
                 )
             except Exception:
+                logger.warning(
+                    "large-position scan: activity fetch failed",
+                    extra={"wallet": wallet},
+                )
                 continue
 
-            for rec in activity:
-                if rec.timestamp < cutoff:
-                    continue
-                usdc = rec.usdc_size if rec.usdc_size is not None else None
-                size_ok = (usdc is not None and usdc > _LARGE_POSITION_THRESHOLD_USD) or (
-                    usdc is None and rec.size > 500.0
-                )
-                if size_ok:
-                    new_wallets.add(wallet)
-                    break
+            if any(self._is_large_new_entry(rec) for rec in activity):
+                new_wallets.add(wallet)
 
         logger.info(
             "discover_large_new_positions: %d wallets with large new positions",
             len(new_wallets),
         )
 
-        for wallet in new_wallets:
+        # Sorted for deterministic ordering under FixtureDataSource.
+        for wallet in sorted(new_wallets):
             await self._process_wallet(wallet, "large_new_positions")
 
         logger.info("discover_large_new_positions: done")

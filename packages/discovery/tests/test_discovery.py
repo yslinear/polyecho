@@ -1265,6 +1265,263 @@ class TestUpsertCandidateBehaviour:
         assert existing.user_status == "rejected"
 
 
+class _StubLeaderboardEntry:
+    """Minimal stand-in for LeaderboardEntry (only ``.wallet`` is read)."""
+
+    def __init__(self, wallet: str) -> None:
+        self.wallet = wallet
+        self.username = None
+
+
+class _LargePositionStubDS:
+    """Deterministic DataSource stub for discover_large_new_positions tests.
+
+    ``activity_by_wallet`` maps wallet -> list[ActivityRecord]; the stub
+    honours the ``start`` window and ``activity_type`` filters exactly as
+    the frozen protocol specifies so the worker's window logic is exercised.
+    """
+
+    def __init__(
+        self,
+        activity_by_wallet: dict[str, list[ActivityRecord]],
+        leaderboard_wallets: list[str] | None = None,
+    ) -> None:
+        self._activity = activity_by_wallet
+        self._lb = leaderboard_wallets or []
+        self.activity_calls: list[tuple[str, datetime | None, str | None]] = []
+
+    async def get_leaderboard(
+        self,
+        *,
+        category: str = "OVERALL",
+        time_period: str = "MONTH",
+        order_by: str = "PNL",
+        limit: int = 200,
+    ) -> list[Any]:
+        return [_StubLeaderboardEntry(w) for w in self._lb[:limit]]
+
+    async def get_user_activity(
+        self,
+        wallet: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        activity_type: str | None = "TRADE",
+        limit: int | None = None,
+    ) -> list[ActivityRecord]:
+        self.activity_calls.append((wallet, start, activity_type))
+        rows = list(self._activity.get(wallet, []))
+        if activity_type is not None:
+            rows = [r for r in rows if r.activity_type == activity_type]
+        if start is not None:
+            rows = [r for r in rows if r.timestamp >= start]
+        if end is not None:
+            rows = [r for r in rows if r.timestamp <= end]
+        return rows[:limit] if limit is not None else rows
+
+    async def get_positions(
+        self, wallet: str, *, size_threshold: float = 1.0
+    ) -> list[PositionRecord]:
+        return []
+
+
+class TestDiscoverLargeNewPositions:
+    """§5.2 — large-new-position (hourly) discovery via DataSource scan."""
+
+    def test_wallet_with_recent_large_entry_is_detected(self) -> None:
+        big = _make_record(
+            wallet=W_SWING, usdc_size=7_500.0,
+            ts=datetime.now(tz=UTC) - timedelta(hours=2),
+        )
+        ds = _LargePositionStubDS({W_SWING: [big]})
+        processed: list[tuple[str, str]] = []
+
+        async def _run() -> None:
+            worker = DiscoveryWorker(ds, follower_capital_usd=1000.0)  # type: ignore[arg-type]
+            worker._known_wallets = {W_SWING}
+
+            async def _fake_process(w: str, s: str, **kw: Any) -> None:
+                processed.append((w, s))
+
+            with patch.object(worker, "_process_wallet", _fake_process):
+                await worker.discover_large_new_positions()
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert processed == [(W_SWING, "large_new_positions")]
+
+    def test_sub_threshold_and_old_entries_excluded(self) -> None:
+        sub = _make_record(
+            wallet=W_SWING, usdc_size=4_999.0,
+            ts=datetime.now(tz=UTC) - timedelta(hours=1),
+        )
+        old_big = _make_record(
+            wallet=W_SCALPER, usdc_size=50_000.0,
+            ts=datetime.now(tz=UTC) - timedelta(hours=48),  # outside 24h window
+        )
+        ds = _LargePositionStubDS({W_SWING: [sub], W_SCALPER: [old_big]})
+        processed: list[str] = []
+
+        async def _run() -> None:
+            worker = DiscoveryWorker(ds, follower_capital_usd=1000.0)  # type: ignore[arg-type]
+            worker._known_wallets = {W_SWING, W_SCALPER}
+
+            async def _fake_process(w: str, s: str, **kw: Any) -> None:
+                processed.append(w)
+
+            with patch.object(worker, "_process_wallet", _fake_process):
+                await worker.discover_large_new_positions()
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert processed == []
+
+    def test_size_fallback_when_no_usdc_size(self) -> None:
+        # No usdc_size -> share-count fallback (>500 shares qualifies).
+        rec = _make_record(
+            wallet=W_SWING, usdc_size=None, size=600.0,
+            ts=datetime.now(tz=UTC) - timedelta(hours=3),
+        )
+        small = _make_record(
+            wallet=W_SCALPER, usdc_size=None, size=10.0,
+            ts=datetime.now(tz=UTC) - timedelta(hours=3),
+        )
+        ds = _LargePositionStubDS({W_SWING: [rec], W_SCALPER: [small]})
+        processed: list[str] = []
+
+        async def _run() -> None:
+            worker = DiscoveryWorker(ds, follower_capital_usd=1000.0)  # type: ignore[arg-type]
+            worker._known_wallets = {W_SWING, W_SCALPER}
+
+            async def _fake_process(w: str, s: str, **kw: Any) -> None:
+                processed.append(w)
+
+            with patch.object(worker, "_process_wallet", _fake_process):
+                await worker.discover_large_new_positions()
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert processed == [W_SWING]
+
+    def test_dedupe_multiple_large_entries_single_process_call(self) -> None:
+        recs = [
+            _make_record(
+                wallet=W_SWING, usdc_size=6_000.0,
+                ts=datetime.now(tz=UTC) - timedelta(hours=h),
+            )
+            for h in (1, 2, 3)
+        ]
+        ds = _LargePositionStubDS({W_SWING: recs})
+        processed: list[str] = []
+
+        async def _run() -> None:
+            worker = DiscoveryWorker(ds, follower_capital_usd=1000.0)  # type: ignore[arg-type]
+            worker._known_wallets = {W_SWING}
+
+            async def _fake_process(w: str, s: str, **kw: Any) -> None:
+                processed.append(w)
+
+            with patch.object(worker, "_process_wallet", _fake_process):
+                await worker.discover_large_new_positions()
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert processed == [W_SWING]  # 3 big trades -> exactly 1 process call
+
+    def test_deterministic_sorted_processing_order(self) -> None:
+        ts = datetime.now(tz=UTC) - timedelta(hours=1)
+        ds = _LargePositionStubDS(
+            {
+                W_SWING: [_make_record(wallet=W_SWING, usdc_size=9_000.0, ts=ts)],
+                W_SCALPER: [_make_record(wallet=W_SCALPER, usdc_size=9_000.0, ts=ts)],
+                W_INSIDER: [_make_record(wallet=W_INSIDER, usdc_size=9_000.0, ts=ts)],
+            }
+        )
+        order: list[str] = []
+
+        async def _run() -> None:
+            worker = DiscoveryWorker(ds, follower_capital_usd=1000.0)  # type: ignore[arg-type]
+            worker._known_wallets = {W_SWING, W_SCALPER, W_INSIDER}
+
+            async def _fake_process(w: str, s: str, **kw: Any) -> None:
+                order.append(w)
+
+            with patch.object(worker, "_process_wallet", _fake_process):
+                await worker.discover_large_new_positions()
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert order == sorted([W_SWING, W_SCALPER, W_INSIDER])
+
+    def test_cold_start_seeds_from_leaderboard(self) -> None:
+        # known set empty -> must pull leaderboard slice as the pool.
+        big = _make_record(
+            wallet=W_SWING, usdc_size=8_000.0,
+            ts=datetime.now(tz=UTC) - timedelta(hours=1),
+        )
+        ds = _LargePositionStubDS(
+            {W_SWING: [big]}, leaderboard_wallets=[W_SWING, W_SCALPER]
+        )
+        processed: list[str] = []
+
+        async def _run() -> None:
+            worker = DiscoveryWorker(ds, follower_capital_usd=1000.0)  # type: ignore[arg-type]
+            # _known_wallets intentionally empty -> triggers leaderboard seed
+
+            async def _fake_process(w: str, s: str, **kw: Any) -> None:
+                processed.append(w)
+
+            with patch.object(worker, "_process_wallet", _fake_process):
+                await worker.discover_large_new_positions()
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert processed == [W_SWING]
+
+    def test_window_start_passed_to_datasource(self) -> None:
+        """The 24h trailing window must be pushed down to get_user_activity."""
+        ds = _LargePositionStubDS({W_SWING: []})
+
+        async def _run() -> None:
+            worker = DiscoveryWorker(ds, follower_capital_usd=1000.0)  # type: ignore[arg-type]
+            worker._known_wallets = {W_SWING}
+
+            async def _fake_process(w: str, s: str, **kw: Any) -> None:
+                pass
+
+            with patch.object(worker, "_process_wallet", _fake_process):
+                await worker.discover_large_new_positions()
+
+        before = datetime.now(tz=UTC) - timedelta(hours=24)
+        asyncio.get_event_loop().run_until_complete(_run())
+        after = datetime.now(tz=UTC) - timedelta(hours=24)
+        assert ds.activity_calls, "get_user_activity was not called"
+        _, start, atype = ds.activity_calls[0]
+        assert atype == "TRADE"
+        assert start is not None
+        # start ≈ now-24h (allow a small wall-clock delta around the call)
+        assert before - timedelta(seconds=5) <= start <= after + timedelta(seconds=5)
+
+    def test_full_pipeline_smoke_with_fixture_ds(self) -> None:
+        """End-to-end with the real FixtureDataSource + mocked DB session."""
+
+        async def _run() -> None:
+            ds = FixtureDataSource()
+            worker = DiscoveryWorker(ds, follower_capital_usd=1000.0)
+            worker._known_wallets = {W_SWING, W_SCALPER}
+
+            with patch("polyecho.discovery.worker.session_scope") as mock_scope:
+                sess = AsyncMock()
+                sess.execute = AsyncMock(
+                    return_value=MagicMock(
+                        scalar_one_or_none=MagicMock(return_value=None)
+                    )
+                )
+                mock_scope.return_value.__aenter__ = AsyncMock(return_value=sess)
+                mock_scope.return_value.__aexit__ = AsyncMock(return_value=False)
+                sess.add = MagicMock()
+
+                # Must not raise; behaviour is deterministic over fixtures.
+                await worker.discover_large_new_positions()
+                await worker.discover_large_new_positions()
+
+        asyncio.get_event_loop().run_until_complete(_run())
+
+
 # ---------------------------------------------------------------------------
 # §6 — Worker pipeline smoke test (end-to-end with mocked DB)
 # ---------------------------------------------------------------------------
