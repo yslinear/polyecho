@@ -31,7 +31,7 @@ export default async function DiscoveryPage() {
         <div>
           <h1 className="text-3xl font-bold">Discovery</h1>
           <p className="text-muted-foreground mt-1">
-            Candidate leader pool — {rows.length} leaders
+            Candidate leader pool
           </p>
         </div>
         <Link
