@@ -1,0 +1,42 @@
+# Keep build context small and reproducible — never ship host build artifacts.
+# (Without this, COPY packages/web/ would clobber image-installed deps with
+#  host node_modules/.next and bloat the image.)
+
+# Node / Next.js
+node_modules/
+**/node_modules/
+packages/web/.next/
+packages/web/out/
+packages/web/next-env.d.ts
+.pnpm-store/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Env & secrets — never bake into images
+.env
+.env.local
+.env.*.local
+*.pem
+secrets/
+
+# VCS / CI / docs
+.git/
+.github/
+docs/
+
+# OS / editors
+.DS_Store
+*.swp
+.idea/
+.vscode/

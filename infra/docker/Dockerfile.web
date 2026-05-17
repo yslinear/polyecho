@@ -12,11 +12,14 @@ RUN corepack enable
 
 WORKDIR /workspace
 
-# Copy workspace manifests for efficient layer caching
+# Copy workspace manifests + lockfile for efficient, reproducible layer caching
 COPY package.json pnpm-workspace.yaml ./
+# pnpm-lock.yaml is committed (see .gitignore) — copy it so installs are frozen
+COPY pnpm-lock.yaml* ./
 COPY packages/web/package.json packages/web/package.json
 
-# Install all dependencies (including devDependencies needed for build)
+# Install all dependencies (including devDependencies needed for build).
+# Lockfile present → reproducible frozen install; fall back if absent.
 RUN pnpm install --frozen-lockfile 2>/dev/null || pnpm install
 
 # ── Stage 2: builder ──────────────────────────────────────────────────────────
@@ -26,9 +29,13 @@ RUN corepack enable
 
 WORKDIR /workspace
 
-# Bring in installed node_modules
+# Bring in the installed workspace node_modules from the deps stage.
+# pnpm creates both /workspace/node_modules (virtual store) and
+# /workspace/packages/web/node_modules (symlinks into it); copy the whole
+# deps tree so the symlink graph stays intact. A Dockerfile COPY is NOT a
+# shell, so `2>/dev/null || true` cannot be used here.
 COPY --from=deps /workspace/node_modules ./node_modules
-COPY --from=deps /workspace/packages/web/node_modules ./packages/web/node_modules 2>/dev/null || true
+COPY --from=deps /workspace/packages/web/node_modules ./packages/web/node_modules
 
 # Copy full source (Next.js needs config files, app/, components/, lib/, public/)
 COPY package.json pnpm-workspace.yaml ./
@@ -36,6 +43,13 @@ COPY packages/web/ packages/web/
 
 # Build Next.js with standalone output (PRD §10 / next.config requires output:'standalone')
 ENV NEXT_TELEMETRY_DISABLED=1
+# Build-time-only dummy DB URL: lib/env.ts validates POLYECHO_DB_URL_DRIZZLE at
+# module load, which Next.js triggers during page-data collection. No DB is
+# reachable at image-build time (mirrors ci.yml's web job env). The real URL is
+# injected at runtime via docker-compose env_file — this value is NOT carried
+# into the runtime stage below.
+ARG POLYECHO_DB_URL_DRIZZLE="postgresql://build:build@localhost:5432/build"
+ENV POLYECHO_DB_URL_DRIZZLE=${POLYECHO_DB_URL_DRIZZLE}
 RUN pnpm --filter @polyecho/web build
 
 # ── Stage 3: runtime ──────────────────────────────────────────────────────────

@@ -36,7 +36,9 @@ services:
       # Isolate uv venv from host
       - dev_venv:/workspace/.venv
     working_dir: /workspace
-    env_file: ../.env
+    env_file:
+      - path: ../.env
+        required: false
     environment:
       - POLYECHO_DB_URL=postgresql+asyncpg://polyecho:polyecho@db:5432/polyecho
       - POLYECHO_DB_URL_DRIZZLE=postgresql://polyecho:polyecho@db:5432/polyecho

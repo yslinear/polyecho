@@ -19,7 +19,9 @@ x-python-build: &python-build
   dockerfile: infra/docker/Dockerfile.python
 
 x-python-defaults: &python-defaults
-  env_file: ../.env
+  env_file:
+    - path: ../.env
+      required: false
   depends_on:
     db:
       condition: service_healthy
@@ -86,7 +88,9 @@ services:
       context: ..
       dockerfile: infra/docker/Dockerfile.web
     container_name: dashboard-web
-    env_file: ../.env
+    env_file:
+      - path: ../.env
+        required: false
     depends_on:
       db:
         condition: service_healthy
@@ -102,7 +106,9 @@ services:
       context: ..
       dockerfile: infra/docker/Dockerfile.cli
     container_name: polyecho-cli
-    env_file: ../.env
+    env_file:
+      - path: ../.env
+        required: false
     depends_on:
       db:
         condition: service_healthy
