@@ -11,10 +11,12 @@ Table → PRD purpose summary
 * :class:`Account`                — your own Polymarket wallets (PRD §5.1)
 * :class:`CandidateLeader`        — discovered leader pool (PRD §5.2)
 * :class:`CandidateScoreHistory`  — daily score snapshots for trending (PRD §5.2)
+* :class:`CopySkip`               — queryable skip/error log (brief §7)
 * :class:`CopyTemplate`           — risk / copy-ratio presets (PRD §5.6)
 * :class:`FollowRelation`         — active leader → account → template links (PRD §5.5)
 * :class:`LeaderTrade`            — cached leader on-chain trades (PRD §5.5)
 * :class:`MyTrade`                — your own copy-trades (PRD §5.5)
+* :class:`RedeemJob`              — durable claim-winnings queue (brief §9)
 * :class:`Setting`                — key/value store for runtime config (PRD §5.7)
 * :class:`BacktestJob`            — backtest task queue (PRD §5.4)
 * :class:`PendingAction`          — dangerous operations awaiting confirmation (PRD §5.7)
@@ -26,6 +28,7 @@ from polyecho.shared.models.account import Account
 from polyecho.shared.models.backtest_job import BacktestJob
 from polyecho.shared.models.candidate_leader import CandidateLeader
 from polyecho.shared.models.candidate_score_history import CandidateScoreHistory
+from polyecho.shared.models.copy_skip import CopySkip
 from polyecho.shared.models.copy_template import CopyTemplate
 from polyecho.shared.models.event import Event
 from polyecho.shared.models.follow_relation import FollowRelation
@@ -33,6 +36,7 @@ from polyecho.shared.models.leader_trade import LeaderTrade
 from polyecho.shared.models.my_trade import MyTrade
 from polyecho.shared.models.pending_action import PendingAction
 from polyecho.shared.models.push_subscription import PushSubscription
+from polyecho.shared.models.redeem_job import RedeemJob
 from polyecho.shared.models.setting import Setting
 
 __all__ = [
@@ -40,6 +44,7 @@ __all__ = [
     "BacktestJob",
     "CandidateLeader",
     "CandidateScoreHistory",
+    "CopySkip",
     "CopyTemplate",
     "Event",
     "FollowRelation",
@@ -47,5 +52,6 @@ __all__ = [
     "MyTrade",
     "PendingAction",
     "PushSubscription",
+    "RedeemJob",
     "Setting",
 ]

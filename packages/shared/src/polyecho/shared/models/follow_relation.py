@@ -40,10 +40,18 @@ class FollowRelation(Base):
         nullable=False,
     )
     # active | paused
-    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="active", index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     paused_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Per-leader reconcile cursor (brief §7): the last activity timestamp
+    # reconciled from the Data API, so a WS gap / restart can backfill
+    # missed trades instead of losing them. NULL = never reconciled yet.
+    last_seen_ts: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

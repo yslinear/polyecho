@@ -3,9 +3,11 @@ import { getTableName, getTableColumns } from "drizzle-orm";
 import * as schema from "@/lib/db/schema";
 
 /**
- * Drizzle schema must mirror PRD §6.1: all 12 tables exported with the
- * expected physical table name and key columns. We assert the column
- * data type via the Drizzle SQL type string so a schema drift breaks CI.
+ * Drizzle schema must mirror PRD §6.1 + the Phase-4 W1 additions
+ * (redeem_jobs, copy_skips — PolyHermes brief §9/§7): all 14 tables
+ * exported with the expected physical table name and key columns. We
+ * assert the column data type via the Drizzle SQL type string so a schema
+ * drift breaks CI.
  */
 
 const EXPECTED_TABLES: Record<string, string> = {
@@ -21,10 +23,13 @@ const EXPECTED_TABLES: Record<string, string> = {
   pendingActions: "pending_actions",
   pushSubscriptions: "push_subscriptions",
   events: "events",
+  // Phase-4 W1 (PolyHermes brief §9/§7)
+  redeemJobs: "redeem_jobs",
+  copySkips: "copy_skips",
 };
 
 describe("lib/db/schema — table inventory", () => {
-  it("exports exactly the 12 PRD tables", () => {
+  it("exports exactly the 14 schema tables", () => {
     const exportedTables = Object.keys(schema).filter((k) => {
       try {
         getTableName(
@@ -38,7 +43,7 @@ describe("lib/db/schema — table inventory", () => {
       }
     });
     expect(exportedTables.sort()).toEqual(Object.keys(EXPECTED_TABLES).sort());
-    expect(exportedTables).toHaveLength(12);
+    expect(exportedTables).toHaveLength(14);
   });
 
   it.each(Object.entries(EXPECTED_TABLES))(

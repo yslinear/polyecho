@@ -20,6 +20,11 @@ CREATE TABLE IF NOT EXISTS accounts (
   eoa_address          TEXT        NOT NULL UNIQUE,
   funder_address       TEXT,
   signature_type       INTEGER,
+  -- Practical wallet identity (brief §6/§9): eoa | magic | safe | poly_1271.
+  -- Proxy/funder is the on-chain identity; this makes the mode explicit
+  -- when not derivable from signature_type. resolve_wallet() fails closed
+  -- on unknown.
+  wallet_mode          TEXT,
   -- AES-256-GCM encrypted; held only by trader-core process
   encrypted_private_key TEXT,
   -- pending_key_import | ready | disabled
@@ -94,7 +99,10 @@ CREATE TABLE IF NOT EXISTS follow_relations (
   -- active | paused
   status         TEXT        NOT NULL DEFAULT 'active',
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  paused_at      TIMESTAMPTZ
+  paused_at      TIMESTAMPTZ,
+  -- Per-leader reconcile cursor (brief §7): last Data-API activity ts
+  -- reconciled, so a WS gap / restart backfills missed trades.
+  last_seen_ts   TIMESTAMPTZ
 );
 
 -- ---------------------------------------------------------------------------
@@ -110,7 +118,11 @@ CREATE TABLE IF NOT EXISTS leader_trades (
   size           NUMERIC(20,6),
   price          NUMERIC(10,6),
   timestamp      TIMESTAMPTZ,
-  raw            JSONB
+  -- Cross-source dedup key (brief §3): txHash is THE idempotency anchor
+  -- across the WS-user-channel path and the on-chain RPC cross-check.
+  tx_hash        TEXT,
+  raw            JSONB,
+  CONSTRAINT uq_leader_trades_leader_tx UNIQUE (leader_address, tx_hash)
 );
 
 -- ---------------------------------------------------------------------------
@@ -128,6 +140,10 @@ CREATE TABLE IF NOT EXISTS my_trades (
   -- pending | filled | rejected | partial
   fill_status      TEXT        NOT NULL DEFAULT 'pending',
   pnl_usd          NUMERIC(14,4),
+  -- FIFO sell-match accounting (brief §3/§5): matched_qty = qty consumed
+  -- by later sells; remaining_qty = unmatched BUY qty for FIFO exits.
+  matched_qty      NUMERIC(20,6),
+  remaining_qty    NUMERIC(20,6),
   opened_at        TIMESTAMPTZ,
   closed_at        TIMESTAMPTZ
 );
@@ -199,6 +215,46 @@ CREATE TABLE IF NOT EXISTS events (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ---------------------------------------------------------------------------
+-- redeem_jobs — durable claim-winnings queue (PolyHermes brief §9)
+-- Idempotent on (account_id, condition_id, outcome_index); survives restart
+-- so a resolved position is never double-redeemed (improves on PolyHermes'
+-- in-memory-only redeem dedup).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS redeem_jobs (
+  id            UUID        NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+  account_id    UUID        NOT NULL REFERENCES accounts(id),
+  condition_id  TEXT,
+  outcome_index INTEGER,
+  -- 2**outcome_index bitmask passed to CTF.redeemPositions (brief §9).
+  index_set     INTEGER,
+  is_neg_risk   BOOLEAN,
+  -- pending | submitted | confirmed | failed
+  status        TEXT        NOT NULL DEFAULT 'pending',
+  tx_hash       TEXT,
+  detected_at   TIMESTAMPTZ,
+  confirmed_at  TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT uq_redeem_jobs_account_condition_outcome
+    UNIQUE (account_id, condition_id, outcome_index)
+);
+
+-- ---------------------------------------------------------------------------
+-- copy_skips — queryable skip/error log w/ reason taxonomy (brief §7)
+-- PolyHermes only surfaces failures via Telegram (ephemeral); PolyEcho
+-- persists every skip/reject with a stable SkipReason for historical "why".
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS copy_skips (
+  id             BIGINT      NOT NULL GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  leader_address TEXT,
+  condition_id   TEXT,
+  -- One of polyecho.shared.copytrading.SkipReason (StrEnum value).
+  skip_reason    TEXT        NOT NULL,
+  detail         TEXT,
+  payload        JSONB,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- =============================================================================
 -- Indexes — hot query paths
 -- =============================================================================
@@ -233,3 +289,15 @@ CREATE INDEX IF NOT EXISTS idx_events_pushed_at_null
 -- pending_actions: expiry sweep
 CREATE INDEX IF NOT EXISTS idx_pending_actions_status_expires_at
   ON pending_actions (status, expires_at);
+
+-- follow_relations: trader-core scans active relations on every tick (brief §7)
+CREATE INDEX IF NOT EXISTS idx_follow_relations_status
+  ON follow_relations (status);
+
+-- redeem_jobs: worker polls pending/submitted jobs (brief §9)
+CREATE INDEX IF NOT EXISTS idx_redeem_jobs_status
+  ON redeem_jobs (status);
+
+-- copy_skips: dashboard/CLI queries recent skips chronologically (brief §7)
+CREATE INDEX IF NOT EXISTS idx_copy_skips_created_at
+  ON copy_skips (created_at);

@@ -38,6 +38,12 @@ class Account(Base):
     eoa_address: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     funder_address: Mapped[str | None] = mapped_column(Text, nullable=True)
     signature_type: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Practical wallet identity (brief §6/§9): eoa | magic | safe |
+    # poly_1271. The proxy/funder address is the on-chain identity; this
+    # column makes the mode explicit when it is not derivable from
+    # signature_type alone. Nullable for legacy rows — resolve_wallet()
+    # falls back to mapping signature_type and fails closed on unknown.
+    wallet_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
     encrypted_private_key: Mapped[bytes | None] = mapped_column(
         LargeBinary, nullable=True
     )

@@ -48,6 +48,15 @@ class MyTrade(Base):
     fill_status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     pnl_usd: Mapped[float | None] = mapped_column(Numeric(14, 4), nullable=True)
 
+    # FIFO sell-match accounting (brief §3/§5): on a SELL, shares are
+    # matched against unmatched BUY rows keyed (account, condition,
+    # outcome). ``matched_qty`` = qty already consumed by later sells;
+    # ``remaining_qty`` = unmatched BUY qty still available for FIFO.
+    matched_qty: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
+    remaining_qty: Mapped[float | None] = mapped_column(
+        Numeric(20, 6), nullable=True
+    )
+
     opened_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

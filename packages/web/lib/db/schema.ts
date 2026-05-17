@@ -15,6 +15,8 @@ import {
   bigserial,
   timestamp,
   primaryKey,
+  unique,
+  index,
 } from "drizzle-orm/pg-core";
 
 // ---------------------------------------------------------------------------
@@ -27,6 +29,8 @@ export const accounts = pgTable("accounts", {
   funder_address: text("funder_address"),
   /** 0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE, 3=POLY_1271 */
   signature_type: integer("signature_type"),
+  /** eoa | magic | safe | poly_1271 — practical wallet identity (brief §6/§9) */
+  wallet_mode: text("wallet_mode"),
   /** AES-256-GCM encrypted; held only by trader-core process */
   encrypted_private_key: text("encrypted_private_key"),
   /** pending_key_import | ready | disabled */
@@ -115,38 +119,57 @@ export const copyTemplates = pgTable("copy_templates", {
 // ---------------------------------------------------------------------------
 // follow_relations — leader → account → template (PRD §6.1)
 // ---------------------------------------------------------------------------
-export const followRelations = pgTable("follow_relations", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  account_id: uuid("account_id")
-    .notNull()
-    .references(() => accounts.id),
-  leader_address: text("leader_address").notNull(),
-  template_id: uuid("template_id")
-    .notNull()
-    .references(() => copyTemplates.id),
-  /** active | paused */
-  status: text("status").notNull().default("active"),
-  created_at: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-  paused_at: timestamp("paused_at", { withTimezone: true }),
-});
+export const followRelations = pgTable(
+  "follow_relations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    account_id: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id),
+    leader_address: text("leader_address").notNull(),
+    template_id: uuid("template_id")
+      .notNull()
+      .references(() => copyTemplates.id),
+    /** active | paused */
+    status: text("status").notNull().default("active"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    paused_at: timestamp("paused_at", { withTimezone: true }),
+    /** Per-leader reconcile cursor (brief §7): last Data-API activity ts. */
+    last_seen_ts: timestamp("last_seen_ts", { withTimezone: true }),
+  },
+  (t) => ({
+    statusIdx: index("idx_follow_relations_status").on(t.status),
+  })
+);
 
 // ---------------------------------------------------------------------------
 // leader_trades — cached leader trade history (PRD §6.1)
 // ---------------------------------------------------------------------------
-export const leaderTrades = pgTable("leader_trades", {
-  id: bigserial("id", { mode: "number" }).primaryKey(),
-  trade_id: text("trade_id").notNull().unique(),
-  leader_address: text("leader_address").notNull(),
-  market_id: text("market_id"),
-  condition_id: text("condition_id"),
-  side: text("side"),
-  size: numeric("size", { precision: 20, scale: 6 }),
-  price: numeric("price", { precision: 10, scale: 6 }),
-  timestamp: timestamp("timestamp", { withTimezone: true }),
-  raw: jsonb("raw"),
-});
+export const leaderTrades = pgTable(
+  "leader_trades",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    trade_id: text("trade_id").notNull().unique(),
+    leader_address: text("leader_address").notNull(),
+    market_id: text("market_id"),
+    condition_id: text("condition_id"),
+    side: text("side"),
+    size: numeric("size", { precision: 20, scale: 6 }),
+    price: numeric("price", { precision: 10, scale: 6 }),
+    timestamp: timestamp("timestamp", { withTimezone: true }),
+    /** Cross-source dedup key (brief §3): txHash idempotency anchor. */
+    tx_hash: text("tx_hash"),
+    raw: jsonb("raw"),
+  },
+  (t) => ({
+    leaderTxUq: unique("uq_leader_trades_leader_tx").on(
+      t.leader_address,
+      t.tx_hash
+    ),
+  })
+);
 
 // ---------------------------------------------------------------------------
 // my_trades — copy trades executed on your account (PRD §6.1)
@@ -165,6 +188,9 @@ export const myTrades = pgTable("my_trades", {
   /** pending | filled | rejected | partial */
   fill_status: text("fill_status").notNull().default("pending"),
   pnl_usd: numeric("pnl_usd", { precision: 14, scale: 4 }),
+  /** FIFO sell-match accounting (brief §3/§5). */
+  matched_qty: numeric("matched_qty", { precision: 20, scale: 6 }),
+  remaining_qty: numeric("remaining_qty", { precision: 20, scale: 6 }),
   opened_at: timestamp("opened_at", { withTimezone: true }),
   closed_at: timestamp("closed_at", { withTimezone: true }),
 });
@@ -249,3 +275,61 @@ export const events = pgTable("events", {
     .notNull()
     .defaultNow(),
 });
+
+// ---------------------------------------------------------------------------
+// redeem_jobs — durable claim-winnings queue (PolyHermes brief §9)
+// Idempotent on (account_id, condition_id, outcome_index); survives restart
+// so a resolved position is never double-redeemed.
+// ---------------------------------------------------------------------------
+export const redeemJobs = pgTable(
+  "redeem_jobs",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    account_id: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id),
+    condition_id: text("condition_id"),
+    outcome_index: integer("outcome_index"),
+    /** 2**outcome_index bitmask passed to CTF.redeemPositions (brief §9) */
+    index_set: integer("index_set"),
+    is_neg_risk: boolean("is_neg_risk"),
+    /** pending | submitted | confirmed | failed */
+    status: text("status").notNull().default("pending"),
+    tx_hash: text("tx_hash"),
+    detected_at: timestamp("detected_at", { withTimezone: true }),
+    confirmed_at: timestamp("confirmed_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    acctCondOutcomeUq: unique("uq_redeem_jobs_account_condition_outcome").on(
+      t.account_id,
+      t.condition_id,
+      t.outcome_index
+    ),
+    statusIdx: index("idx_redeem_jobs_status").on(t.status),
+  })
+);
+
+// ---------------------------------------------------------------------------
+// copy_skips — queryable skip/error log w/ reason taxonomy (brief §7)
+// ---------------------------------------------------------------------------
+export const copySkips = pgTable(
+  "copy_skips",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    leader_address: text("leader_address"),
+    condition_id: text("condition_id"),
+    /** One of polyecho.shared.copytrading.SkipReason (StrEnum value). */
+    skip_reason: text("skip_reason").notNull(),
+    detail: text("detail"),
+    payload: jsonb("payload"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    createdAtIdx: index("idx_copy_skips_created_at").on(t.created_at),
+  })
+);
