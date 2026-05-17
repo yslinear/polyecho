@@ -432,8 +432,8 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
                     </SelectContent>
                   </Select>
                   <FormDescription>
-                    "Triple" runs all three simultaneously for comparison (PRD
-                    §5.4)
+                    &ldquo;Triple&rdquo; runs all three simultaneously for
+                    comparison (PRD §5.4)
                   </FormDescription>
                   <FormMessage />
                 </FormItem>

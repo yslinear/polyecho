@@ -105,8 +105,10 @@ ${colorConfig
 // ---------------------------------------------------------------------------
 const ChartTooltip = RechartsPrimitive.Tooltip;
 
-type TooltipValueType = RechartsPrimitive.ValueType;
-type TooltipNameType = RechartsPrimitive.NameType;
+// recharts v2.15 does not re-export these at the package root; mirror the
+// upstream definitions (recharts/types/component/DefaultTooltipContent).
+type TooltipValueType = number | string | Array<number | string>;
+type TooltipNameType = number | string;
 
 function getPayloadConfigFromPayload(
   config: ChartConfig,

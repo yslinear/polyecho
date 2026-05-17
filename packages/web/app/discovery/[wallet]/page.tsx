@@ -18,6 +18,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { LeaderScoreChart } from "./leader-score-chart";
 
+// Reads the database on every request — never prerender at build time
+// (no DB is available during `next build` / CI).
+export const dynamic = "force-dynamic";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -34,13 +38,6 @@ export interface ScorePoint {
 // ---------------------------------------------------------------------------
 function shortWallet(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
-}
-
-function fmt(v: string | null | undefined): string {
-  if (v === null || v === undefined) return "—";
-  const n = Number(v);
-  if (!isNaN(n)) return n.toFixed(2);
-  return v;
 }
 
 function fmtDate(d: Date | null | undefined): string {

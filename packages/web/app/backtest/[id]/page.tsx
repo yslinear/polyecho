@@ -288,7 +288,6 @@ export default async function BacktestResultPage({ params }: PageProps) {
                       label: "neutral",
                       slippage_bps: job.slippage_bps ?? 150,
                       delay_seconds: job.execution_delay_seconds ?? 30,
-                      stats: result.stats,
                       pnl_curve: result.pnl_curve,
                     },
                   ]}

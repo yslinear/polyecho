@@ -12,6 +12,10 @@ import { db } from "@/lib/db";
 import { candidateLeaders } from "@/lib/db/schema";
 import { DiscoveryTable } from "./discovery-table";
 
+// Reads the database on every request — never prerender at build time
+// (no DB is available during `next build` / CI).
+export const dynamic = "force-dynamic";
+
 // Drizzle-inferred row type (no `any`)
 export type CandidateLeaderRow = typeof candidateLeaders.$inferSelect;
 

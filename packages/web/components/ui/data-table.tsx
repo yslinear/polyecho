@@ -48,12 +48,12 @@ interface DataTableProps<TData, TValue> {
   searchKey?: string;
   searchPlaceholder?: string;
   /** Faceted filter configs */
-  facetedFilters?: FacetedFilter<TData>[];
+  facetedFilters?: FacetedFilter[];
   pageSize?: number;
   className?: string;
 }
 
-interface FacetedFilter<TData> {
+interface FacetedFilter {
   columnId: string;
   title: string;
   options: { label: string; value: string }[];
