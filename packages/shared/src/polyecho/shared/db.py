@@ -86,8 +86,20 @@ def _get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
-# Convenience alias populated at module import time (may be replaced in tests).
-AsyncSessionLocal = _get_session_factory
+def AsyncSessionLocal() -> AsyncSession:  # noqa: N802 — factory, named like a class
+    """Return a new :class:`AsyncSession` from the lazily-built factory.
+
+    Equivalent to ``sessionmaker()``: ``AsyncSessionLocal()`` yields a fresh
+    session each call.  Prefer :func:`session_scope` for unit-of-work
+    transactions; use this only when manual session lifecycle is required::
+
+        async with AsyncSessionLocal() as session:
+            ...
+
+    The underlying engine and ``async_sessionmaker`` are created on first use
+    so importing this module never opens a database connection.
+    """
+    return _get_session_factory()()
 
 
 # ---------------------------------------------------------------------------
