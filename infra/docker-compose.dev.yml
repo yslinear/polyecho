@@ -1,0 +1,108 @@
+# PolyEcho — Development overrides
+# Extends infra/docker-compose.yml for local development.
+# The `dev` service gives you a container with uv + node/pnpm and the full repo
+# bind-mounted — run tools inside it so the host stays clean.
+#
+# Usage:
+#   # Start DB only, then drop into dev shell:
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d db
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml run --rm dev
+#
+#   # Inside dev container:
+#   uv run pytest
+#   uv run ruff check
+#   pnpm --filter @polyecho/web dev
+#
+#   # Full stack with hot-reload:
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up
+
+name: polyecho
+
+services:
+
+  # ── All-in-one dev workspace container ───────────────────────────────────────
+  # Contains uv (Python) AND node/pnpm — bind-mounts the whole repo.
+  # Run tools inside this container; never install anything on the host.
+  dev:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.dev
+    container_name: polyecho-dev
+    volumes:
+      # Full repo bind-mount so all file changes are reflected instantly
+      - ..:/workspace:cached
+      # Isolate node_modules from host
+      - dev_node_modules:/workspace/packages/web/node_modules
+      # Isolate uv venv from host
+      - dev_venv:/workspace/.venv
+    working_dir: /workspace
+    env_file: ../.env
+    environment:
+      - POLYECHO_DB_URL=postgresql+asyncpg://polyecho:polyecho@db:5432/polyecho
+      - POLYECHO_DB_URL_DRIZZLE=postgresql://polyecho:polyecho@db:5432/polyecho
+    depends_on:
+      db:
+        condition: service_healthy
+    # No default command — user decides what to run
+    tty: true
+    stdin_open: true
+    profiles:
+      - dev
+
+  # ── Override: trader-core (bind-mount source for rapid iteration) ─────────────
+  core:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.python
+      args:
+        PACKAGE: core
+    volumes:
+      - ../packages:/app/packages:cached
+    environment:
+      - POLYECHO_DB_URL=postgresql+asyncpg://polyecho:polyecho@db:5432/polyecho
+
+  # ── Override: discovery-worker ────────────────────────────────────────────────
+  discovery:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.python
+      args:
+        PACKAGE: discovery
+    volumes:
+      - ../packages:/app/packages:cached
+    environment:
+      - POLYECHO_DB_URL=postgresql+asyncpg://polyecho:polyecho@db:5432/polyecho
+
+  # ── Override: web-push-sender ─────────────────────────────────────────────────
+  push:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.python
+      args:
+        PACKAGE: push
+    volumes:
+      - ../packages:/app/packages:cached
+    environment:
+      - POLYECHO_DB_URL=postgresql+asyncpg://polyecho:polyecho@db:5432/polyecho
+
+  # ── Override: dashboard-web (Next.js dev server with hot-reload) ──────────────
+  web:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.web.dev
+    container_name: dashboard-web-dev
+    volumes:
+      - ../packages/web:/workspace/packages/web:cached
+      - dev_web_node_modules:/workspace/packages/web/node_modules
+    environment:
+      - POLYECHO_DB_URL_DRIZZLE=postgresql://polyecho:polyecho@db:5432/polyecho
+      - NODE_ENV=development
+    command: ["pnpm", "--filter", "@polyecho/web", "dev"]
+    ports:
+      - "127.0.0.1:3000:3000"
+
+# ── Named volumes to keep host clean ──────────────────────────────────────────
+volumes:
+  dev_node_modules:
+  dev_venv:
+  dev_web_node_modules:

@@ -1,0 +1,75 @@
+# PolyEcho — Python service image (multi-stage, uv-based)
+# Build context: repo root (required for uv workspace)
+# Usage:
+#   docker build -f infra/docker/Dockerfile.python --build-arg PACKAGE=core .
+#   docker build -f infra/docker/Dockerfile.python --build-arg PACKAGE=discovery .
+#   docker build -f infra/docker/Dockerfile.python --build-arg PACKAGE=push .
+#   docker build -f infra/docker/Dockerfile.python --build-arg PACKAGE=backtest .
+
+ARG PYTHON_VERSION=3.12
+ARG UV_VERSION=0.5
+
+# ── Stage 1: builder ──────────────────────────────────────────────────────────
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-bookworm-slim AS builder
+
+WORKDIR /build
+
+# Copy workspace manifest files first (cache-friendly layer)
+COPY pyproject.toml ./
+# uv workspace lockfile (may not exist yet — handled below)
+COPY uv.lock* ./
+
+# Copy all Python package manifests so uv can resolve the workspace graph
+COPY packages/shared/pyproject.toml   packages/shared/pyproject.toml
+COPY packages/core/pyproject.toml     packages/core/pyproject.toml
+COPY packages/discovery/pyproject.toml packages/discovery/pyproject.toml
+COPY packages/backtest/pyproject.toml packages/backtest/pyproject.toml
+COPY packages/push/pyproject.toml     packages/push/pyproject.toml
+COPY packages/cli/pyproject.toml      packages/cli/pyproject.toml
+
+# Copy all source trees (namespace package — all share `polyecho/`)
+COPY packages/shared/src   packages/shared/src
+COPY packages/core/src     packages/core/src
+COPY packages/discovery/src packages/discovery/src
+COPY packages/backtest/src packages/backtest/src
+COPY packages/push/src     packages/push/src
+COPY packages/cli/src      packages/cli/src
+
+# Install workspace (--frozen if lockfile present, plain otherwise)
+# The shell-form conditional handles the missing-lockfile bootstrap case.
+RUN if [ -f uv.lock ]; then \
+        uv sync --frozen --no-dev; \
+    else \
+        uv sync --no-dev; \
+    fi
+
+# ── Stage 2: runtime ─────────────────────────────────────────────────────────
+FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
+
+# PACKAGE determines which polyecho sub-module is run (core / discovery / push / backtest)
+ARG PACKAGE
+ENV PACKAGE=${PACKAGE}
+
+# Non-root user for security (PRD §7.2)
+RUN groupadd --gid 1001 polyecho && \
+    useradd  --uid 1001 --gid polyecho --no-create-home --shell /sbin/nologin polyecho
+
+WORKDIR /app
+
+# Copy the entire virtualenv produced by uv
+COPY --from=builder /build/.venv /app/.venv
+
+# Copy source into runtime (needed because venv uses editable installs)
+COPY --from=builder /build/packages /app/packages
+
+# Put the venv on PATH
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+USER polyecho
+
+# Entrypoint resolves ARG PACKAGE into the correct module path at runtime.
+# Using exec form via shell entrypoint so $PACKAGE is expanded.
+ENTRYPOINT ["/bin/sh", "-c", "exec python -m polyecho.${PACKAGE} \"$@\"", "--"]
+CMD []

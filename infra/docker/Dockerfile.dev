@@ -1,0 +1,25 @@
+# PolyEcho — All-in-one development container
+# Contains uv (Python 3.12) AND Node 22 + pnpm.
+# The repo is bind-mounted at /workspace by docker-compose.dev.yml.
+# Nothing is installed on the host machine.
+
+ARG PYTHON_VERSION=3.12
+ARG NODE_VERSION=22
+ARG UV_VERSION=0.5
+
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-bookworm-slim
+
+# Install Node.js via NodeSource
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates gnupg git \
+    && curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Enable corepack so pnpm version is driven by package.json#packageManager
+RUN corepack enable
+
+WORKDIR /workspace
+
+# No COPY — repo is bind-mounted at runtime
+# No CMD — user decides (uv run pytest / pnpm dev / etc.)

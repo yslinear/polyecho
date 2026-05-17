@@ -1,0 +1,116 @@
+# PolyEcho — Production Docker Compose
+# PRD §4.2 security model:
+#   - trader-core holds the private key and opens NO ports
+#   - db and dashboard-web bind to 127.0.0.1 only
+#   - all Python services communicate via Postgres only
+#
+# Build context for all Python images: repo root (uv workspace requires it)
+# Build context for web: repo root (pnpm workspace root)
+#
+# Usage:
+#   docker compose -f infra/docker-compose.yml up -d
+#   docker compose -f infra/docker-compose.yml run --rm cli polyecho doctor
+
+name: polyecho
+
+# ── Shared build context helpers ──────────────────────────────────────────────
+x-python-build: &python-build
+  context: ..
+  dockerfile: infra/docker/Dockerfile.python
+
+x-python-defaults: &python-defaults
+  env_file: ../.env
+  depends_on:
+    db:
+      condition: service_healthy
+  restart: unless-stopped
+
+# ── Services ──────────────────────────────────────────────────────────────────
+services:
+
+  # ── PostgreSQL 16 ────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-bookworm
+    container_name: polyecho-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: polyecho
+      POSTGRES_USER: polyecho
+      POSTGRES_PASSWORD: polyecho
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Bind to localhost only — never expose to network (PRD §4.2)
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polyecho -d polyecho"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── trader-core ──────────────────────────────────────────────────────────────
+  # Holds the private key. Opens NO ports (PRD §4.2 hard requirement).
+  core:
+    build:
+      <<: *python-build
+      args:
+        PACKAGE: core
+    container_name: trader-core
+    <<: *python-defaults
+    # NO ports — key isolation (PRD §4.2 / §5 G5)
+
+  # ── discovery-worker ─────────────────────────────────────────────────────────
+  discovery:
+    build:
+      <<: *python-build
+      args:
+        PACKAGE: discovery
+    container_name: discovery-worker
+    <<: *python-defaults
+    # NO ports
+
+  # ── web-push-sender ──────────────────────────────────────────────────────────
+  push:
+    build:
+      <<: *python-build
+      args:
+        PACKAGE: push
+    container_name: web-push-sender
+    <<: *python-defaults
+    # NO ports (sends outbound VAPID push only)
+
+  # ── dashboard-web (Next.js 15) ────────────────────────────────────────────────
+  web:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.web
+    container_name: dashboard-web
+    env_file: ../.env
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    # Bind to localhost only — Tailscale Serve proxies inbound (PRD §5.9)
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  # ── CLI (on-demand, profile=tools) ───────────────────────────────────────────
+  # Start with: docker compose -f infra/docker-compose.yml run --rm cli polyecho doctor
+  cli:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.cli
+    container_name: polyecho-cli
+    env_file: ../.env
+    depends_on:
+      db:
+        condition: service_healthy
+    profiles:
+      - tools
+    # No restart — on-demand only
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+volumes:
+  pgdata:
+    name: polyecho_pgdata

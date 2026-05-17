@@ -1,0 +1,24 @@
+# PolyEcho — Next.js development image (hot-reload)
+# Used by docker-compose.dev.yml web service override.
+# packages/web is bind-mounted at runtime so changes are reflected instantly.
+
+ARG NODE_VERSION=22
+
+FROM node:${NODE_VERSION}-bookworm-slim
+
+RUN corepack enable
+
+WORKDIR /workspace
+
+# Copy workspace manifests only (source is bind-mounted)
+COPY package.json pnpm-workspace.yaml ./
+COPY packages/web/package.json packages/web/package.json
+
+RUN pnpm install --frozen-lockfile 2>/dev/null || pnpm install
+
+ENV NODE_ENV=development
+ENV NEXT_TELEMETRY_DISABLED=1
+
+EXPOSE 3000
+
+CMD ["pnpm", "--filter", "@polyecho/web", "dev"]

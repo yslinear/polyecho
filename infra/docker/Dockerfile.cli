@@ -1,0 +1,59 @@
+# PolyEcho — CLI image
+# Same multi-stage Python/uv base as Dockerfile.python, but entrypoint is the
+# `polyecho` console script (installed by polyecho-cli package).
+# Usage:
+#   docker compose -f infra/docker-compose.yml run --rm cli polyecho doctor
+#   docker compose -f infra/docker-compose.yml run --rm cli polyecho account list
+
+ARG PYTHON_VERSION=3.12
+ARG UV_VERSION=0.5
+
+# ── Stage 1: builder ──────────────────────────────────────────────────────────
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-bookworm-slim AS builder
+
+WORKDIR /build
+
+COPY pyproject.toml ./
+COPY uv.lock* ./
+
+COPY packages/shared/pyproject.toml   packages/shared/pyproject.toml
+COPY packages/core/pyproject.toml     packages/core/pyproject.toml
+COPY packages/discovery/pyproject.toml packages/discovery/pyproject.toml
+COPY packages/backtest/pyproject.toml packages/backtest/pyproject.toml
+COPY packages/push/pyproject.toml     packages/push/pyproject.toml
+COPY packages/cli/pyproject.toml      packages/cli/pyproject.toml
+
+COPY packages/shared/src   packages/shared/src
+COPY packages/core/src     packages/core/src
+COPY packages/discovery/src packages/discovery/src
+COPY packages/backtest/src packages/backtest/src
+COPY packages/push/src     packages/push/src
+COPY packages/cli/src      packages/cli/src
+
+RUN if [ -f uv.lock ]; then \
+        uv sync --frozen --no-dev; \
+    else \
+        uv sync --no-dev; \
+    fi
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────────
+FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
+
+# Non-root user (PRD §7.2)
+RUN groupadd --gid 1001 polyecho && \
+    useradd  --uid 1001 --gid polyecho --no-create-home --shell /sbin/nologin polyecho
+
+WORKDIR /app
+
+COPY --from=builder /build/.venv /app/.venv
+COPY --from=builder /build/packages /app/packages
+
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+USER polyecho
+
+# The `polyecho` console script is installed by polyecho-cli into the venv bin.
+ENTRYPOINT ["polyecho"]
+CMD ["--help"]

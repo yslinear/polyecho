@@ -1,0 +1,68 @@
+# PolyEcho — Next.js 15 dashboard image
+# Build context: repo root (pnpm workspace root)
+# PRD §4.2: dashboard-web binds to 127.0.0.1 only — enforced in docker-compose.yml
+
+ARG NODE_VERSION=22
+
+# ── Stage 1: deps ─────────────────────────────────────────────────────────────
+FROM node:${NODE_VERSION}-bookworm-slim AS deps
+
+# Enable corepack so the exact pnpm version from package.json is used
+RUN corepack enable
+
+WORKDIR /workspace
+
+# Copy workspace manifests for efficient layer caching
+COPY package.json pnpm-workspace.yaml ./
+COPY packages/web/package.json packages/web/package.json
+
+# Install all dependencies (including devDependencies needed for build)
+RUN pnpm install --frozen-lockfile 2>/dev/null || pnpm install
+
+# ── Stage 2: builder ──────────────────────────────────────────────────────────
+FROM node:${NODE_VERSION}-bookworm-slim AS builder
+
+RUN corepack enable
+
+WORKDIR /workspace
+
+# Bring in installed node_modules
+COPY --from=deps /workspace/node_modules ./node_modules
+COPY --from=deps /workspace/packages/web/node_modules ./packages/web/node_modules 2>/dev/null || true
+
+# Copy full source (Next.js needs config files, app/, components/, lib/, public/)
+COPY package.json pnpm-workspace.yaml ./
+COPY packages/web/ packages/web/
+
+# Build Next.js with standalone output (PRD §10 / next.config requires output:'standalone')
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN pnpm --filter @polyecho/web build
+
+# ── Stage 3: runtime ──────────────────────────────────────────────────────────
+FROM node:${NODE_VERSION}-bookworm-slim AS runtime
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+
+# Non-root user (PRD §7.2)
+RUN groupadd --gid 1001 polyecho && \
+    useradd  --uid 1001 --gid polyecho --no-create-home --shell /sbin/nologin polyecho
+
+WORKDIR /app
+
+# Copy the standalone Next.js bundle
+COPY --from=builder --chown=polyecho:polyecho \
+    /workspace/packages/web/.next/standalone ./
+COPY --from=builder --chown=polyecho:polyecho \
+    /workspace/packages/web/.next/static ./packages/web/.next/static
+COPY --from=builder --chown=polyecho:polyecho \
+    /workspace/packages/web/public ./packages/web/public
+
+USER polyecho
+
+EXPOSE 3000
+
+# Next.js standalone server entrypoint
+CMD ["node", "packages/web/server.js"]
