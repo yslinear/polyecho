@@ -51,6 +51,11 @@ logs/
 .AppleDouble
 .LSOverride
 Icon?
+# The macOS "Icon?" rule above also matches the web PWA asset directory
+# `packages/web/public/icons/` (case-insensitive: Icon? -> icon s). Those
+# committed PWA icons are real project assets, so re-include them explicitly.
+!packages/web/public/icons/
+!packages/web/public/icons/**
 .idea/
 .vscode/
 *.swp
