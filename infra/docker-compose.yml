@@ -22,6 +22,14 @@ x-python-defaults: &python-defaults
   env_file:
     - path: ../.env
       required: false
+  # Self-sufficient defaults so `docker compose up` works with ZERO extra files.
+  # In-container the DB host is `db` (compose service), NOT localhost. A real
+  # ../.env (loaded above) still overrides these because env_file wins over
+  # `environment` only when the var is set there — so we use ${VAR:-default}
+  # which yields the container default unless the host shell/.env exports it.
+  environment:
+    POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:polyecho@db:5432/polyecho}
+    POLYECHO_DATASOURCE: ${POLYECHO_DATASOURCE:-fixture}
   depends_on:
     db:
       condition: service_healthy
@@ -72,6 +80,19 @@ services:
     <<: *python-defaults
     # NO ports
 
+  # ── backtest-worker ──────────────────────────────────────────────────────────
+  # Polls backtest_jobs WHERE status='pending', runs BacktestEngine, writes
+  # result JSONB + status→'completed'. Runs `python -m polyecho.backtest`
+  # (Dockerfile ENTRYPOINT resolves PACKAGE=backtest). PRD §5.4.
+  backtest:
+    build:
+      <<: *python-build
+      args:
+        PACKAGE: backtest
+    container_name: backtest-worker
+    <<: *python-defaults
+    # NO ports — DB-only communication (PRD §4.2)
+
   # ── web-push-sender ──────────────────────────────────────────────────────────
   push:
     build:
@@ -91,6 +112,10 @@ services:
     env_file:
       - path: ../.env
         required: false
+    # Self-sufficient default — in-container the DB host is `db`, not localhost.
+    # A real ../.env still overrides via ${VAR:-default}.
+    environment:
+      POLYECHO_DB_URL_DRIZZLE: ${POLYECHO_DB_URL_DRIZZLE:-postgresql://polyecho:polyecho@db:5432/polyecho}
     depends_on:
       db:
         condition: service_healthy
@@ -109,6 +134,12 @@ services:
     env_file:
       - path: ../.env
         required: false
+    # Self-sufficient defaults — in-container the DB host is `db`, not
+    # localhost. A real ../.env still overrides via ${VAR:-default}.
+    environment:
+      POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:polyecho@db:5432/polyecho}
+      POLYECHO_DB_URL_DRIZZLE: ${POLYECHO_DB_URL_DRIZZLE:-postgresql://polyecho:polyecho@db:5432/polyecho}
+      POLYECHO_DATASOURCE: ${POLYECHO_DATASOURCE:-fixture}
     depends_on:
       db:
         condition: service_healthy

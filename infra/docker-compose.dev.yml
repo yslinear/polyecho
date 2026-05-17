@@ -75,6 +75,18 @@ services:
     environment:
       - POLYECHO_DB_URL=postgresql+asyncpg://polyecho:polyecho@db:5432/polyecho
 
+  # ── Override: backtest-worker ─────────────────────────────────────────────────
+  backtest:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.python
+      args:
+        PACKAGE: backtest
+    volumes:
+      - ../packages:/app/packages:cached
+    environment:
+      - POLYECHO_DB_URL=postgresql+asyncpg://polyecho:polyecho@db:5432/polyecho
+
   # ── Override: web-push-sender ─────────────────────────────────────────────────
   push:
     build:

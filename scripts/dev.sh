@@ -11,9 +11,15 @@
 #   scripts/dev.sh db          # Open a psql shell in the DB container
 #   scripts/dev.sh migrate     # Apply infra/migrations/0000_init.sql into the running DB
 #   scripts/dev.sh discovery   # Run discovery once in fixture mode (no network)
+#   scripts/dev.sh backtest …  # Enqueue a backtest job via the CLI container
 #   scripts/dev.sh psql        # Alias for `db` — open psql in the DB container
 #   scripts/dev.sh build       # Rebuild all images
 #   scripts/dev.sh ps          # Show running containers
+#
+# NOTE: the production compose file is now self-sufficient — every command
+# below runs against infra/docker-compose.yml ALONE with sane in-container
+# defaults (DB host = `db`, POLYECHO_DATASOURCE=fixture). No ephemeral
+# /tmp override file is required or referenced anywhere.
 
 set -euo pipefail
 
@@ -83,10 +89,21 @@ case "$CMD" in
 
   discovery)
     echo "Running discovery once in fixture mode (POLYECHO_DATASOURCE=fixture)..."
-    compose_prod run --rm \
-      -e POLYECHO_DATASOURCE=fixture \
-      discovery \
-      python -m polyecho.discovery --once
+    # The Dockerfile ENTRYPOINT already runs `python -m polyecho.discovery "$@"`,
+    # so we pass ONLY the extra args. Compose defaults POLYECHO_DATASOURCE=fixture.
+    compose_prod run --rm discovery --once "$@"
+    ;;
+
+  backtest)
+    echo "Enqueuing a backtest job via the CLI container..."
+    # CLI entrypoint is `polyecho`; pass the sub-command + args through.
+    # Example: scripts/dev.sh backtest new --leader 0x… --days 90
+    compose_prod run --rm cli backtest "$@"
+    ;;
+
+  worker)
+    echo "Starting the backtest worker (foreground; Ctrl-C to stop)..."
+    compose_prod up backtest
     ;;
 
   build)
