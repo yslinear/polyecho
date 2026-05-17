@@ -94,6 +94,53 @@ Phase 2 additions (deps install in-container, no host install needed):
 | `/backtest/new` | Real shadcn `form` (react-hook-form + zod); Server Action inserts `backtest_jobs` row (status=queued), toasts, redirects |
 | `/backtest/[id]` | Reads job row; progress bar while running; PnL curve + stats table + 3-scenario side-by-side when completed |
 
+## Testing
+
+Frontend test stack: **Vitest** + **@testing-library/react** + **jsdom**
+(+ `@vitejs/plugin-react`, `@testing-library/jest-dom`,
+`@testing-library/user-event`, `@vitest/coverage-v8`).
+
+Tests are **headless, no-watch, and require no DB/network** — Drizzle
+(`@/lib/db`), `@/lib/env`, server actions, `next/navigation` and `next/link`
+are mocked per test. Run everything inside the Node container (no host install):
+
+```bash
+# From repo root — run the suite (this is the CI command)
+docker run --rm -v "$PWD":/w -w /w node:22-bookworm-slim \
+  sh -c 'corepack enable && cd packages/web && pnpm install --frozen-lockfile && pnpm test'
+```
+
+Scripts (run from `packages/web/` inside the container):
+
+| Script | Command | Purpose |
+|---|---|---|
+| `pnpm test` | `vitest run` | One-shot, headless — **CI entrypoint** |
+| `pnpm test:watch` | `vitest` | Local watch mode |
+| `pnpm test:coverage` | `vitest run --coverage` | v8 coverage + thresholds |
+
+Tests live in `packages/web/__tests__/` (mirrors source layout). Config:
+`vitest.config.ts` (jsdom env, `@/*` alias, coverage thresholds) and
+`vitest.setup.ts` (jest-dom matchers + jsdom polyfills for Radix/Recharts).
+`tsconfig.test.json` type-checks the tests; the production `tsconfig.json`
+excludes `__tests__/` so `next build` never compiles test code.
+
+Coverage of tested modules is ~93% statements / ~86% branches. Current suite
+covers: `cn`, `env` validation, the full 12-table Drizzle schema, shadcn
+primitives (button/badge/card/tabs/dialog/select/data-table with
+sort+filter+pagination), `AppSidebar` routing/active-state, `ScoreBadge`
+thresholds, the `/discovery` data-table island, the backtest form
+(zod validation + mocked server action), the `createBacktestJob` server
+action (scenario resolution + insert + redirect), and both Recharts chart
+islands.
+
+> **Note:** `pnpm build` (and `next build` generally) requires
+> `POLYECHO_DB_URL_DRIZZLE` to be set even though DB-backed pages are
+> `force-dynamic`, because Next.js imports route modules during the
+> "Collecting page data" phase. A dummy value
+> (`POLYECHO_DB_URL_DRIZZLE=postgres://u:p@localhost:5432/db`) is sufficient
+> for the build; no DB is contacted. This is independent of the test stack —
+> tests never need it.
+
 ## Development (host, optional)
 
 If you must run locally without Docker (corepack + pnpm required):
