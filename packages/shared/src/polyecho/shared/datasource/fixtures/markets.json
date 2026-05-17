@@ -1,0 +1,90 @@
+[
+  {
+    "condition_id": "0xcond_politics_potus_2028",
+    "market_id": "mkt-politics-potus-2028",
+    "question": "Will the Democratic Party win the 2028 US Presidential Election?",
+    "volume_24h": 4200000.00,
+    "end_date": "2028-11-04T04:00:00+00:00",
+    "tokens": [
+      {"token_id": "tok-potus-yes", "outcome": "Yes", "price": 0.48},
+      {"token_id": "tok-potus-no",  "outcome": "No",  "price": 0.52}
+    ]
+  },
+  {
+    "condition_id": "0xcond_fed_june_2026",
+    "market_id": "mkt-fed-june-2026",
+    "question": "Will the Fed cut rates at the June 2026 FOMC meeting?",
+    "volume_24h": 2800000.00,
+    "end_date": "2026-06-12T18:00:00+00:00",
+    "tokens": [
+      {"token_id": "tok-fed-cut-yes", "outcome": "Yes", "price": 0.61},
+      {"token_id": "tok-fed-cut-no",  "outcome": "No",  "price": 0.39}
+    ]
+  },
+  {
+    "condition_id": "0xcond_btc_100k_may2026",
+    "market_id": "mkt-btc-100k-may2026",
+    "question": "Will Bitcoin exceed $100K before June 1, 2026?",
+    "volume_24h": 1900000.00,
+    "end_date": "2026-06-01T00:00:00+00:00",
+    "tokens": [
+      {"token_id": "tok-btc-yes", "outcome": "Yes", "price": 0.73},
+      {"token_id": "tok-btc-no",  "outcome": "No",  "price": 0.27}
+    ]
+  },
+  {
+    "condition_id": "0xcond_fifa_brazil_2026",
+    "market_id": "mkt-fifa-brazil-2026",
+    "question": "Will Brazil win the 2026 FIFA World Cup?",
+    "volume_24h": 1500000.00,
+    "end_date": "2026-07-19T20:00:00+00:00",
+    "tokens": [
+      {"token_id": "tok-brazil-yes", "outcome": "Yes", "price": 0.21},
+      {"token_id": "tok-brazil-no",  "outcome": "No",  "price": 0.79}
+    ]
+  },
+  {
+    "condition_id": "0xcond_nvidia_earnings_q2",
+    "market_id": "mkt-nvidia-earnings-q2",
+    "question": "Will Nvidia beat Q2 2026 EPS consensus?",
+    "volume_24h": 1100000.00,
+    "end_date": "2026-08-28T20:00:00+00:00",
+    "tokens": [
+      {"token_id": "tok-nvda-yes", "outcome": "Yes", "price": 0.67},
+      {"token_id": "tok-nvda-no",  "outcome": "No",  "price": 0.33}
+    ]
+  },
+  {
+    "condition_id": "0xcond_eth_merge_v2",
+    "market_id": "mkt-eth-merge-v2",
+    "question": "Will Ethereum hit $5K before end of 2026?",
+    "volume_24h": 850000.00,
+    "end_date": "2026-12-31T23:59:00+00:00",
+    "tokens": [
+      {"token_id": "tok-eth-yes", "outcome": "Yes", "price": 0.44},
+      {"token_id": "tok-eth-no",  "outcome": "No",  "price": 0.56}
+    ]
+  },
+  {
+    "condition_id": "0xcond_trump_indictment",
+    "market_id": "mkt-trump-indictment",
+    "question": "Will Trump face new federal charges in 2026?",
+    "volume_24h": 620000.00,
+    "end_date": "2026-12-31T23:59:00+00:00",
+    "tokens": [
+      {"token_id": "tok-trump-yes", "outcome": "Yes", "price": 0.18},
+      {"token_id": "tok-trump-no",  "outcome": "No",  "price": 0.82}
+    ]
+  },
+  {
+    "condition_id": "0xcond_recession_2026",
+    "market_id": "mkt-recession-2026",
+    "question": "Will the US enter a recession in 2026?",
+    "volume_24h": 540000.00,
+    "end_date": "2026-12-31T23:59:00+00:00",
+    "tokens": [
+      {"token_id": "tok-rec-yes", "outcome": "Yes", "price": 0.29},
+      {"token_id": "tok-rec-no",  "outcome": "No",  "price": 0.71}
+    ]
+  }
+]

@@ -1,0 +1,122 @@
+[
+  {
+    "wallet": "0xdaytrader300000000000000000000000000000003",
+    "conditionId": "0xcond_trump_indictment",
+    "asset": "tok-dictment-yes",
+    "size": 4376.75,
+    "avgPrice": 0.6659,
+    "currentValue": 3142.51,
+    "cashPnl": 228.03,
+    "percentPnl": 7.82,
+    "title": "Market: ond_trump_indictment",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000007",
+    "conditionId": "0xcond_trump_indictment",
+    "asset": "tok-dictment-yes",
+    "size": 3904.8,
+    "avgPrice": 0.7299,
+    "currentValue": 2515.08,
+    "cashPnl": -335.03,
+    "percentPnl": -11.75,
+    "title": "Market: ond_trump_indictment",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xinsider600000000000000000000000000000006",
+    "conditionId": "0xcond_trump_indictment",
+    "asset": "tok-dictment-yes",
+    "size": 3902.59,
+    "avgPrice": 0.2899,
+    "currentValue": 879.25,
+    "cashPnl": -252.11,
+    "percentPnl": -22.28,
+    "title": "Market: ond_trump_indictment",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000004",
+    "conditionId": "0xcond_trump_indictment",
+    "asset": "tok-dictment-yes",
+    "size": 3443.42,
+    "avgPrice": 0.5184,
+    "currentValue": 1856.0,
+    "cashPnl": 70.93,
+    "percentPnl": 3.97,
+    "title": "Market: ond_trump_indictment",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000005",
+    "conditionId": "0xcond_trump_indictment",
+    "asset": "tok-dictment-yes",
+    "size": 3133.6,
+    "avgPrice": 0.2722,
+    "currentValue": 587.86,
+    "cashPnl": -265.11,
+    "percentPnl": -31.08,
+    "title": "Market: ond_trump_indictment",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xdrifted500000000000000000000000000000005",
+    "conditionId": "0xcond_trump_indictment",
+    "asset": "tok-dictment-yes",
+    "size": 3070.07,
+    "avgPrice": 0.3196,
+    "currentValue": 886.94,
+    "cashPnl": -94.25,
+    "percentPnl": -9.61,
+    "title": "Market: ond_trump_indictment",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000003",
+    "conditionId": "0xcond_trump_indictment",
+    "asset": "tok-dictment-yes",
+    "size": 2589.97,
+    "avgPrice": 0.6844,
+    "currentValue": 1842.25,
+    "cashPnl": 69.67,
+    "percentPnl": 3.93,
+    "title": "Market: ond_trump_indictment",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000006",
+    "conditionId": "0xcond_trump_indictment",
+    "asset": "tok-dictment-yes",
+    "size": 2315.66,
+    "avgPrice": 0.2167,
+    "currentValue": 787.79,
+    "cashPnl": 285.99,
+    "percentPnl": 56.99,
+    "title": "Market: ond_trump_indictment",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000008",
+    "conditionId": "0xcond_trump_indictment",
+    "asset": "tok-dictment-yes",
+    "size": 1037.4,
+    "avgPrice": 0.2253,
+    "currentValue": 155.3,
+    "cashPnl": -78.43,
+    "percentPnl": -33.56,
+    "title": "Market: ond_trump_indictment",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000001",
+    "conditionId": "0xcond_trump_indictment",
+    "asset": "tok-dictment-yes",
+    "size": 410.51,
+    "avgPrice": 0.3954,
+    "currentValue": 221.14,
+    "cashPnl": 58.82,
+    "percentPnl": 36.24,
+    "title": "Market: ond_trump_indictment",
+    "outcome": "Yes"
+  }
+]

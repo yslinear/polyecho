@@ -1,0 +1,98 @@
+[
+  {
+    "rank": 1,
+    "wallet": "0xswing1000000000000000000000000000000001",
+    "username": "SwingKing",
+    "pnl": 142300.50,
+    "volume": 980000.00,
+    "verified": true
+  },
+  {
+    "rank": 2,
+    "wallet": "0xscalper200000000000000000000000000000002",
+    "username": "FlashScalp",
+    "pnl": 98700.00,
+    "volume": 4500000.00,
+    "verified": true
+  },
+  {
+    "rank": 3,
+    "wallet": "0xdaytrader300000000000000000000000000003",
+    "username": "DayRunner",
+    "pnl": 76500.00,
+    "volume": 2100000.00,
+    "verified": false
+  },
+  {
+    "rank": 4,
+    "wallet": "0xposition400000000000000000000000000000004",
+    "username": "LongView",
+    "pnl": 65200.00,
+    "volume": 340000.00,
+    "verified": true
+  },
+  {
+    "rank": 5,
+    "wallet": "0xdrifted500000000000000000000000000000005",
+    "username": "DriftTrader",
+    "pnl": 54800.00,
+    "volume": 1250000.00,
+    "verified": false
+  },
+  {
+    "rank": 6,
+    "wallet": "0xinsider600000000000000000000000000000006",
+    "username": "PrecisionX",
+    "pnl": 48900.00,
+    "volume": 180000.00,
+    "verified": false
+  },
+  {
+    "rank": 7,
+    "wallet": "0xtrader7000000000000000000000000000000007",
+    "username": "SteadyHands",
+    "pnl": 39100.00,
+    "volume": 720000.00,
+    "verified": false
+  },
+  {
+    "rank": 8,
+    "wallet": "0xtrader8000000000000000000000000000000008",
+    "username": "PoliticsEdge",
+    "pnl": 33500.00,
+    "volume": 510000.00,
+    "verified": true
+  },
+  {
+    "rank": 9,
+    "wallet": "0xtrader9000000000000000000000000000000009",
+    "username": "CryptoCallr",
+    "pnl": 28700.00,
+    "volume": 890000.00,
+    "verified": false
+  },
+  {
+    "rank": 10,
+    "wallet": "0xtrader10000000000000000000000000000000010",
+    "username": "SportsOracle",
+    "pnl": 24100.00,
+    "volume": 460000.00,
+    "verified": false
+  },
+  {
+    "rank": 11,
+    "wallet": "0xtrader11000000000000000000000000000000011",
+    "username": "EconWatcher",
+    "pnl": 19800.00,
+    "volume": 310000.00,
+    "verified": false
+  },
+  {
+    "rank": 12,
+    "wallet": "0xtrader12000000000000000000000000000000012",
+    "username": "WeekendWarrior",
+    "pnl": 15300.00,
+    "volume": 230000.00,
+    "verified": false
+  }
+]

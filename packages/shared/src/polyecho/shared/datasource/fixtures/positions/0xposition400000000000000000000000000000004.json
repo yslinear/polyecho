@@ -1,0 +1,50 @@
+[
+  {
+    "wallet": "0xposition400000000000000000000000000000004",
+    "conditionId": "0xcond_politics_potus_2028",
+    "asset": "tok-tus_2028-yes",
+    "size": 2000,
+    "avgPrice": 0.42,
+    "currentValue": 960.0,
+    "cashPnl": 120.0,
+    "percentPnl": 14.29,
+    "title": "Market: _politics_potus_2028",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xposition400000000000000000000000000000004",
+    "conditionId": "0xcond_btc_100k_may2026",
+    "asset": "tok-_may2026-yes",
+    "size": 1500,
+    "avgPrice": 0.68,
+    "currentValue": 1095.0,
+    "cashPnl": 75.0,
+    "percentPnl": 7.35,
+    "title": "Market: ond_btc_100k_may2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xposition400000000000000000000000000000004",
+    "conditionId": "0xcond_eth_merge_v2",
+    "asset": "tok-merge_v2-yes",
+    "size": 1000,
+    "avgPrice": 0.4,
+    "currentValue": 440.0,
+    "cashPnl": 40.0,
+    "percentPnl": 10.0,
+    "title": "Market: 0xcond_eth_merge_v2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xposition400000000000000000000000000000004",
+    "conditionId": "0xcond_recession_2026",
+    "asset": "tok-ion_2026-yes",
+    "size": 800,
+    "avgPrice": 0.26,
+    "currentValue": 232.0,
+    "cashPnl": 24.0,
+    "percentPnl": 11.54,
+    "title": "Market: xcond_recession_2026",
+    "outcome": "Yes"
+  }
+]

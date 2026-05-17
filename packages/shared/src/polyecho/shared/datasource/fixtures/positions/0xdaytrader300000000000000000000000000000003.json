@@ -1,0 +1,26 @@
+[
+  {
+    "wallet": "0xdaytrader300000000000000000000000000000003",
+    "conditionId": "0xcond_politics_potus_2028",
+    "asset": "tok-tus_2028-yes",
+    "size": 120,
+    "avgPrice": 0.46,
+    "currentValue": 57.6,
+    "cashPnl": 2.4,
+    "percentPnl": 4.35,
+    "title": "Market: _politics_potus_2028",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xdaytrader300000000000000000000000000000003",
+    "conditionId": "0xcond_fifa_brazil_2026",
+    "asset": "tok-zil_2026-yes",
+    "size": 90,
+    "avgPrice": 0.19,
+    "currentValue": 18.9,
+    "cashPnl": 1.8,
+    "percentPnl": 10.53,
+    "title": "Market: ond_fifa_brazil_2026",
+    "outcome": "Yes"
+  }
+]

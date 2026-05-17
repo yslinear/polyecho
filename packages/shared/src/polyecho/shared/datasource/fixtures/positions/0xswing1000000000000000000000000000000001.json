@@ -1,0 +1,38 @@
+[
+  {
+    "wallet": "0xswing1000000000000000000000000000000001",
+    "conditionId": "0xcond_politics_potus_2028",
+    "asset": "tok-tus_2028-yes",
+    "size": 300,
+    "avgPrice": 0.45,
+    "currentValue": 144.0,
+    "cashPnl": 9.0,
+    "percentPnl": 6.67,
+    "title": "Market: _politics_potus_2028",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xswing1000000000000000000000000000000001",
+    "conditionId": "0xcond_fed_june_2026",
+    "asset": "tok-une_2026-yes",
+    "size": 200,
+    "avgPrice": 0.58,
+    "currentValue": 122.0,
+    "cashPnl": 6.0,
+    "percentPnl": 5.17,
+    "title": "Market: 0xcond_fed_june_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xswing1000000000000000000000000000000001",
+    "conditionId": "0xcond_nvidia_earnings_q2",
+    "asset": "tok-nings_q2-yes",
+    "size": 150,
+    "avgPrice": 0.62,
+    "currentValue": 100.5,
+    "cashPnl": 7.5,
+    "percentPnl": 8.06,
+    "title": "Market: d_nvidia_earnings_q2",
+    "outcome": "Yes"
+  }
+]

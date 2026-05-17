@@ -1,0 +1,122 @@
+[
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000008",
+    "conditionId": "0xcond_nvidia_earnings_q2",
+    "asset": "tok-nings_q2-yes",
+    "size": 4036.3,
+    "avgPrice": 0.32,
+    "currentValue": 1385.26,
+    "cashPnl": 93.64,
+    "percentPnl": 7.25,
+    "title": "Market: d_nvidia_earnings_q2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xswing1000000000000000000000000000000001",
+    "conditionId": "0xcond_nvidia_earnings_q2",
+    "asset": "tok-nings_q2-yes",
+    "size": 3681.92,
+    "avgPrice": 0.7938,
+    "currentValue": 3281.7,
+    "cashPnl": 358.99,
+    "percentPnl": 12.28,
+    "title": "Market: d_nvidia_earnings_q2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xdaytrader300000000000000000000000000000003",
+    "conditionId": "0xcond_nvidia_earnings_q2",
+    "asset": "tok-nings_q2-yes",
+    "size": 3104.82,
+    "avgPrice": 0.673,
+    "currentValue": 2367.74,
+    "cashPnl": 278.2,
+    "percentPnl": 13.31,
+    "title": "Market: d_nvidia_earnings_q2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xscalper200000000000000000000000000000002",
+    "conditionId": "0xcond_nvidia_earnings_q2",
+    "asset": "tok-nings_q2-yes",
+    "size": 2465.0,
+    "avgPrice": 0.7911,
+    "currentValue": 2079.72,
+    "cashPnl": 129.66,
+    "percentPnl": 6.65,
+    "title": "Market: d_nvidia_earnings_q2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000005",
+    "conditionId": "0xcond_nvidia_earnings_q2",
+    "asset": "tok-nings_q2-yes",
+    "size": 2413.98,
+    "avgPrice": 0.3162,
+    "currentValue": 887.14,
+    "cashPnl": 123.84,
+    "percentPnl": 16.22,
+    "title": "Market: d_nvidia_earnings_q2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xposition400000000000000000000000000000004",
+    "conditionId": "0xcond_nvidia_earnings_q2",
+    "asset": "tok-nings_q2-yes",
+    "size": 1812.65,
+    "avgPrice": 0.7847,
+    "currentValue": 1277.56,
+    "cashPnl": -144.83,
+    "percentPnl": -10.18,
+    "title": "Market: d_nvidia_earnings_q2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000002",
+    "conditionId": "0xcond_nvidia_earnings_q2",
+    "asset": "tok-nings_q2-yes",
+    "size": 1786.98,
+    "avgPrice": 0.6851,
+    "currentValue": 1368.65,
+    "cashPnl": 144.39,
+    "percentPnl": 11.79,
+    "title": "Market: d_nvidia_earnings_q2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000004",
+    "conditionId": "0xcond_nvidia_earnings_q2",
+    "asset": "tok-nings_q2-yes",
+    "size": 1056.22,
+    "avgPrice": 0.3436,
+    "currentValue": 363.13,
+    "cashPnl": 0.21,
+    "percentPnl": 0.06,
+    "title": "Market: d_nvidia_earnings_q2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000003",
+    "conditionId": "0xcond_nvidia_earnings_q2",
+    "asset": "tok-nings_q2-yes",
+    "size": 600.57,
+    "avgPrice": 0.482,
+    "currentValue": 280.11,
+    "cashPnl": -9.36,
+    "percentPnl": -3.23,
+    "title": "Market: d_nvidia_earnings_q2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000001",
+    "conditionId": "0xcond_nvidia_earnings_q2",
+    "asset": "tok-nings_q2-yes",
+    "size": 109.35,
+    "avgPrice": 0.7455,
+    "currentValue": 79.99,
+    "cashPnl": -1.53,
+    "percentPnl": -1.88,
+    "title": "Market: d_nvidia_earnings_q2",
+    "outcome": "Yes"
+  }
+]

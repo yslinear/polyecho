@@ -1,0 +1,122 @@
+[
+  {
+    "wallet": "0xdaytrader300000000000000000000000000000003",
+    "conditionId": "0xcond_recession_2026",
+    "asset": "tok-ion_2026-yes",
+    "size": 4970.96,
+    "avgPrice": 0.4423,
+    "currentValue": 2225.0,
+    "cashPnl": 26.34,
+    "percentPnl": 1.2,
+    "title": "Market: xcond_recession_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xswing1000000000000000000000000000000001",
+    "conditionId": "0xcond_recession_2026",
+    "asset": "tok-ion_2026-yes",
+    "size": 3372.38,
+    "avgPrice": 0.3342,
+    "currentValue": 1385.37,
+    "cashPnl": 258.32,
+    "percentPnl": 22.92,
+    "title": "Market: xcond_recession_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000003",
+    "conditionId": "0xcond_recession_2026",
+    "asset": "tok-ion_2026-yes",
+    "size": 3252.94,
+    "avgPrice": 0.4197,
+    "currentValue": 1245.88,
+    "cashPnl": -119.38,
+    "percentPnl": -8.74,
+    "title": "Market: xcond_recession_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xinsider600000000000000000000000000000006",
+    "conditionId": "0xcond_recession_2026",
+    "asset": "tok-ion_2026-yes",
+    "size": 2198.86,
+    "avgPrice": 0.3276,
+    "currentValue": 666.91,
+    "cashPnl": -53.44,
+    "percentPnl": -7.42,
+    "title": "Market: xcond_recession_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xscalper200000000000000000000000000000002",
+    "conditionId": "0xcond_recession_2026",
+    "asset": "tok-ion_2026-yes",
+    "size": 1983.29,
+    "avgPrice": 0.5105,
+    "currentValue": 960.71,
+    "cashPnl": -51.76,
+    "percentPnl": -5.11,
+    "title": "Market: xcond_recession_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000006",
+    "conditionId": "0xcond_recession_2026",
+    "asset": "tok-ion_2026-yes",
+    "size": 1847.41,
+    "avgPrice": 0.2553,
+    "currentValue": 455.94,
+    "cashPnl": -15.7,
+    "percentPnl": -3.33,
+    "title": "Market: xcond_recession_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000005",
+    "conditionId": "0xcond_recession_2026",
+    "asset": "tok-ion_2026-yes",
+    "size": 1756.1,
+    "avgPrice": 0.4752,
+    "currentValue": 967.61,
+    "cashPnl": 133.11,
+    "percentPnl": 15.95,
+    "title": "Market: xcond_recession_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000000",
+    "conditionId": "0xcond_recession_2026",
+    "asset": "tok-ion_2026-yes",
+    "size": 772.55,
+    "avgPrice": 0.4806,
+    "currentValue": 438.27,
+    "cashPnl": 66.98,
+    "percentPnl": 18.04,
+    "title": "Market: xcond_recession_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000002",
+    "conditionId": "0xcond_recession_2026",
+    "asset": "tok-ion_2026-yes",
+    "size": 699.51,
+    "avgPrice": 0.6662,
+    "currentValue": 560.38,
+    "cashPnl": 94.37,
+    "percentPnl": 20.25,
+    "title": "Market: xcond_recession_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000008",
+    "conditionId": "0xcond_recession_2026",
+    "asset": "tok-ion_2026-yes",
+    "size": 561.21,
+    "avgPrice": 0.731,
+    "currentValue": 376.96,
+    "cashPnl": -33.28,
+    "percentPnl": -8.11,
+    "title": "Market: xcond_recession_2026",
+    "outcome": "Yes"
+  }
+]

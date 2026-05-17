@@ -1,0 +1,122 @@
+[
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000009",
+    "conditionId": "0xcond_eth_merge_v2",
+    "asset": "tok-merge_v2-yes",
+    "size": 4934.09,
+    "avgPrice": 0.3169,
+    "currentValue": 2148.3,
+    "cashPnl": 584.69,
+    "percentPnl": 37.39,
+    "title": "Market: 0xcond_eth_merge_v2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xscalper200000000000000000000000000000002",
+    "conditionId": "0xcond_eth_merge_v2",
+    "asset": "tok-merge_v2-yes",
+    "size": 4693.59,
+    "avgPrice": 0.2935,
+    "currentValue": 1551.7,
+    "cashPnl": 174.13,
+    "percentPnl": 12.64,
+    "title": "Market: 0xcond_eth_merge_v2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000003",
+    "conditionId": "0xcond_eth_merge_v2",
+    "asset": "tok-merge_v2-yes",
+    "size": 3842.03,
+    "avgPrice": 0.3956,
+    "currentValue": 1658.6,
+    "cashPnl": 138.69,
+    "percentPnl": 9.12,
+    "title": "Market: 0xcond_eth_merge_v2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xdaytrader300000000000000000000000000000003",
+    "conditionId": "0xcond_eth_merge_v2",
+    "asset": "tok-merge_v2-yes",
+    "size": 3096.71,
+    "avgPrice": 0.5575,
+    "currentValue": 1784.01,
+    "cashPnl": 57.59,
+    "percentPnl": 3.34,
+    "title": "Market: 0xcond_eth_merge_v2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000005",
+    "conditionId": "0xcond_eth_merge_v2",
+    "asset": "tok-merge_v2-yes",
+    "size": 2994.98,
+    "avgPrice": 0.4792,
+    "currentValue": 1626.87,
+    "cashPnl": 191.68,
+    "percentPnl": 13.36,
+    "title": "Market: 0xcond_eth_merge_v2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000000",
+    "conditionId": "0xcond_eth_merge_v2",
+    "asset": "tok-merge_v2-yes",
+    "size": 2369.49,
+    "avgPrice": 0.646,
+    "currentValue": 1343.97,
+    "cashPnl": -186.72,
+    "percentPnl": -12.2,
+    "title": "Market: 0xcond_eth_merge_v2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000007",
+    "conditionId": "0xcond_eth_merge_v2",
+    "asset": "tok-merge_v2-yes",
+    "size": 878.39,
+    "avgPrice": 0.7959,
+    "currentValue": 617.33,
+    "cashPnl": -81.78,
+    "percentPnl": -11.7,
+    "title": "Market: 0xcond_eth_merge_v2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000001",
+    "conditionId": "0xcond_eth_merge_v2",
+    "asset": "tok-merge_v2-yes",
+    "size": 603.58,
+    "avgPrice": 0.6497,
+    "currentValue": 352.79,
+    "cashPnl": -39.36,
+    "percentPnl": -10.04,
+    "title": "Market: 0xcond_eth_merge_v2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xdrifted500000000000000000000000000000005",
+    "conditionId": "0xcond_eth_merge_v2",
+    "asset": "tok-merge_v2-yes",
+    "size": 237.17,
+    "avgPrice": 0.3277,
+    "currentValue": 83.72,
+    "cashPnl": 6.0,
+    "percentPnl": 7.72,
+    "title": "Market: 0xcond_eth_merge_v2",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000002",
+    "conditionId": "0xcond_eth_merge_v2",
+    "asset": "tok-merge_v2-yes",
+    "size": 204.84,
+    "avgPrice": 0.6796,
+    "currentValue": 155.92,
+    "cashPnl": 16.71,
+    "percentPnl": 12.0,
+    "title": "Market: 0xcond_eth_merge_v2",
+    "outcome": "Yes"
+  }
+]

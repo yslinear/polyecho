@@ -1,0 +1,122 @@
+[
+  {
+    "wallet": "0xscalper200000000000000000000000000000002",
+    "conditionId": "0xcond_fifa_brazil_2026",
+    "asset": "tok-zil_2026-yes",
+    "size": 4891.33,
+    "avgPrice": 0.4882,
+    "currentValue": 2280.34,
+    "cashPnl": -107.61,
+    "percentPnl": -4.51,
+    "title": "Market: ond_fifa_brazil_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xdrifted500000000000000000000000000000005",
+    "conditionId": "0xcond_fifa_brazil_2026",
+    "asset": "tok-zil_2026-yes",
+    "size": 3481.33,
+    "avgPrice": 0.7485,
+    "currentValue": 2917.35,
+    "cashPnl": 311.57,
+    "percentPnl": 11.96,
+    "title": "Market: ond_fifa_brazil_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000008",
+    "conditionId": "0xcond_fifa_brazil_2026",
+    "asset": "tok-zil_2026-yes",
+    "size": 3208.61,
+    "avgPrice": 0.7733,
+    "currentValue": 2643.57,
+    "cashPnl": 162.35,
+    "percentPnl": 6.54,
+    "title": "Market: ond_fifa_brazil_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000004",
+    "conditionId": "0xcond_fifa_brazil_2026",
+    "asset": "tok-zil_2026-yes",
+    "size": 3043.56,
+    "avgPrice": 0.2614,
+    "currentValue": 922.5,
+    "cashPnl": 126.91,
+    "percentPnl": 15.95,
+    "title": "Market: ond_fifa_brazil_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000007",
+    "conditionId": "0xcond_fifa_brazil_2026",
+    "asset": "tok-zil_2026-yes",
+    "size": 2729.43,
+    "avgPrice": 0.7694,
+    "currentValue": 2245.78,
+    "cashPnl": 145.76,
+    "percentPnl": 6.94,
+    "title": "Market: ond_fifa_brazil_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xposition400000000000000000000000000000004",
+    "conditionId": "0xcond_fifa_brazil_2026",
+    "asset": "tok-zil_2026-yes",
+    "size": 2445.25,
+    "avgPrice": 0.6152,
+    "currentValue": 1575.47,
+    "cashPnl": 71.15,
+    "percentPnl": 4.73,
+    "title": "Market: ond_fifa_brazil_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000006",
+    "conditionId": "0xcond_fifa_brazil_2026",
+    "asset": "tok-zil_2026-yes",
+    "size": 2423.34,
+    "avgPrice": 0.2692,
+    "currentValue": 705.68,
+    "cashPnl": 53.32,
+    "percentPnl": 8.17,
+    "title": "Market: ond_fifa_brazil_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000001",
+    "conditionId": "0xcond_fifa_brazil_2026",
+    "asset": "tok-zil_2026-yes",
+    "size": 1105.55,
+    "avgPrice": 0.7712,
+    "currentValue": 841.99,
+    "cashPnl": -10.61,
+    "percentPnl": -1.24,
+    "title": "Market: ond_fifa_brazil_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xswing1000000000000000000000000000000001",
+    "conditionId": "0xcond_fifa_brazil_2026",
+    "asset": "tok-zil_2026-yes",
+    "size": 806.18,
+    "avgPrice": 0.6498,
+    "currentValue": 592.46,
+    "cashPnl": 68.6,
+    "percentPnl": 13.1,
+    "title": "Market: ond_fifa_brazil_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000003",
+    "conditionId": "0xcond_fifa_brazil_2026",
+    "asset": "tok-zil_2026-yes",
+    "size": 444.55,
+    "avgPrice": 0.3248,
+    "currentValue": 141.77,
+    "cashPnl": -2.62,
+    "percentPnl": -1.81,
+    "title": "Market: ond_fifa_brazil_2026",
+    "outcome": "Yes"
+  }
+]

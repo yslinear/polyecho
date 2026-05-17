@@ -1,0 +1,122 @@
+[
+  {
+    "wallet": "0xdrifted500000000000000000000000000000005",
+    "conditionId": "0xcond_fed_june_2026",
+    "asset": "tok-une_2026-yes",
+    "size": 4389.84,
+    "avgPrice": 0.3882,
+    "currentValue": 2028.11,
+    "cashPnl": 323.97,
+    "percentPnl": 19.01,
+    "title": "Market: 0xcond_fed_june_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000004",
+    "conditionId": "0xcond_fed_june_2026",
+    "asset": "tok-une_2026-yes",
+    "size": 4215.84,
+    "avgPrice": 0.7668,
+    "currentValue": 3310.7,
+    "cashPnl": 77.99,
+    "percentPnl": 2.41,
+    "title": "Market: 0xcond_fed_june_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000006",
+    "conditionId": "0xcond_fed_june_2026",
+    "asset": "tok-une_2026-yes",
+    "size": 3374.26,
+    "avgPrice": 0.6587,
+    "currentValue": 2368.73,
+    "cashPnl": 146.1,
+    "percentPnl": 6.57,
+    "title": "Market: 0xcond_fed_june_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xswing1000000000000000000000000000000001",
+    "conditionId": "0xcond_fed_june_2026",
+    "asset": "tok-une_2026-yes",
+    "size": 3354.35,
+    "avgPrice": 0.2364,
+    "currentValue": 1045.89,
+    "cashPnl": 252.92,
+    "percentPnl": 31.9,
+    "title": "Market: 0xcond_fed_june_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xinsider600000000000000000000000000000006",
+    "conditionId": "0xcond_fed_june_2026",
+    "asset": "tok-une_2026-yes",
+    "size": 3270.93,
+    "avgPrice": 0.7959,
+    "currentValue": 2948.42,
+    "cashPnl": 345.09,
+    "percentPnl": 13.26,
+    "title": "Market: 0xcond_fed_june_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xscalper200000000000000000000000000000002",
+    "conditionId": "0xcond_fed_june_2026",
+    "asset": "tok-une_2026-yes",
+    "size": 3012.41,
+    "avgPrice": 0.5479,
+    "currentValue": 1692.97,
+    "cashPnl": 42.47,
+    "percentPnl": 2.57,
+    "title": "Market: 0xcond_fed_june_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000000",
+    "conditionId": "0xcond_fed_june_2026",
+    "asset": "tok-une_2026-yes",
+    "size": 1494.52,
+    "avgPrice": 0.4315,
+    "currentValue": 745.32,
+    "cashPnl": 100.43,
+    "percentPnl": 15.57,
+    "title": "Market: 0xcond_fed_june_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xposition400000000000000000000000000000004",
+    "conditionId": "0xcond_fed_june_2026",
+    "asset": "tok-une_2026-yes",
+    "size": 844.72,
+    "avgPrice": 0.4934,
+    "currentValue": 340.59,
+    "cashPnl": -76.19,
+    "percentPnl": -18.28,
+    "title": "Market: 0xcond_fed_june_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000002",
+    "conditionId": "0xcond_fed_june_2026",
+    "asset": "tok-une_2026-yes",
+    "size": 678.52,
+    "avgPrice": 0.4509,
+    "currentValue": 366.54,
+    "cashPnl": 60.6,
+    "percentPnl": 19.81,
+    "title": "Market: 0xcond_fed_june_2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000008",
+    "conditionId": "0xcond_fed_june_2026",
+    "asset": "tok-une_2026-yes",
+    "size": 210.56,
+    "avgPrice": 0.477,
+    "currentValue": 88.22,
+    "cashPnl": -12.22,
+    "percentPnl": -12.17,
+    "title": "Market: 0xcond_fed_june_2026",
+    "outcome": "Yes"
+  }
+]

@@ -1,0 +1,14 @@
+[
+  {
+    "wallet": "0xscalper200000000000000000000000000000002",
+    "conditionId": "0xcond_btc_100k_may2026",
+    "asset": "tok-_may2026-yes",
+    "size": 80,
+    "avgPrice": 0.7,
+    "currentValue": 58.4,
+    "cashPnl": 2.4,
+    "percentPnl": 4.29,
+    "title": "Market: ond_btc_100k_may2026",
+    "outcome": "Yes"
+  }
+]

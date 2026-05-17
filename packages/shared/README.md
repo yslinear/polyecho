@@ -70,6 +70,94 @@ uv run pytest packages/shared/tests/ -v
 
 Tests do not require a live Postgres connection.
 
+## Datasource layer (`polyecho.shared.datasource`)
+
+Phase 1 adds a read-only analytics abstraction over the Polymarket Data API.
+
+### Quick start
+
+```python
+from polyecho.shared.datasource import get_datasource
+
+ds = get_datasource()                          # FixtureDataSource (default)
+leaders = await ds.get_leaderboard(limit=200)  # list[LeaderboardEntry]
+trades  = await ds.get_user_activity("0x…")   # list[ActivityRecord]
+pos     = await ds.get_positions("0x…")        # list[PositionRecord]
+markets = await ds.get_markets_by_volume()     # list[MarketSummary]
+holders = await ds.get_market_top_holders("0xcond_…")  # list[PositionRecord]
+```
+
+### Runtime selection
+
+| `POLYECHO_DATASOURCE` | Implementation | Network |
+|---|---|---|
+| `fixture` (default) | `FixtureDataSource` | none — bundled JSON |
+| `live` | `LiveDataSource` | Polymarket Data API |
+
+`LiveDataSource` must be used as an async context manager:
+
+```python
+async with LiveDataSource() as ds:
+    leaders = await ds.get_leaderboard()
+```
+
+### DataSource Protocol (binding contract for Wave 2)
+
+```python
+class DataSource(Protocol):
+    async def get_leaderboard(
+        self, *, category: str = "OVERALL", time_period: str = "MONTH",
+        order_by: str = "PNL", limit: int = 200
+    ) -> list[LeaderboardEntry]: ...
+
+    async def get_user_activity(
+        self, wallet: str, *, start: datetime | None = None,
+        end: datetime | None = None, activity_type: str | None = "TRADE",
+        limit: int | None = None
+    ) -> list[ActivityRecord]: ...
+
+    async def get_positions(
+        self, wallet: str, *, size_threshold: float = 1.0
+    ) -> list[PositionRecord]: ...
+
+    async def get_markets_by_volume(
+        self, *, min_volume_24h: float = 100_000.0, limit: int = 200
+    ) -> list[MarketSummary]: ...
+
+    async def get_market_top_holders(
+        self, condition_id: str, *, limit: int = 10
+    ) -> list[PositionRecord]: ...
+```
+
+### DTOs
+
+| Class | Key fields |
+|---|---|
+| `LeaderboardEntry` | `rank`, `wallet`, `username`, `pnl`, `volume`, `verified` |
+| `ActivityRecord` | `wallet`, `activity_type`, `condition_id`, `side`, `size`, `price`, `usdc_size`, `timestamp`, `raw` |
+| `PositionRecord` | `wallet`, `condition_id`, `asset`, `size`, `avg_price`, `current_value`, `cash_pnl`, `percent_pnl`, `title`, `outcome`, `raw` |
+| `MarketSummary` | `condition_id`, `market_id`, `question`, `volume_24h`, `end_date`, `tokens`, `raw` |
+
+All datetimes are tz-aware UTC. Wallet addresses are normalised to lowercase `0x…`.
+
+### LiveDataSource reliability features
+
+- Internal pagination: `get_leaderboard(limit=200)` makes 4 × 50-row pages automatically.
+- Exponential-backoff retry: 3 attempts, base 1 s, cap 30 s.
+- Circuit breaker: opens after 5 consecutive failures, resets after 60 s.
+
+### TODO(verify)
+
+`LiveDataSource.get_market_top_holders` raises `NotImplementedError` — the
+per-market top-holders endpoint is not present in the verified Polymarket Data
+API docs.  Use `FixtureDataSource` (the default) until this is confirmed.
+
+### New config variable
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `POLYECHO_DATASOURCE` | `fixture` | Selects `FixtureDataSource` or `LiveDataSource` |
+
 ## Security notes
 
 - `encrypted_private_key` is written only by the CLI (`polyecho account import`).

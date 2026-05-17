@@ -1,0 +1,122 @@
+[
+  {
+    "wallet": "0xdrifted500000000000000000000000000000005",
+    "conditionId": "0xcond_politics_potus_2028",
+    "asset": "tok-tus_2028-yes",
+    "size": 4099.02,
+    "avgPrice": 0.3084,
+    "currentValue": 1450.23,
+    "cashPnl": 186.09,
+    "percentPnl": 14.72,
+    "title": "Market: _politics_potus_2028",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000002",
+    "conditionId": "0xcond_politics_potus_2028",
+    "asset": "tok-tus_2028-yes",
+    "size": 3433.96,
+    "avgPrice": 0.4566,
+    "currentValue": 1494.12,
+    "cashPnl": -73.83,
+    "percentPnl": -4.71,
+    "title": "Market: _politics_potus_2028",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xinsider600000000000000000000000000000006",
+    "conditionId": "0xcond_politics_potus_2028",
+    "asset": "tok-tus_2028-yes",
+    "size": 3230.68,
+    "avgPrice": 0.4234,
+    "currentValue": 1487.08,
+    "cashPnl": 119.21,
+    "percentPnl": 8.72,
+    "title": "Market: _politics_potus_2028",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000003",
+    "conditionId": "0xcond_politics_potus_2028",
+    "asset": "tok-tus_2028-yes",
+    "size": 2927.8,
+    "avgPrice": 0.438,
+    "currentValue": 1704.27,
+    "cashPnl": 421.89,
+    "percentPnl": 32.9,
+    "title": "Market: _politics_potus_2028",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xposition400000000000000000000000000000004",
+    "conditionId": "0xcond_politics_potus_2028",
+    "asset": "tok-tus_2028-yes",
+    "size": 2224.86,
+    "avgPrice": 0.2419,
+    "currentValue": 366.21,
+    "cashPnl": -171.98,
+    "percentPnl": -31.96,
+    "title": "Market: _politics_potus_2028",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000008",
+    "conditionId": "0xcond_politics_potus_2028",
+    "asset": "tok-tus_2028-yes",
+    "size": 2180.14,
+    "avgPrice": 0.6961,
+    "currentValue": 1367.17,
+    "cashPnl": -150.43,
+    "percentPnl": -9.91,
+    "title": "Market: _politics_potus_2028",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000001",
+    "conditionId": "0xcond_politics_potus_2028",
+    "asset": "tok-tus_2028-yes",
+    "size": 1193.87,
+    "avgPrice": 0.5765,
+    "currentValue": 851.71,
+    "cashPnl": 163.44,
+    "percentPnl": 23.75,
+    "title": "Market: _politics_potus_2028",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000005",
+    "conditionId": "0xcond_politics_potus_2028",
+    "asset": "tok-tus_2028-yes",
+    "size": 806.85,
+    "avgPrice": 0.2707,
+    "currentValue": 199.94,
+    "cashPnl": -18.47,
+    "percentPnl": -8.46,
+    "title": "Market: _politics_potus_2028",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000006",
+    "conditionId": "0xcond_politics_potus_2028",
+    "asset": "tok-tus_2028-yes",
+    "size": 407.67,
+    "avgPrice": 0.2358,
+    "currentValue": 76.36,
+    "cashPnl": -19.77,
+    "percentPnl": -20.57,
+    "title": "Market: _politics_potus_2028",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000007",
+    "conditionId": "0xcond_politics_potus_2028",
+    "asset": "tok-tus_2028-yes",
+    "size": 328.26,
+    "avgPrice": 0.7151,
+    "currentValue": 225.68,
+    "cashPnl": -9.06,
+    "percentPnl": -3.86,
+    "title": "Market: _politics_potus_2028",
+    "outcome": "Yes"
+  }
+]

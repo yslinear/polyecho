@@ -1,0 +1,26 @@
+[
+  {
+    "wallet": "0xdrifted500000000000000000000000000000005",
+    "conditionId": "0xcond_politics_potus_2028",
+    "asset": "tok-tus_2028-yes",
+    "size": 200,
+    "avgPrice": 0.47,
+    "currentValue": 96.0,
+    "cashPnl": 2.0,
+    "percentPnl": 2.13,
+    "title": "Market: _politics_potus_2028",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xdrifted500000000000000000000000000000005",
+    "conditionId": "0xcond_fed_june_2026",
+    "asset": "tok-une_2026-yes",
+    "size": 150,
+    "avgPrice": 0.59,
+    "currentValue": 91.5,
+    "cashPnl": 3.0,
+    "percentPnl": 3.39,
+    "title": "Market: 0xcond_fed_june_2026",
+    "outcome": "Yes"
+  }
+]

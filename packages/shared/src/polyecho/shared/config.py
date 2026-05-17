@@ -107,6 +107,18 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Datasource
+    # ------------------------------------------------------------------
+    datasource: Literal["fixture", "live"] = Field(
+        default="fixture",
+        description=(
+            "Selects the DataSource implementation.  "
+            "'fixture' (default) uses bundled JSON fixtures — no network required.  "
+            "'live' calls the Polymarket Data API at polymarket_data_api_url."
+        ),
+    )
+
+    # ------------------------------------------------------------------
     # Ops
     # ------------------------------------------------------------------
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(

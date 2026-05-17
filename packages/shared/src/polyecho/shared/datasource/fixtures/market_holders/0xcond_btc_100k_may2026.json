@@ -1,0 +1,122 @@
+[
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000009",
+    "conditionId": "0xcond_btc_100k_may2026",
+    "asset": "tok-_may2026-yes",
+    "size": 4333.52,
+    "avgPrice": 0.3671,
+    "currentValue": 1607.3,
+    "cashPnl": 16.46,
+    "percentPnl": 1.03,
+    "title": "Market: ond_btc_100k_may2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000003",
+    "conditionId": "0xcond_btc_100k_may2026",
+    "asset": "tok-_may2026-yes",
+    "size": 3921.85,
+    "avgPrice": 0.7247,
+    "currentValue": 3232.39,
+    "cashPnl": 390.23,
+    "percentPnl": 13.73,
+    "title": "Market: ond_btc_100k_may2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000000",
+    "conditionId": "0xcond_btc_100k_may2026",
+    "asset": "tok-_may2026-yes",
+    "size": 3483.42,
+    "avgPrice": 0.5093,
+    "currentValue": 1963.6,
+    "cashPnl": 189.49,
+    "percentPnl": 10.68,
+    "title": "Market: ond_btc_100k_may2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xswing1000000000000000000000000000000001",
+    "conditionId": "0xcond_btc_100k_may2026",
+    "asset": "tok-_may2026-yes",
+    "size": 3413.38,
+    "avgPrice": 0.2324,
+    "currentValue": 1219.6,
+    "cashPnl": 426.33,
+    "percentPnl": 53.74,
+    "title": "Market: ond_btc_100k_may2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000001",
+    "conditionId": "0xcond_btc_100k_may2026",
+    "asset": "tok-_may2026-yes",
+    "size": 2792.26,
+    "avgPrice": 0.73,
+    "currentValue": 2330.98,
+    "cashPnl": 292.63,
+    "percentPnl": 14.36,
+    "title": "Market: ond_btc_100k_may2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000005",
+    "conditionId": "0xcond_btc_100k_may2026",
+    "asset": "tok-_may2026-yes",
+    "size": 1909.34,
+    "avgPrice": 0.5398,
+    "currentValue": 1294.72,
+    "cashPnl": 264.06,
+    "percentPnl": 25.62,
+    "title": "Market: ond_btc_100k_may2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000004",
+    "conditionId": "0xcond_btc_100k_may2026",
+    "asset": "tok-_may2026-yes",
+    "size": 1857.98,
+    "avgPrice": 0.7305,
+    "currentValue": 1616.26,
+    "cashPnl": 259.01,
+    "percentPnl": 19.08,
+    "title": "Market: ond_btc_100k_may2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000008",
+    "conditionId": "0xcond_btc_100k_may2026",
+    "asset": "tok-_may2026-yes",
+    "size": 1387.46,
+    "avgPrice": 0.2025,
+    "currentValue": 287.48,
+    "cashPnl": 6.52,
+    "percentPnl": 2.32,
+    "title": "Market: ond_btc_100k_may2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xholder0000000000000000000000000000000000000007",
+    "conditionId": "0xcond_btc_100k_may2026",
+    "asset": "tok-_may2026-yes",
+    "size": 1243.35,
+    "avgPrice": 0.491,
+    "currentValue": 669.3,
+    "cashPnl": 58.82,
+    "percentPnl": 9.64,
+    "title": "Market: ond_btc_100k_may2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xposition400000000000000000000000000000004",
+    "conditionId": "0xcond_btc_100k_may2026",
+    "asset": "tok-_may2026-yes",
+    "size": 839.51,
+    "avgPrice": 0.3057,
+    "currentValue": 221.38,
+    "cashPnl": -35.26,
+    "percentPnl": -13.74,
+    "title": "Market: ond_btc_100k_may2026",
+    "outcome": "Yes"
+  }
+]

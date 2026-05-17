@@ -1,0 +1,26 @@
+[
+  {
+    "wallet": "0xinsider600000000000000000000000000000006",
+    "conditionId": "0xcond_btc_100k_may2026",
+    "asset": "tok-_may2026-yes",
+    "size": 5000,
+    "avgPrice": 0.12,
+    "currentValue": 3650.0,
+    "cashPnl": 3050.0,
+    "percentPnl": 508.33,
+    "title": "Market: ond_btc_100k_may2026",
+    "outcome": "Yes"
+  },
+  {
+    "wallet": "0xinsider600000000000000000000000000000006",
+    "conditionId": "0xcond_nvidia_earnings_q2",
+    "asset": "tok-nings_q2-yes",
+    "size": 3000,
+    "avgPrice": 0.09,
+    "currentValue": 2010.0,
+    "cashPnl": 1740.0,
+    "percentPnl": 644.44,
+    "title": "Market: d_nvidia_earnings_q2",
+    "outcome": "Yes"
+  }
+]
