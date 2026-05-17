@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS backtest_jobs (
   slippage_bps             INTEGER     DEFAULT 150,
   execution_delay_seconds  INTEGER     DEFAULT 30,
   -- queued | running | completed | failed
-  status                   TEXT        NOT NULL DEFAULT 'queued',
+  status                   TEXT        NOT NULL DEFAULT 'pending',
   progress                 NUMERIC(5,2) DEFAULT 0,
   result                   JSONB,
   created_at               TIMESTAMPTZ NOT NULL DEFAULT now()

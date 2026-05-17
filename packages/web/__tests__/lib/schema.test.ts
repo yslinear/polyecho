@@ -95,7 +95,7 @@ describe("lib/db/schema — key columns & types", () => {
     expect(cols.leader_addresses.notNull).toBe(true);
     expect(cols.start_date.notNull).toBe(true);
     expect(cols.end_date.notNull).toBe(true);
-    expect(cols.status.default).toBe("queued");
+    expect(cols.status.default).toBe("pending");
     expect(cols.progress.default).toBe("0");
     expect(cols.slippage_bps.default).toBe(150);
     expect(cols.execution_delay_seconds.default).toBe(30);

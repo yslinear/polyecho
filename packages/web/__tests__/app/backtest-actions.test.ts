@@ -48,14 +48,14 @@ describe("createBacktestJob", () => {
     redirect.mockClear();
   });
 
-  it("inserts a queued job and redirects to /backtest/<id>", async () => {
+  it("inserts a pending job and redirects to /backtest/<id>", async () => {
     await expect(createBacktestJob(base)).rejects.toThrow(
       "NEXT_REDIRECT;/backtest/new-job-id"
     );
     expect(insert).toHaveBeenCalledTimes(1);
     const row = values.mock.calls[0][0] as Record<string, unknown>;
     expect(row.leader_addresses).toEqual(["0xabc"]);
-    expect(row.status).toBe("queued");
+    expect(row.status).toBe("pending");
     expect(row.progress).toBe("0");
     expect(row.initial_capital_usd).toBe("1000"); // stringified for numeric col
     expect(redirect).toHaveBeenCalledWith("/backtest/new-job-id");

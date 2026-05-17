@@ -196,7 +196,7 @@ export const backtestJobs = pgTable("backtest_jobs", {
   slippage_bps: integer("slippage_bps").default(150),
   execution_delay_seconds: integer("execution_delay_seconds").default(30),
   /** queued | running | completed | failed */
-  status: text("status").notNull().default("queued"),
+  status: text("status").notNull().default("pending"),
   progress: numeric("progress", { precision: 5, scale: 2 }).default("0"),
   result: jsonb("result"),
   created_at: timestamp("created_at", { withTimezone: true })

@@ -76,7 +76,7 @@ export async function createBacktestJob(
       initial_capital_usd: String(values.initial_capital_usd),
       slippage_bps: slippage,
       execution_delay_seconds: delay,
-      status: "queued",
+      status: "pending",
       progress: "0",
     })
     .returning({ id: backtestJobs.id });
