@@ -27,19 +27,57 @@ dev = [
     "pytest-asyncio>=0.24",
 ]
 
+# ── Lint / type / test config: SINGLE SOURCE OF TRUTH (root only) ───────────
+# Per-package [tool.ruff*]/[tool.mypy*]/[tool.pytest*] blocks were intentionally
+# removed so `ruff check .` and `mypy packages/` are consistent everywhere.
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
 src = ["packages/*/src"]
 
 [tool.ruff.lint]
+# Intentional rule set: pycodestyle errors (E), pyflakes (F), import sorting (I),
+# pyupgrade (UP), bugbear (B), and async pitfalls (ASYNC). ANN*/PL* are
+# deliberately out of scope for Phase 0 (style-only, high-churn) and may be
+# broadened in a later phase.
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use bare asserts and inline literals.
+"packages/*/tests/**" = ["B011"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
 namespace_packages = true
 explicit_package_bases = true
+# All packages share the PEP 420 `polyecho` namespace under a src layout.
+# Without these src roots on the path, `mypy packages/` resolves each file
+# both as `packages.<pkg>.src.polyecho.…` and `polyecho.…` ("found twice").
+mypy_path = [
+    "packages/shared/src",
+    "packages/core/src",
+    "packages/discovery/src",
+    "packages/backtest/src",
+    "packages/push/src",
+    "packages/cli/src",
+]
+
+# Phase-0 stubs: trader-core and web-push-sender are skeletons whose
+# implementations land later. Re-enable strict in Phase 4 (core) / Phase 5
+# (push). Scoped here (not silenced globally) so shared/discovery/backtest/cli
+# stay fully strict-typed.
+[[tool.mypy.overrides]]
+module = ["polyecho.core.*", "polyecho.push.*"]
+ignore_errors = true
+
+# `pandas` ships no inline types and `pandas-stubs` is not in the frozen
+# uv.lock; this is the documented, narrowly-scoped exception for a single
+# third-party lib (not a blanket ignore_missing_imports).
+[[tool.mypy.overrides]]
+module = ["pandas", "pandas.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

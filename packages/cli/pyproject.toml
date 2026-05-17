@@ -15,17 +15,6 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/polyecho"]
 
-[tool.ruff]
-line-length = 100
-target-version = "py312"
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "C4", "PIE", "RET", "SIM", "TCH", "ANN", "PL"]
-ignore = ["ANN101", "ANN102"]
-
-
-[tool.mypy]
-python_version = "3.12"
-strict = true
-warn_return_any = true
-warn_unused_ignores = true
+# NOTE: ruff / mypy / pytest config is intentionally centralized in the
+# repo-root pyproject.toml (single source of truth). Per-package tool
+# blocks were removed so `ruff check .` / `mypy packages/` are consistent.
