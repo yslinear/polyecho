@@ -99,7 +99,11 @@ class LiveDataSource:
     # ------------------------------------------------------------------
 
     async def __aenter__(self) -> LiveDataSource:
-        self._client = httpx.AsyncClient(
+        # Routed through the optional operator proxy (settings DB → env);
+        # byte-identical to a bare httpx.AsyncClient when no proxy is set.
+        from polyecho.shared.http import make_async_client_resolved
+
+        self._client = await make_async_client_resolved(
             base_url=self._base_url,
             timeout=self._timeout,
             headers={"Accept": "application/json"},

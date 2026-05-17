@@ -575,9 +575,9 @@ async def fetch_usdc_balance(
     try:
         if client is not None:
             return await _do(client)
-        import httpx
+        from polyecho.shared.http import make_async_client_resolved
 
-        async with httpx.AsyncClient(timeout=timeout_s) as c:
+        async with await make_async_client_resolved(timeout=timeout_s) as c:
             return await _do(c)
     except Exception:  # noqa: BLE001 - balance is strictly best-effort
         logger.debug("fetch_usdc_balance_failed", extra={"address": address})

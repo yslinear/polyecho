@@ -85,6 +85,22 @@ class PolymarketClient:
                 api_passphrase=creds["api_passphrase"],
             )
 
+        # py-clob-client-v2's ClobClient exposes NO proxy/session parameter
+        # (verified via context7). Its underlying HTTP layer honours the
+        # standard proxy env vars, so when an operator proxy is configured
+        # (PRD §8.1 geo-block) export it for this process before building the
+        # client. http(s) only — see polyecho.shared.http SOCKS note.
+        # TODO(verify): exact transport of py-clob-client-v2 is unconfirmed;
+        # env-proxy is the documented best-effort for requests/httpx clients.
+        import os
+
+        from polyecho.shared.http import get_proxy_url
+
+        _proxy = get_proxy_url()
+        if _proxy:
+            for _var in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+                os.environ.setdefault(_var, _proxy)
+
         self._client = ClobClient(
             host=settings.polymarket_clob_url,
             chain_id=settings.polymarket_chain_id,

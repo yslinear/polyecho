@@ -70,6 +70,19 @@ class Settings(BaseSettings):
         default=137,
         description="EVM chain ID. 137 = Polygon mainnet; 80002 = Amoy testnet.",
     )
+    polymarket_proxy_url: str | None = Field(
+        default=None,
+        description=(
+            "Optional outbound proxy for ALL Polymarket API calls "
+            "(data-api httpx, CLOB client, balance probe, doctor). "
+            "Format: http://[user:pass@]host:port (https:// also fine; "
+            "socks5:// needs httpx[socks], not bundled). Needed where "
+            "Polymarket is geo-blocked (PRD §8.1). None = direct connection. "
+            "Env-level default; the `settings` DB table key "
+            "'polymarket_proxy_url' overrides this at runtime (set via the "
+            "web /settings page — PRD §5.7 安全寫入 tier)."
+        ),
+    )
 
     # ------------------------------------------------------------------
     # Key encryption  (CLI only — never read by the web process)

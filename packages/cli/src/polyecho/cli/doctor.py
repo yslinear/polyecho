@@ -119,12 +119,19 @@ def _check_db() -> _CheckResult:
 
 
 def _check_polymarket() -> _CheckResult:
-    """HTTP GET to the CLOB time/health endpoint."""
+    """HTTP GET to the CLOB time/health endpoint (via the optional proxy)."""
     try:
         settings = get_settings()
         url = f"{settings.polymarket_clob_url.rstrip('/')}/time"
+        from polyecho.shared.http import get_proxy_url
+
+        proxy = get_proxy_url()
         t0 = time.perf_counter()
-        with httpx.Client(timeout=10.0) as client:
+        with (
+            httpx.Client(timeout=10.0, proxy=proxy)
+            if proxy
+            else httpx.Client(timeout=10.0)
+        ) as client:
             resp = client.get(url)
         latency_ms = (time.perf_counter() - t0) * 1000
         if resp.is_success:
