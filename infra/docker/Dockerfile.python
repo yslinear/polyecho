@@ -12,7 +12,12 @@ ARG UV_VERSION=0.5
 # ── Stage 1: builder ──────────────────────────────────────────────────────────
 FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-bookworm-slim AS builder
 
-WORKDIR /build
+# IMPORTANT: build under the SAME path used at runtime (/app). `uv sync` installs
+# the uv-workspace members as EDITABLE installs whose .pth entries hard-code the
+# absolute src path. If builder used /build and runtime used /app, those editable
+# links would dangle → `ModuleNotFoundError: No module named 'polyecho'`. Keeping
+# both stages at /app makes the editable namespace package resolve correctly.
+WORKDIR /app
 
 # Copy workspace manifest files first (cache-friendly layer)
 COPY pyproject.toml ./
@@ -56,14 +61,19 @@ RUN groupadd --gid 1001 polyecho && \
 
 WORKDIR /app
 
-# Copy the entire virtualenv produced by uv
-COPY --from=builder /build/.venv /app/.venv
+# Copy the venv produced by uv (built at /app — see builder note).
+COPY --from=builder /app/.venv /app/.venv
 
-# Copy source into runtime (needed because venv uses editable installs)
-COPY --from=builder /build/packages /app/packages
+# Copy source into runtime at the SAME path the editable installs reference
+# (/app/packages/*/src). Without the matching path the `polyecho` namespace
+# package is not importable.
+COPY --from=builder /app/packages /app/packages
 
-# Put the venv on PATH
+# Put the venv on PATH. Belt-and-suspenders: also expose every package `src`
+# on PYTHONPATH so the PEP 420 `polyecho` namespace resolves even if the
+# editable finder is unhappy after the cross-stage copy.
 ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONPATH="/app/packages/shared/src:/app/packages/core/src:/app/packages/discovery/src:/app/packages/backtest/src:/app/packages/push/src:/app/packages/cli/src"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
