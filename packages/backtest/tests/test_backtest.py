@@ -377,3 +377,309 @@ async def test_leader_pnl_curve_populated() -> None:
 
     # Leader PnL curve should have same length as copy curve
     assert len(result.leader_pnl_curve) == len(result.pnl_curve)
+
+
+# ---------------------------------------------------------------------------
+# 9. compute_max_drawdown — negative / non-positive-peak curves (REGRESSION)
+#
+# The PnL curve produced by _build_pnl_curve starts at 0.0 and *frequently*
+# goes negative (it is cumulative PnL above initial capital, and copy-trading
+# loses money often).  The original implementation divided the dollar decline
+# by abs(peak) — or used abs(v) * 100 when peak == 0 — yielding absurd,
+# unbounded results (e.g. a 5000 % "drawdown" for the ordinary curve
+# [0.0, -50.0]).  Drawdown as a percentage of the high-water mark is only
+# defined while that high-water mark is strictly positive.
+# ---------------------------------------------------------------------------
+
+
+class TestComputeMaxDrawdownNegativeCurves:
+    def test_zero_then_loss_is_not_thousands_of_percent(self) -> None:
+        # REGRESSION: previously returned 5000.0
+        dd = compute_max_drawdown([0.0, -50.0])
+        assert dd == pytest.approx(0.0)
+
+    def test_negative_then_more_negative_is_bounded(self) -> None:
+        # REGRESSION: previously returned 400.0
+        dd = compute_max_drawdown([-10.0, -50.0])
+        assert dd == pytest.approx(0.0)
+
+    def test_negative_recovering_no_drawdown(self) -> None:
+        assert compute_max_drawdown([-50.0, -10.0]) == pytest.approx(0.0)
+
+    def test_positive_peak_then_negative_uses_peak_denominator(self) -> None:
+        # Peak +100, trough -50 → (100 - (-50)) / 100 = 150 %
+        assert compute_max_drawdown([100.0, -50.0]) == pytest.approx(150.0)
+
+    def test_crosses_zero_then_recovers(self) -> None:
+        # Running peak reaches +20; trough -10 → (20 - (-10)) / 20 = 150 %
+        assert compute_max_drawdown([0.0, -30.0, 20.0, -10.0]) == pytest.approx(150.0)
+
+    def test_existing_positive_curves_unchanged(self) -> None:
+        # The previously-passing cases must remain identical.
+        assert compute_max_drawdown([0.0, 50.0, 100.0, 50.0]) == pytest.approx(50.0)
+        assert compute_max_drawdown([0.0, 100.0, 40.0, 80.0, 200.0]) == pytest.approx(60.0)
+        assert compute_max_drawdown([0.0, 10.0, 20.0, 30.0]) == pytest.approx(0.0)
+
+    def test_always_non_negative_and_finite(self) -> None:
+        import math as _m
+
+        for curve in (
+            [-1.0, -2.0, -3.0],
+            [0.0, -1000.0],
+            [5.0, -5.0, 5.0, -5.0],
+            [-0.0001, 0.0001],
+        ):
+            dd = compute_max_drawdown(curve)
+            assert dd >= 0.0
+            assert _m.isfinite(dd)
+
+
+@pytest.mark.asyncio
+async def test_losing_leader_backtest_has_sane_max_drawdown() -> None:
+    """End-to-end: a losing copy run must report a bounded max_drawdown_pct.
+
+    Heavy pessimistic slippage on the scalper guarantees a negative-leaning
+    PnL curve; max_drawdown_pct must stay finite and not explode into the
+    thousands of percent (the bug this regression guards).
+    """
+    engine = make_engine()
+    from dataclasses import replace
+
+    params = replace(
+        base_params(SCALPER, copy_ratio=0.05),
+        slippage_bps=300,
+        execution_delay_seconds=60,
+    )
+    result = await engine.run(params)
+
+    import math as _m
+
+    assert _m.isfinite(result.max_drawdown_pct)
+    assert result.max_drawdown_pct >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# 10. Job-queue lifecycle: pending → running → done  AND  → failed
+#     (jobs.py had zero coverage; mandate requires the full lifecycle.)
+# ---------------------------------------------------------------------------
+
+
+class _FakeJob:
+    """Minimal stand-in for the BacktestJob ORM row used by jobs.py."""
+
+    def __init__(
+        self,
+        *,
+        leader_addresses: list[str],
+        template_params: dict[str, object] | None = None,
+    ) -> None:
+        import uuid as _uuid
+
+        self.id = _uuid.uuid4()
+        self.leader_addresses = leader_addresses
+        self.template_params = template_params
+        self.start_date = START
+        self.end_date = END
+        self.initial_capital_usd = 1000.0
+        self.slippage_bps = 150
+        self.execution_delay_seconds = 30
+        self.status = "pending"
+        self.progress = 0.0
+        self.result: dict[str, object] | None = None
+
+
+def _patch_status_recorder(
+    monkeypatch: pytest.MonkeyPatch, transitions: list[dict[str, object]]
+) -> None:
+    """Capture every job status transition without a real database.
+
+    jobs.py funnels *all* status/progress/result writes through the module
+    helper ``_set_status``.  Patching that single seam (plus a no-op
+    ``session_scope``) records the full pending→running→done|failed
+    lifecycle deterministically and without depending on SQLAlchemy
+    statement internals.
+    """
+    import contextlib
+
+    from polyecho.backtest import jobs as jobs_mod
+
+    @contextlib.asynccontextmanager
+    async def _fake_scope():  # type: ignore[no-untyped-def]
+        yield object()
+
+    async def _record_set_status(
+        session: object,
+        job_id: object,
+        status: str,
+        *,
+        progress: float | None = None,
+        result: dict[str, object] | None = None,
+    ) -> None:
+        transitions.append(
+            {"status": status, "progress": progress, "result": result}
+        )
+
+    monkeypatch.setattr(jobs_mod, "session_scope", _fake_scope)
+    monkeypatch.setattr(jobs_mod, "_set_status", _record_set_status)
+
+
+@pytest.mark.asyncio
+async def test_job_lifecycle_pending_to_running_to_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyecho.backtest.jobs import _process_job
+
+    transitions: list[dict[str, object]] = []
+    _patch_status_recorder(monkeypatch, transitions)
+
+    job = _FakeJob(
+        leader_addresses=[SWING],
+        template_params={"copy_ratio": 0.05, "min_trade_size_usd": 1.0},
+    )
+    engine = make_engine()
+
+    await _process_job(job, engine)  # type: ignore[arg-type]
+
+    statuses = [t["status"] for t in transitions]
+    # First a 'running' (progress 0), …, ending with a 'done'.
+    assert statuses[0] == "running"
+    assert statuses[-1] == "done"
+    assert "failed" not in statuses
+
+    first = transitions[0]
+    assert float(first["progress"]) == pytest.approx(0.0)  # type: ignore[arg-type]
+
+    final = transitions[-1]
+    assert float(final["progress"]) == pytest.approx(100.0)  # type: ignore[arg-type]
+    result = final["result"]
+    assert isinstance(result, dict)
+    assert "leaders" in result
+    assert SWING in result["leaders"]
+    # Successful leader → triple-scenario dict, not an error envelope.
+    assert "error" not in result["leaders"][SWING]
+    assert set(result["leaders"][SWING]) == {"optimistic", "neutral", "pessimistic"}
+
+
+@pytest.mark.asyncio
+async def test_job_lifecycle_records_per_leader_error_then_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leader that raises inside run_triple must NOT fail the whole job.
+
+    jobs._process_job catches per-leader exceptions, stores an error
+    envelope for that leader, and still finishes the job as 'done'.
+    """
+    import polyecho.backtest.jobs as jobs_mod
+    from polyecho.backtest.jobs import _process_job
+
+    transitions: list[dict[str, object]] = []
+    _patch_status_recorder(monkeypatch, transitions)
+
+    async def _boom(engine: object, params: object, leader: str) -> dict[str, object]:
+        raise RuntimeError("synthetic leader failure")
+
+    monkeypatch.setattr(jobs_mod, "run_triple", _boom)
+
+    job = _FakeJob(leader_addresses=["0xbad"], template_params=None)
+    await _process_job(job, make_engine())  # type: ignore[arg-type]
+
+    statuses = [t["status"] for t in transitions]
+    assert statuses[-1] == "done"  # per-leader error is contained
+    final_result = transitions[-1]["result"]
+    assert isinstance(final_result, dict)
+    env = final_result["leaders"]["0xbad"]
+    assert "error" in env
+    assert "RuntimeError" in env["error"]
+
+
+@pytest.mark.asyncio
+async def test_process_pending_jobs_marks_failed_on_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If _process_job itself raises, the loop must write status='failed'.
+
+    This exercises the pending→failed branch of process_pending_jobs with
+    ``once=True`` so it returns after a single poll.
+    """
+    import polyecho.backtest.jobs as jobs_mod
+    from polyecho.backtest.jobs import process_pending_jobs
+
+    transitions: list[dict[str, object]] = []
+    _patch_status_recorder(monkeypatch, transitions)
+
+    job = _FakeJob(leader_addresses=[SWING])
+
+    async def _fake_fetch(_session: object) -> list[object]:
+        return [job]
+
+    async def _explode(_job: object, _engine: object) -> None:
+        raise ValueError("catastrophic processing error")
+
+    monkeypatch.setattr(jobs_mod, "_fetch_pending", _fake_fetch)
+    monkeypatch.setattr(jobs_mod, "_process_job", _explode)
+
+    await process_pending_jobs(make_ds(), once=True)
+
+    statuses = [t["status"] for t in transitions]
+    assert statuses[-1] == "failed"
+    err = transitions[-1]["result"]
+    assert isinstance(err, dict)
+    assert "ValueError" in err["error"]
+
+
+# ---------------------------------------------------------------------------
+# 11. _build_params: top-level job columns win over template_params
+# ---------------------------------------------------------------------------
+
+
+def test_build_params_template_merge_and_column_precedence() -> None:
+    from polyecho.backtest.jobs import _build_params
+
+    job = _FakeJob(
+        leader_addresses=["0xignored"],
+        template_params={
+            "copy_ratio": 0.02,
+            "fixed_size_usd": 7.5,
+            "max_position_usd": 333.0,
+            "min_trade_size_usd": 2.0,
+            "daily_loss_limit_usd": 99.0,
+            "max_concurrent_positions": 4,
+            "category_whitelist": ["Crypto"],
+            # Even if a stale slippage leaks into template_params it must be
+            # ignored — the top-level column is authoritative.
+            "slippage_bps": 9999,
+        },
+    )
+    job.slippage_bps = 222
+    job.execution_delay_seconds = 45
+
+    params = _build_params(job, "0xleaderX")  # type: ignore[arg-type]
+
+    assert params.leader_address == "0xleaderX"
+    assert params.copy_ratio == pytest.approx(0.02)
+    assert params.fixed_size_usd == pytest.approx(7.5)
+    assert params.max_position_usd == pytest.approx(333.0)
+    assert params.min_trade_size_usd == pytest.approx(2.0)
+    assert params.daily_loss_limit_usd == pytest.approx(99.0)
+    assert params.max_concurrent_positions == 4
+    assert params.category_whitelist == ["Crypto"]
+    # Column precedence: template_params slippage is ignored.
+    assert params.slippage_bps == 222
+    assert params.execution_delay_seconds == 45
+    assert params.start_date == START
+    assert params.end_date == END
+
+
+def test_build_params_defaults_when_template_absent() -> None:
+    from polyecho.backtest.jobs import _build_params
+
+    job = _FakeJob(leader_addresses=["0xx"], template_params=None)
+    params = _build_params(job, "0xx")  # type: ignore[arg-type]
+
+    assert params.copy_ratio == pytest.approx(0.001)
+    assert params.fixed_size_usd == pytest.approx(0.0)
+    assert params.max_position_usd == pytest.approx(100.0)
+    assert params.min_trade_size_usd == pytest.approx(5.0)
+    assert params.daily_loss_limit_usd == pytest.approx(50.0)
+    assert params.max_concurrent_positions == 10
+    assert params.category_whitelist is None

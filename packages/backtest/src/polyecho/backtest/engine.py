@@ -260,11 +260,24 @@ def compute_max_drawdown(cumulative_pnl: list[float]) -> float:
 
     Returns a positive percentage (e.g. 12.5 means 12.5% drawdown from peak).
 
+    The input is the cumulative-PnL-above-initial-capital curve produced by
+    :meth:`BacktestEngine._build_pnl_curve` (it starts at 0.0 and may go
+    negative when the strategy loses money).  Drawdown is, by definition, the
+    decline from a running high-water mark expressed as a percentage *of that
+    high-water mark*.  When the running peak is **not strictly positive** the
+    percentage is mathematically undefined — you cannot be "down 50 % from a
+    peak of $0" — so any decline occurring before the curve first rises above
+    0.0 contributes no percentage drawdown.  The previous implementation
+    divided the dollar decline by ``abs(peak)`` (or used ``abs(v) * 100``
+    when ``peak == 0``), which produced absurd, unbounded results such as a
+    5000 % "drawdown" for the perfectly ordinary curve ``[0.0, -50.0]``.
+
     Args:
         cumulative_pnl: List of cumulative PnL values in USD.
 
     Returns:
-        Max drawdown percentage, or 0.0 if no drawdown occurred.
+        Max drawdown percentage (>= 0.0), or 0.0 if no positive-peak
+        drawdown occurred.
     """
     if not cumulative_pnl:
         return 0.0
@@ -274,12 +287,12 @@ def compute_max_drawdown(cumulative_pnl: list[float]) -> float:
     for v in arr:
         if v > peak:
             peak = v
-        if peak != 0.0:
-            dd = (peak - v) / abs(peak) * 100.0
-        else:
-            dd = 0.0 if v >= 0.0 else abs(v) * 100.0
-        if dd > max_dd:
-            max_dd = dd
+        # Drawdown as a percentage of the high-water mark is only defined
+        # while that high-water mark is strictly positive.
+        if peak > 0.0:
+            dd = (peak - v) / peak * 100.0
+            if dd > max_dd:
+                max_dd = dd
     return float(max_dd)
 
 
@@ -624,14 +637,33 @@ class BacktestEngine:
         """Return mark-to-market price for an open position.
 
         ASSUMPTION-MTM: use PositionRecord.current_value / size as last price;
-        fall back to fill_price (zero PnL) if no position data exists.
+        fall back to the position's own entry price (→ zero MTM PnL) when no
+        position-snapshot record exists for ``cond_id``.
+
+        This helper is called with two differently-shaped position dicts:
+
+        * copy positions built in :meth:`run` use the key ``"fill_price"``;
+        * leader positions built in :meth:`_update_leader_tracking` use the
+          key ``"price"``.
+
+        The original fallback hard-coded ``pos["fill_price"]`` and therefore
+        raised ``KeyError: 'fill_price'`` for every leader position whose
+        ``condition_id`` was absent from ``positions_map`` — i.e. any leader
+        still holding an open position with no matching position fixture
+        (reproducible with the scalper archetype).  We now accept either
+        key so both call sites are safe, defaulting to 0.0 only if neither
+        is present.
         """
         if cond_id in positions_map:
             p = positions_map[cond_id]
             if p.size > 0.0:
                 return p.current_value / p.size
-        # Fallback: no new information → use fill price (zero MTM PnL)
-        return float(pos["fill_price"])
+        # Fallback: no new information → use the position's own entry price
+        # so that shares * (last_price - entry_price) == 0 (zero MTM PnL).
+        entry = pos.get("fill_price")
+        if entry is None:
+            entry = pos.get("price", 0.0)
+        return float(entry)
 
     def _update_leader_tracking(
         self,
