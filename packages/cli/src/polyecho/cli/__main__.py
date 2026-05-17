@@ -18,11 +18,13 @@ from __future__ import annotations
 import typer
 
 from polyecho.cli.account import app as account_app
+from polyecho.cli.alerts import app as alerts_app
 from polyecho.cli.backtest import app as backtest_app
 from polyecho.cli.db import app as db_app
 from polyecho.cli.discovery import app as discovery_app
 from polyecho.cli.doctor import doctor
 from polyecho.cli.logs import app as logs_app
+from polyecho.cli.push import app as push_app
 from polyecho.cli.trader import app as trader_app
 
 app = typer.Typer(
@@ -43,6 +45,16 @@ app.add_typer(
 )
 app.add_typer(db_app, name="db", help="Database operations.")
 app.add_typer(logs_app, name="logs", help="View service logs.")
+app.add_typer(
+    push_app,
+    name="push",
+    help="Web-push operator tools (VAPID keygen).",
+)
+app.add_typer(
+    alerts_app,
+    name="alerts",
+    help="View recent push events (the events log).",
+)
 
 # Top-level commands
 app.command(name="doctor")(doctor)
