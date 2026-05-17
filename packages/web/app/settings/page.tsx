@@ -1,68 +1,78 @@
 /**
- * /settings — Global configuration
- * Phase 0 skeleton: settings key/value editor and template management come in Phase 4.
+ * /settings — Global configuration (PRD §6.1).
+ *
+ * Server Component: reads the current `polymarket_proxy_url` settings row
+ * via the Drizzle client and hands the value to the proxy form (client
+ * island). trader-core's `_coerce_proxy` accepts a bare string OR
+ * `{"value": "..."}`; we read either shape and normalise to a plain string.
  */
 
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { eq } from "drizzle-orm";
 
-export default function SettingsPage() {
+import { db } from "@/lib/db";
+import { settings } from "@/lib/db/schema";
+import { ProxyForm } from "./proxy-form";
+
+export const dynamic = "force-dynamic";
+
+const SETTINGS_KEY = "polymarket_proxy_url";
+
+/** Normalise the stored jsonb (string | {value} | null) to a plain string. */
+function coerceStored(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (
+    value &&
+    typeof value === "object" &&
+    "value" in value &&
+    typeof (value as { value: unknown }).value === "string"
+  ) {
+    return (value as { value: string }).value;
+  }
+  return "";
+}
+
+export default async function SettingsPage() {
+  const [row] = await db
+    .select({ value: settings.value, updated_at: settings.updated_at })
+    .from(settings)
+    .where(eq(settings.key, SETTINGS_KEY))
+    .limit(1);
+
+  const current = coerceStored(row?.value);
+
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold">Settings</h1>
-        <p className="text-muted-foreground mt-1">
-          Global trading config and copy templates
+    <div className="mx-auto max-w-2xl space-y-8">
+      <header className="space-y-1.5">
+        <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
+        <p className="max-w-prose text-sm text-muted-foreground">
+          Global trading configuration. Changes are written through deliberate
+          server actions; dangerous operations stay on the CLI.
         </p>
-      </div>
+      </header>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Copy Templates</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm text-muted-foreground">
-              Conservative / Balanced / Aggressive template editor will appear
-              here. Changes write to copy_templates via Server Action.
-            </p>
-            <Badge variant="outline" className="mt-3">
-              Phase 4
-            </Badge>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Risk Parameters</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm text-muted-foreground">
-              Global pause toggle, conservative mode, daily loss limits, and
-              category whitelist editor will appear here.
-            </p>
-            <Badge variant="outline" className="mt-3">
-              Phase 4
-            </Badge>
-          </CardContent>
-        </Card>
-      </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Web Push Subscriptions</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">
-            Push subscription management and notification preferences will
-            appear here. Requires Safari 16.4+ and adding Dashboard to Home
-            Screen as PWA.
+      <section className="space-y-4">
+        <div className="space-y-1">
+          <h2 className="text-base font-semibold">Polymarket proxy</h2>
+          <p className="max-w-prose text-sm text-muted-foreground">
+            Outbound HTTP proxy for every Polymarket request. Leave it blank to
+            connect directly.
           </p>
-          <Badge variant="outline" className="mt-3">
-            Phase 5
-          </Badge>
-        </CardContent>
-      </Card>
+        </div>
+
+        <ProxyForm
+          current={current}
+          lastUpdated={row?.updated_at ? row.updated_at.toISOString() : null}
+        />
+      </section>
+
+      <section className="space-y-3 border-t pt-6">
+        <h2 className="text-base font-semibold">Copy templates &amp; risk</h2>
+        <p className="max-w-prose text-sm text-muted-foreground">
+          Conservative / Balanced / Aggressive templates, the global pause
+          toggle, daily loss limits and the category whitelist are edited from
+          the CLI for now. They will move here in a later phase.
+        </p>
+      </section>
     </div>
   );
 }
