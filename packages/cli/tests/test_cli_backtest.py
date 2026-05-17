@@ -321,6 +321,53 @@ class TestBacktestShow:
         assert "Three-Scenario" in result.output
         assert "12.5" in result.output
 
+    def test_show_exact_uuid(self) -> None:
+        """show with a full valid UUID should resolve via the exact branch."""
+        fake_job = _make_fake_job(status="pending")
+        scope = _make_session_scope(scalar_result=fake_job)
+
+        with patch("polyecho.cli.backtest.session_scope", scope):
+            result = runner.invoke(app, ["backtest", "show", str(_FAKE_JOB_ID)])
+
+        assert result.exit_code == 0, result.output
+        assert _FAKE_JOB_ID_SHORT in result.output
+
+    def test_show_unique_prefix(self) -> None:
+        """show with an 8-char prefix matching exactly one job should display it."""
+        fake_job = _make_fake_job(status="pending")
+        # scalar_result single -> scalars().all() == [fake_job] (one match)
+        scope = _make_session_scope(scalar_result=fake_job)
+
+        with patch("polyecho.cli.backtest.session_scope", scope):
+            result = runner.invoke(app, ["backtest", "show", _FAKE_JOB_ID_SHORT])
+
+        assert result.exit_code == 0, result.output
+        assert _FAKE_JOB_ID_SHORT in result.output
+        assert "Ambiguous" not in result.output
+
+    def test_show_multi_match_prefix_friendly_no_exception(self) -> None:
+        """A prefix matching >1 job must print a friendly message and exit
+        non-zero WITHOUT raising MultipleResultsFound."""
+        job_a = _make_fake_job(id=uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001"))
+        job_b = _make_fake_job(id=uuid.UUID("aaaaaaaa-0000-0000-0000-000000000002"))
+        # list scalar_result -> scalars().all() returns both jobs (prefix branch)
+        scope = _make_session_scope(scalar_result=[job_a, job_b])
+
+        with patch("polyecho.cli.backtest.session_scope", scope):
+            result = runner.invoke(app, ["backtest", "show", "aaaaaaaa"])
+
+        # Non-zero exit, no unhandled exception bubbled through.
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        out = result.output
+        assert "Ambiguous" in out
+        assert "aaaaaaaa" in out
+        # Both short ids listed for disambiguation.
+        assert str(job_a.id)[:8] in out
+        assert str(job_b.id)[:8] in out
+        # Did not crash with the SQLAlchemy cardinality error.
+        assert "MultipleResultsFound" not in out
+
     def test_show_not_found(self) -> None:
         """show with a non-existent ID should exit with code 1."""
         scope = _make_session_scope(scalar_result=None)

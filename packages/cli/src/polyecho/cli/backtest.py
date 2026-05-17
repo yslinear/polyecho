@@ -21,6 +21,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from sqlalchemy import Text, cast, select
 
 from polyecho.shared.db import session_scope
 from polyecho.shared.models import BacktestJob
@@ -150,7 +151,6 @@ def list_backtests(
     ] = 20,
 ) -> None:
     """List recent backtest jobs and their status."""
-    from sqlalchemy import select
 
     async def _fetch() -> list[BacktestJob]:
         async with session_scope() as session:
@@ -210,34 +210,58 @@ def show(
     """Display the full result of a backtest job."""
     import json
 
-    from sqlalchemy import select
+    async def _fetch() -> list[BacktestJob]:
+        """Resolve ``job_id`` to matching job(s).
 
-    async def _fetch() -> BacktestJob | None:
+        Exact UUID lookups return at most one row.  Prefix lookups may match
+        several rows; we return *all* of them so the caller can render a
+        friendly disambiguation message instead of crashing on
+        ``MultipleResultsFound``.
+        """
         async with session_scope() as session:
             # Try exact UUID first
             try:
                 uid = uuid.UUID(job_id)
+            except ValueError:
+                uid = None
+
+            if uid is not None:
                 result = await session.execute(
                     select(BacktestJob).where(BacktestJob.id == uid)
                 )
-                return result.scalar_one_or_none()
-            except ValueError:
-                pass
-            # Fall back to prefix search
+                row = result.scalar_one_or_none()
+                return [row] if row is not None else []
+
+            # Fall back to prefix search — may match multiple jobs.
             result = await session.execute(
                 select(BacktestJob).where(
-                    BacktestJob.id.cast(
-                        __import__("sqlalchemy").Text
-                    ).like(f"{job_id}%")
+                    cast(BacktestJob.id, Text).like(f"{job_id}%")
                 )
             )
-            return result.scalar_one_or_none()
+            return list(result.scalars().all())
 
-    job = asyncio.run(_fetch())
+    matches = asyncio.run(_fetch())
 
-    if job is None:
+    if not matches:
         _console.print(f"[red]Job not found:[/red] {job_id}")
         raise typer.Exit(code=1)
+
+    if len(matches) > 1:
+        short_ids = ", ".join(sorted(_short_id(m.id) for m in matches))
+        _console.print(
+            Panel(
+                f"[bold yellow]Ambiguous id prefix[/bold yellow] "
+                f"[cyan]{job_id}[/cyan] matched {len(matches)} jobs:\n"
+                f"  {short_ids}\n\n"
+                f"[dim]Provide more characters (or the full UUID) to "
+                f"disambiguate.[/dim]",
+                title="[dim]polyecho backtest show[/dim]",
+                border_style="yellow",
+            )
+        )
+        raise typer.Exit(code=1)
+
+    job = matches[0]
 
     _console.print(
         Panel(
