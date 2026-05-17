@@ -541,9 +541,12 @@ async def test_job_lifecycle_pending_to_running_to_done(
     await _process_job(job, engine)  # type: ignore[arg-type]
 
     statuses = [t["status"] for t in transitions]
-    # First a 'running' (progress 0), …, ending with a 'done'.
+    # First a 'running' (progress 0), …, ending with a 'completed'.
+    # Terminal success status is 'completed' (matches the ORM model docstring,
+    # 0000_init.sql, web schema.ts, and CLI `backtest show` which gate on
+    # status in ('completed', 'failed')).
     assert statuses[0] == "running"
-    assert statuses[-1] == "done"
+    assert statuses[-1] == "completed"
     assert "failed" not in statuses
 
     first = transitions[0]
@@ -567,7 +570,7 @@ async def test_job_lifecycle_records_per_leader_error_then_completes(
     """A leader that raises inside run_triple must NOT fail the whole job.
 
     jobs._process_job catches per-leader exceptions, stores an error
-    envelope for that leader, and still finishes the job as 'done'.
+    envelope for that leader, and still finishes the job as 'completed'.
     """
     import polyecho.backtest.jobs as jobs_mod
     from polyecho.backtest.jobs import _process_job
@@ -584,7 +587,7 @@ async def test_job_lifecycle_records_per_leader_error_then_completes(
     await _process_job(job, make_engine())  # type: ignore[arg-type]
 
     statuses = [t["status"] for t in transitions]
-    assert statuses[-1] == "done"  # per-leader error is contained
+    assert statuses[-1] == "completed"  # per-leader error is contained
     final_result = transitions[-1]["result"]
     assert isinstance(final_result, dict)
     env = final_result["leaders"]["0xbad"]

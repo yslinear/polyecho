@@ -6,8 +6,14 @@ BacktestEngine.  Contract (FROZEN, shared with CLI agent):
   - Polls rows WHERE status='pending'  (FOR UPDATE SKIP LOCKED when possible)
   - Sets status→'running' + progress=0 before starting
   - Runs BacktestEngine.run() for every leader in leader_addresses
-  - Writes result JSONB (per-leader triple-scenario) + status→'done'
+  - Writes result JSONB (per-leader triple-scenario) + status→'completed'
   - On any exception: status→'failed', result={'error': str(exc)}
+
+  NOTE: terminal success status is 'completed' (NOT 'done'). This is the
+  contract shared with the ORM model docstring, infra/migrations/0000_init.sql,
+  packages/web/lib/db/schema.ts, and the CLI `backtest show`/data-table which
+  all gate on status in ('completed', 'failed'). Writing 'done' here left
+  every finished job stuck looking unfinished in the UI/CLI.
   - No secrets in logs (no private keys, no DB URLs)
 """
 
@@ -40,8 +46,23 @@ def _build_params(job: BacktestJob, leader_address: str) -> BacktestParams:
     template_params JSONB (if present) can carry any BacktestParams field.
     Top-level job columns (start_date, end_date, initial_capital_usd,
     slippage_bps, execution_delay_seconds) always win over template_params.
+
+    NOTE: the CLI (`polyecho backtest new`) writes EXPLICIT JSON ``null`` for
+    every option the user did not pass (max_position_usd, min_trade_size_usd,
+    daily_loss_limit_usd, max_concurrent_positions, fixed_size_usd, ...). With
+    plain ``tp.get(key, default)`` the key *exists* with value ``None``, so the
+    default is NOT used and ``float(None)`` / ``int(None)`` raises
+    ``TypeError: float() argument must be ... not 'NoneType'`` — every
+    default-option CLI job failed with a per-leader error envelope instead of a
+    real backtest. ``_opt`` below coalesces an explicit ``None`` to the
+    documented PRD §5.4 default so CLI-enqueued jobs run correctly.
     """
     tp: dict[str, Any] = job.template_params or {}
+
+    def _opt(key: str, default: Any) -> Any:
+        """tp[key] unless absent OR explicitly None → then `default`."""
+        val = tp.get(key)
+        return default if val is None else val
 
     return BacktestParams(
         leader_address=leader_address,
@@ -52,12 +73,12 @@ def _build_params(job: BacktestJob, leader_address: str) -> BacktestParams:
         if isinstance(job.end_date, date)
         else date.fromisoformat(str(job.end_date)),
         initial_capital_usd=float(job.initial_capital_usd),
-        copy_ratio=float(tp.get("copy_ratio", 0.001)),
-        fixed_size_usd=float(tp.get("fixed_size_usd", 0.0)),
-        max_position_usd=float(tp.get("max_position_usd", 100.0)),
-        min_trade_size_usd=float(tp.get("min_trade_size_usd", 5.0)),
-        daily_loss_limit_usd=float(tp.get("daily_loss_limit_usd", 50.0)),
-        max_concurrent_positions=int(tp.get("max_concurrent_positions", 10)),
+        copy_ratio=float(_opt("copy_ratio", 0.001)),
+        fixed_size_usd=float(_opt("fixed_size_usd", 0.0)),
+        max_position_usd=float(_opt("max_position_usd", 100.0)),
+        min_trade_size_usd=float(_opt("min_trade_size_usd", 5.0)),
+        daily_loss_limit_usd=float(_opt("daily_loss_limit_usd", 50.0)),
+        max_concurrent_positions=int(_opt("max_concurrent_positions", 10)),
         slippage_bps=int(job.slippage_bps),
         execution_delay_seconds=int(job.execution_delay_seconds),
         category_whitelist=tp.get("category_whitelist") or None,
@@ -119,7 +140,7 @@ async def _process_job(job: BacktestJob, engine: BacktestEngine) -> None:
         await _set_status(
             session,
             job_id,
-            "done",
+            "completed",
             progress=100.0,
             result={"leaders": all_results},
         )
