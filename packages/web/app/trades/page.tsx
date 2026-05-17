@@ -24,13 +24,15 @@ export default async function TradesPage() {
     .orderBy(desc(myTrades.opened_at));
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold">Trades</h1>
-        <p className="text-muted-foreground mt-1">
-          All copy trades — {rows.length} record{rows.length === 1 ? "" : "s"}
+    <div className="space-y-8">
+      <header className="space-y-1.5">
+        <h1 className="text-2xl font-bold tracking-tight">Trades</h1>
+        <p className="text-sm text-muted-foreground">
+          {rows.length === 0
+            ? "Every copy trade trader-core executes is recorded here."
+            : `${rows.length} copy trade${rows.length === 1 ? "" : "s"} recorded.`}
         </p>
-      </div>
+      </header>
 
       <TradesTable data={rows} />
     </div>

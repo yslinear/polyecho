@@ -26,17 +26,20 @@ export default async function DiscoveryPage() {
     .orderBy(desc(candidateLeaders.total_score));
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">Discovery</h1>
-          <p className="text-muted-foreground mt-1">
-            Candidate leader pool
+    <div className="space-y-8">
+      <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">
+            Discovery
+          </h1>
+          <p className="max-w-[60ch] text-sm text-muted-foreground">
+            Smart-money candidates ranked by total score. Open one to read its
+            history, or queue a backtest before you follow.
           </p>
         </div>
         <Link
           href="/backtest/new"
-          className="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+          className="inline-flex h-9 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors duration-150 ease-out hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
         >
           New Backtest
         </Link>

@@ -318,7 +318,7 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
           {v}
         </span>
       ) : (
-        <span className="text-muted-foreground">—</span>
+        <span className="text-sm text-muted-foreground">Not set</span>
       );
     },
     enableSorting: false,
@@ -328,7 +328,8 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
     header: "Strategy",
     cell: ({ getValue }) => {
       const v = getValue<string | null>();
-      if (!v) return <span className="text-muted-foreground">—</span>;
+      if (!v)
+        return <span className="text-sm text-muted-foreground">Not set</span>;
       return (
         <Badge variant={STRATEGY_VARIANT[v] ?? "outline"} className="text-xs">
           {v}
@@ -380,7 +381,7 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
     cell: ({ getValue }) => {
       const flags = getValue<string[] | null>() ?? [];
       if (flags.length === 0) {
-        return <span className="text-xs text-muted-foreground">—</span>;
+        return <span className="text-xs text-muted-foreground">None</span>;
       }
       return (
         <div className="flex flex-wrap gap-1">
@@ -431,9 +432,12 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
     header: makeSortableHeader("Last Active"),
     cell: ({ getValue }) => {
       const v = getValue<Date | null>();
-      if (!v) return <span className="text-xs text-muted-foreground">—</span>;
+      if (!v)
+        return (
+          <span className="text-xs text-muted-foreground">Not set</span>
+        );
       return (
-        <span className="whitespace-nowrap text-xs text-muted-foreground">
+        <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">
           {new Date(v).toLocaleDateString("en-CA")}
         </span>
       );
@@ -601,15 +605,18 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-xl">
+      <CardHeader className="pb-4">
+        <CardTitle className="flex items-center gap-2 text-lg font-semibold">
           Candidate Leaders
-          <Badge variant="secondary" className="rounded-full">
+          <Badge
+            variant="secondary"
+            className="rounded-full tabular-nums font-medium"
+          >
             {data.length}
           </Badge>
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3">
+      <CardContent className="space-y-5">
         {/* Toolbar */}
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative">
@@ -704,11 +711,11 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
         </div>
 
         {/* Table (horizontal scroll wrapper for small screens via shadcn Table) */}
-        <div className="rounded-md border">
+        <div className="max-h-[36rem] overflow-auto rounded-md border">
           <Table>
-            <TableHeader>
+            <TableHeader className="sticky top-0 z-10 bg-card">
               {table.getHeaderGroups().map((hg) => (
-                <TableRow key={hg.id}>
+                <TableRow key={hg.id} className="hover:bg-transparent">
                   {hg.headers.map((header) => {
                     const sorted = header.column.getIsSorted();
                     const ariaSort: React.AriaAttributes["aria-sort"] =
@@ -762,7 +769,7 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
                         <TableCell
                           key={cell.id}
                           className={cn(
-                            "py-2",
+                            "py-2.5",
                             NUMERIC_COLUMNS.has(cell.column.id) &&
                               "text-right tabular-nums"
                           )}
@@ -777,29 +784,39 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
                   );
                 })
               ) : (
-                <TableRow>
+                <TableRow className="hover:bg-transparent">
                   <TableCell
                     colSpan={visibleColCount}
-                    className="h-32 text-center"
+                    className="h-40 text-center"
                   >
-                    <div className="flex flex-col items-center justify-center gap-1 text-sm">
-                      <span className="font-medium">
-                        No candidate leaders found
-                      </span>
-                      <span className="text-xs text-muted-foreground">
-                        {isFiltered
-                          ? "Try clearing filters or adjusting your search."
-                          : "Run discovery to populate the candidate pool."}
-                      </span>
-                      {isFiltered && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="mt-2 h-7 text-xs"
-                          onClick={resetFilters}
-                        >
-                          Clear filters
-                        </Button>
+                    <div className="mx-auto flex max-w-sm flex-col items-center justify-center gap-2">
+                      {isFiltered ? (
+                        <>
+                          <p className="text-sm font-medium text-foreground">
+                            No leaders match these filters.
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            Clear the filters to see the full candidate pool.
+                          </p>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="mt-3 h-8 text-xs"
+                            onClick={resetFilters}
+                          >
+                            Clear filters
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-sm font-medium text-foreground">
+                            No candidates yet. Run discovery.
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            The pool fills once the discovery scan finds
+                            smart-money wallets.
+                          </p>
+                        </>
                       )}
                     </div>
                   </TableCell>
@@ -810,8 +827,8 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
         </div>
 
         {/* Pagination footer */}
-        <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground">
-          <span>
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-1 text-sm text-muted-foreground">
+          <span className="tabular-nums">
             {filteredCount === 0
               ? "0 of 0"
               : `${firstRow}–${lastRow} of ${filteredCount}`}
@@ -840,7 +857,7 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
               </Select>
             </div>
 
-            <span className="min-w-[5.5rem] text-center text-xs">
+            <span className="min-w-[5.5rem] text-center text-xs tabular-nums">
               Page {pagination.pageIndex + 1} of {Math.max(pageCount, 1)}
             </span>
 

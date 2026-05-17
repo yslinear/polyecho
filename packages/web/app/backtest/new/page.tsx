@@ -18,13 +18,12 @@ export default async function NewBacktestPage({
   const defaultLeader = sp.leader ?? "";
 
   return (
-    <div className="space-y-6 max-w-2xl">
-      <div>
-        <h1 className="text-3xl font-bold">New Backtest</h1>
-        <p className="text-muted-foreground mt-1">
-          Configure a backtest job — results appear at{" "}
-          <code className="text-xs bg-muted px-1 rounded">/backtest/[id]</code>
-          .
+    <div className="max-w-2xl space-y-8">
+      <div className="space-y-1.5">
+        <h1 className="text-2xl font-bold tracking-tight">New Backtest</h1>
+        <p className="max-w-[60ch] text-sm text-muted-foreground">
+          Configure a backtest job. When you queue it, a worker picks it up
+          and the result appears on its own page.
         </p>
       </div>
 

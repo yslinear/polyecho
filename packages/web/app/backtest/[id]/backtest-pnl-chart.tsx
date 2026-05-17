@@ -5,7 +5,14 @@
  * Renders 1–3 scenario lines depending on what result contains.
  */
 
-import { Line, LineChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import {
+  Line,
+  LineChart,
+  CartesianGrid,
+  ReferenceLine,
+  XAxis,
+  YAxis,
+} from "recharts";
 import {
   ChartContainer,
   ChartLegend,
@@ -31,18 +38,23 @@ interface BacktestPnlChartProps {
   scenarios: ScenarioResult[];
 }
 
+// Scenario lines map to the design tokens (DESIGN.md "Charts"):
+// optimistic = best case (--gain), pessimistic = worst case (--loss),
+// neutral = the calm accent (--primary). Never raw hex / category neon.
 const COLORS: Record<string, string> = {
-  optimistic: "hsl(142, 71%, 45%)",  // green
-  neutral: "hsl(221, 83%, 53%)",      // blue
-  pessimistic: "hsl(0, 84%, 60%)",    // red
+  optimistic: "hsl(var(--gain))",
+  neutral: "hsl(var(--primary))",
+  pessimistic: "hsl(var(--loss))",
 };
 
 export function BacktestPnlChart({ scenarios }: BacktestPnlChartProps) {
   if (!scenarios.length) {
     return (
-      <p className="text-sm text-muted-foreground py-6 text-center">
-        No PnL data available.
-      </p>
+      <div className="flex h-[280px] w-full items-center justify-center rounded-md border border-dashed border-border">
+        <p className="text-sm text-muted-foreground">
+          No PnL data available.
+        </p>
+      </div>
     );
   }
 
@@ -80,7 +92,12 @@ export function BacktestPnlChart({ scenarios }: BacktestPnlChartProps) {
         data={mergedData}
         margin={{ top: 8, right: 16, left: 0, bottom: 0 }}
       >
-        <CartesianGrid strokeDasharray="3 3" vertical={false} />
+        <CartesianGrid
+          strokeDasharray="3 3"
+          vertical={false}
+          className="stroke-border"
+          strokeOpacity={0.5}
+        />
         <XAxis
           dataKey="date"
           tick={{ fontSize: 11 }}
@@ -93,7 +110,13 @@ export function BacktestPnlChart({ scenarios }: BacktestPnlChartProps) {
           width={52}
           tickLine={false}
           axisLine={false}
+          className="tabular-nums"
           tickFormatter={(v: number) => `$${v.toFixed(0)}`}
+        />
+        <ReferenceLine
+          y={0}
+          className="stroke-border"
+          strokeOpacity={0.8}
         />
         <ChartTooltip content={<ChartTooltipContent />} />
         <ChartLegend content={<ChartLegendContent />} />

@@ -1,16 +1,15 @@
 /**
- * /accounts — Account management (Phase 3, read-only)
+ * /accounts — Account management (read-only).
  *
  * Server Component: lists rows from the `accounts` table. SECURITY: the
- * encrypted_private_key column is NEVER selected or displayed here — the
- * web tier is read-only and key import is CLI-only.
+ * encrypted_private_key column is NEVER selected or displayed — the web
+ * tier is read-only and private-key import is CLI-only.
  */
 
 import { asc } from "drizzle-orm";
 
 import { db } from "@/lib/db";
 import { accounts } from "@/lib/db/schema";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -62,79 +61,77 @@ export default async function AccountsPage() {
     .orderBy(asc(accounts.name));
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold">Accounts</h1>
-        <p className="text-muted-foreground mt-1">
-          Your Polymarket accounts — {rows.length} registered
+    <div className="space-y-8">
+      <header className="space-y-1.5">
+        <h1 className="text-2xl font-bold tracking-tight">Accounts</h1>
+        <p className="text-sm text-muted-foreground">
+          {rows.length === 0
+            ? "Polymarket accounts you have registered from the CLI."
+            : `${rows.length} registered account${rows.length === 1 ? "" : "s"}.`}
+        </p>
+      </header>
+
+      <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-900/60 dark:bg-amber-950/30">
+        <p className="text-sm text-amber-900 dark:text-amber-200">
+          <strong className="font-semibold">
+            Private-key import is CLI-only.
+          </strong>{" "}
+          Run{" "}
+          <code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-xs dark:bg-amber-900/50">
+            polyecho account import &lt;eoa&gt;
+          </code>{" "}
+          on the trader-core host. This dashboard is read-only and never
+          accepts or displays private keys.
         </p>
       </div>
 
-      <Card className="border-amber-300 bg-amber-50 dark:border-amber-900/60 dark:bg-amber-950/30">
-        <CardContent className="py-4">
-          <p className="text-sm text-amber-800 dark:text-amber-300">
-            <strong>Private key import is CLI-only.</strong> Run{" "}
-            <code className="font-mono text-xs bg-amber-100 dark:bg-amber-900/50 px-1 py-0.5 rounded">
+      {rows.length === 0 ? (
+        <div className="rounded-lg border border-dashed py-16 text-center">
+          <p className="text-sm text-muted-foreground">
+            No accounts registered yet. Import one from the CLI with{" "}
+            <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
               polyecho account import &lt;eoa&gt;
-            </code>{" "}
-            from the trader-core host. This web dashboard is read-only and
-            never accepts or displays private keys.
+            </code>
+            .
           </p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Registered Accounts</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {rows.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No accounts registered yet. Add one from the CLI with{" "}
-              <code className="font-mono text-xs bg-muted px-1 py-0.5 rounded">
-                polyecho account import &lt;eoa&gt;
-              </code>
-              .
-            </p>
-          ) : (
-            <div className="rounded-md border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Name</TableHead>
-                    <TableHead>EOA Address</TableHead>
-                    <TableHead>Signature Type</TableHead>
-                    <TableHead>Status</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {rows.map((a) => (
-                    <TableRow key={a.id}>
-                      <TableCell className="font-medium">{a.name}</TableCell>
-                      <TableCell>
-                        <CopyAddress address={a.eoa_address} />
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="outline" className="font-mono text-xs">
-                          {signatureTypeLabel(a.signature_type)}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant={STATUS_VARIANT[a.status] ?? "secondary"}
-                          className="capitalize text-xs"
-                        >
-                          {a.status.replace(/_/g, " ")}
-                        </Badge>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+        </div>
+      ) : (
+        <div className="overflow-hidden rounded-lg border">
+          <Table>
+            <TableHeader className="sticky top-0 z-10 bg-muted/60 backdrop-blur supports-[backdrop-filter]:bg-muted/60">
+              <TableRow className="hover:bg-transparent">
+                <TableHead>Name</TableHead>
+                <TableHead>EOA address</TableHead>
+                <TableHead>Signature type</TableHead>
+                <TableHead>Status</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((a) => (
+                <TableRow key={a.id} className="hover:bg-muted/50">
+                  <TableCell className="font-medium">{a.name}</TableCell>
+                  <TableCell>
+                    <CopyAddress address={a.eoa_address} />
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className="font-mono text-xs">
+                      {signatureTypeLabel(a.signature_type)}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={STATUS_VARIANT[a.status] ?? "secondary"}
+                      className="capitalize text-xs"
+                    >
+                      {a.status.replace(/_/g, " ")}
+                    </Badge>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
     </div>
   );
 }

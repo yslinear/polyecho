@@ -10,13 +10,8 @@ import { type ColumnDef, ArrowUpDown } from "@/components/ui/data-table";
 import { DataTable } from "@/components/ui/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  formatSignedUsd,
-  pnlColor,
-  shortAddress,
-  formatDateTime,
-  toNum,
-} from "@/lib/format";
+import { Pnl } from "@/components/pnl";
+import { shortAddress, formatDateTime, toNum } from "@/lib/format";
 import type { MyTradeRow } from "./page";
 
 const FILL_VARIANT: Record<
@@ -37,17 +32,30 @@ function sortableHeader(label: string) {
       toggleSorting: (desc?: boolean) => void;
       getIsSorted: () => false | "asc" | "desc";
     };
-  }) => (
-    <Button
-      variant="ghost"
-      size="sm"
-      className="-ml-3 h-8"
-      onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-    >
-      {label}
-      <ArrowUpDown className="ml-1 h-3 w-3" />
-    </Button>
-  );
+  }) => {
+    const sorted = column.getIsSorted();
+    return (
+      <span
+        aria-sort={
+          sorted === "asc"
+            ? "ascending"
+            : sorted === "desc"
+              ? "descending"
+              : "none"
+        }
+      >
+        <Button
+          variant="ghost"
+          size="sm"
+          className="-ml-3 h-8"
+          onClick={() => column.toggleSorting(sorted === "asc")}
+        >
+          {label}
+          <ArrowUpDown className="ml-1 h-3 w-3" />
+        </Button>
+      </span>
+    );
+  };
   Header.displayName = `SortableHeader(${label})`;
   return Header;
 }
@@ -113,15 +121,9 @@ const columns: ColumnDef<MyTradeRow, unknown>[] = [
       if (!v) return <span className="text-muted-foreground">—</span>;
       const buy = v.toUpperCase() === "BUY";
       return (
-        <span
-          className={
-            buy
-              ? "text-xs font-semibold text-green-600 dark:text-green-400"
-              : "text-xs font-semibold text-red-600 dark:text-red-400"
-          }
-        >
+        <Badge variant={buy ? "default" : "secondary"} className="text-xs">
           {v.toUpperCase()}
-        </span>
+        </Badge>
       );
     },
   },
@@ -178,11 +180,7 @@ const columns: ColumnDef<MyTradeRow, unknown>[] = [
       if (toNum(v) === null) {
         return <span className="text-xs text-muted-foreground">—</span>;
       }
-      return (
-        <span className={`tabular-nums text-sm font-medium ${pnlColor(v)}`}>
-          {formatSignedUsd(v)}
-        </span>
-      );
+      return <Pnl value={v} className="text-sm" />;
     },
     sortingFn: numericSort,
   },

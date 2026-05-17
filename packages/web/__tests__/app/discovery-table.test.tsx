@@ -253,10 +253,18 @@ describe("DiscoveryTable (shadcn data-table)", () => {
     expect(riskBadge.className).toMatch(/destructive/);
   });
 
-  it("shows '—' for rows with no risk flags", () => {
+  it("shows a calm 'None' for rows with no risk flags", () => {
     render(<DiscoveryTable data={rows} />);
-    // Beta + Gamma have no flags -> at least two em-dashes present
-    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
+    // Beta + Gamma have no flags -> at least two "None" cells. (The only
+    // em dash left on the page comes from the frozen shared ScoreBadge for
+    // null scores — not from this owned table's own copy.)
+    expect(screen.getAllByText("None").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("uses 'Not set' (not an em dash) for missing name/strategy", () => {
+    render(<DiscoveryTable data={[makeRow({ wallet_address: "0x1" })]} />);
+    // display_name + strategy_type are null on this row.
+    expect(screen.getAllByText("Not set").length).toBeGreaterThanOrEqual(2);
   });
 
   it("paginates: page size Select changes page and Next advances", async () => {
@@ -302,7 +310,7 @@ describe("DiscoveryTable (shadcn data-table)", () => {
     );
   });
 
-  it("shows an empty state with a hint when filters match nothing", async () => {
+  it("shows a calm filtered empty state with a real Clear-filters action", async () => {
     render(<DiscoveryTable data={rows} />);
     await userEvent.type(
       screen.getByPlaceholderText("Search wallet or name…"),
@@ -310,20 +318,22 @@ describe("DiscoveryTable (shadcn data-table)", () => {
     );
     expect(bodyRows()).toHaveLength(0);
     expect(
-      screen.getByText("No candidate leaders found")
+      screen.getByText("No leaders match these filters.")
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Try clearing filters or adjusting your search/)
-    ).toBeInTheDocument();
+    // The empty state offers the real next action, and clicking it recovers.
+    const clear = screen.getByRole("button", { name: /Clear filters/ });
+    await userEvent.click(clear);
+    expect(bodyRows()).toHaveLength(3);
   });
 
-  it("shows a discovery hint when there is no data at all", () => {
+  it("shows the calm 'No candidates yet. Run discovery.' state with no data", () => {
     render(<DiscoveryTable data={[]} />);
+    // DESIGN-mandated single calm sentence + the real next action.
     expect(
-      screen.getByText("No candidate leaders found")
+      screen.getByText("No candidates yet. Run discovery.")
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/Run discovery to populate the candidate pool/)
+      screen.getByText(/The pool fills once the discovery scan finds/)
     ).toBeInTheDocument();
   });
 });

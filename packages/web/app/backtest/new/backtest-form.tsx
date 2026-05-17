@@ -5,6 +5,7 @@
  * On valid submit: calls createBacktestJob server action, toasts, then navigates.
  */
 
+import type { ReactNode } from "react";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -12,7 +13,6 @@ import { z } from "zod";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Form,
   FormControl,
@@ -86,6 +86,32 @@ const schema = z
 type FormValues = z.infer<typeof schema>;
 
 // ---------------------------------------------------------------------------
+// Section — a grouped block of fields. Not a Card: DESIGN.md bans the
+// identical-card-grid; groups are separated by hairlines + varied rhythm.
+// ---------------------------------------------------------------------------
+function Section({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="space-y-5">
+      <div className="space-y-1">
+        <h2 className="text-sm font-semibold text-foreground">{title}</h2>
+        {hint && (
+          <p className="text-xs text-muted-foreground">{hint}</p>
+        )}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 interface BacktestFormProps {
@@ -103,6 +129,10 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
 
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
+    // Inline validation on blur (DESIGN.md "Forms"): the field is checked
+    // when the user leaves it, and re-checked on every change once invalid.
+    mode: "onBlur",
+    reValidateMode: "onChange",
     defaultValues: {
       leader_address: defaultLeader,
       start_date: toISO(ninetyDaysAgo),
@@ -164,227 +194,153 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
 
   return (
     <Form {...form}>
-      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-10">
         {/* ---- Leader & Dates ---- */}
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Leader & Date Range</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
+        <Section
+          title="Leader & date range"
+          hint="Which wallet to mirror, and the window to replay."
+        >
+          <FormField
+            control={form.control}
+            name="leader_address"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Leader Address</FormLabel>
+                <FormControl>
+                  <Input
+                    placeholder="0x…"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="font-mono"
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription>
+                  Wallet address of the leader to backtest
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <div className="grid grid-cols-2 gap-5">
             <FormField
               control={form.control}
-              name="leader_address"
+              name="start_date"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Leader Address</FormLabel>
+                  <FormLabel>Start Date</FormLabel>
                   <FormControl>
-                    <Input placeholder="0x…" {...field} />
+                    <Input type="date" {...field} />
                   </FormControl>
-                  <FormDescription>
-                    Wallet address of the leader to backtest
-                  </FormDescription>
                   <FormMessage />
                 </FormItem>
               )}
             />
+            <FormField
+              control={form.control}
+              name="end_date"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>End Date</FormLabel>
+                  <FormControl>
+                    <Input type="date" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+        </Section>
 
-            <div className="grid grid-cols-2 gap-4">
-              <FormField
-                control={form.control}
-                name="start_date"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Start Date</FormLabel>
-                    <FormControl>
-                      <Input type="date" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="end_date"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>End Date</FormLabel>
-                    <FormControl>
-                      <Input type="date" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-          </CardContent>
-        </Card>
+        <Separator />
 
         {/* ---- Capital & Sizing ---- */}
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Capital & Sizing</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
+        <Section
+          title="Capital & sizing"
+          hint="Starting capital and how each copied trade is sized. Set a copy ratio or a fixed size, not both."
+        >
+          <FormField
+            control={form.control}
+            name="initial_capital_usd"
+            render={({ field }) => (
+              <FormItem className="max-w-xs">
+                <FormLabel>Initial Capital (USD)</FormLabel>
+                <FormControl>
+                  <Input
+                    type="number"
+                    min="10"
+                    step="10"
+                    className="tabular-nums"
+                    {...field}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <div className="grid grid-cols-2 gap-5">
             <FormField
               control={form.control}
-              name="initial_capital_usd"
+              name="copy_ratio"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Initial Capital (USD)</FormLabel>
-                  <FormControl>
-                    <Input type="number" min="10" step="10" {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-
-            <Separator />
-            <p className="text-xs text-muted-foreground">
-              Provide either copy_ratio <em>or</em> fixed_size_usd (mutually
-              exclusive).
-            </p>
-
-            <div className="grid grid-cols-2 gap-4">
-              <FormField
-                control={form.control}
-                name="copy_ratio"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Copy Ratio</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="number"
-                        step="0.0001"
-                        min="0.0001"
-                        max="1"
-                        placeholder="0.001"
-                        {...field}
-                        value={field.value ?? ""}
-                      />
-                    </FormControl>
-                    <FormDescription>e.g. 0.001 = 0.1%</FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="fixed_size_usd"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Fixed Size (USD)</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="number"
-                        step="0.5"
-                        min="1"
-                        placeholder="—"
-                        {...field}
-                        value={field.value ?? ""}
-                      />
-                    </FormControl>
-                    <FormDescription>Fixed dollar amount per trade</FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <FormField
-                control={form.control}
-                name="max_position_usd"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Max Position (USD)</FormLabel>
-                    <FormControl>
-                      <Input type="number" step="1" min="1" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="min_trade_size_usd"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Min Trade Size (USD)</FormLabel>
-                    <FormControl>
-                      <Input type="number" step="0.01" min="0.01" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-
-            <FormField
-              control={form.control}
-              name="daily_loss_limit_usd"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Daily Loss Limit (USD)</FormLabel>
-                  <FormControl>
-                    <Input type="number" step="1" min="1" {...field} />
-                  </FormControl>
-                  <FormDescription>
-                    Stop copying when daily PnL drops below –limit
-                  </FormDescription>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-          </CardContent>
-        </Card>
-
-        {/* ---- Execution Params ---- */}
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Execution Parameters</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <FormField
-                control={form.control}
-                name="slippage_bps"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Slippage (bps)</FormLabel>
-                    <FormControl>
-                      <Input type="number" step="1" min="0" {...field} />
-                    </FormControl>
-                    <FormDescription>150 bps = 1.5%</FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="execution_delay_seconds"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Execution Delay (s)</FormLabel>
-                    <FormControl>
-                      <Input type="number" step="1" min="0" {...field} />
-                    </FormControl>
-                    <FormDescription>Simulated fill delay</FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-
-            <FormField
-              control={form.control}
-              name="category_whitelist_raw"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Category Whitelist</FormLabel>
+                  <FormLabel>Copy Ratio</FormLabel>
                   <FormControl>
                     <Input
-                      placeholder="Politics, Sports, Economy (comma-separated, blank = all)"
+                      type="number"
+                      step="0.0001"
+                      min="0.0001"
+                      max="1"
+                      placeholder="0.001"
+                      className="tabular-nums"
+                      {...field}
+                      value={field.value ?? ""}
+                    />
+                  </FormControl>
+                  <FormDescription>e.g. 0.001 = 0.1%</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="fixed_size_usd"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Fixed Size (USD)</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      step="0.5"
+                      min="1"
+                      placeholder="Leave blank to use copy ratio"
+                      className="tabular-nums"
+                      {...field}
+                      value={field.value ?? ""}
+                    />
+                  </FormControl>
+                  <FormDescription>Fixed dollar amount per trade</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-5">
+            <FormField
+              control={form.control}
+              name="max_position_usd"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Max Position (USD)</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      step="1"
+                      min="1"
+                      className="tabular-nums"
                       {...field}
                     />
                   </FormControl>
@@ -392,59 +348,177 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
                 </FormItem>
               )}
             />
-          </CardContent>
-        </Card>
-
-        {/* ---- Scenario ---- */}
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Scenario</CardTitle>
-          </CardHeader>
-          <CardContent>
             <FormField
               control={form.control}
-              name="scenario"
+              name="min_trade_size_usd"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Run Mode</FormLabel>
-                  <Select
-                    onValueChange={field.onChange}
-                    defaultValue={field.value}
-                  >
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select scenario" />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      <SelectItem value="triple">
-                        Triple (all 3 scenarios — recommended)
-                      </SelectItem>
-                      <SelectItem value="optimistic">
-                        Optimistic (50 bps slippage, 10 s delay)
-                      </SelectItem>
-                      <SelectItem value="neutral">
-                        Neutral (150 bps, 30 s)
-                      </SelectItem>
-                      <SelectItem value="pessimistic">
-                        Pessimistic (300 bps, 60 s)
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <FormDescription>
-                    &ldquo;Triple&rdquo; runs all three simultaneously for
-                    comparison (PRD §5.4)
-                  </FormDescription>
+                  <FormLabel>Min Trade Size (USD)</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      className="tabular-nums"
+                      {...field}
+                    />
+                  </FormControl>
                   <FormMessage />
                 </FormItem>
               )}
             />
-          </CardContent>
-        </Card>
+          </div>
 
-        <Button type="submit" disabled={submitting} className="w-full">
-          {submitting ? "Submitting…" : "Queue Backtest"}
-        </Button>
+          <FormField
+            control={form.control}
+            name="daily_loss_limit_usd"
+            render={({ field }) => (
+              <FormItem className="max-w-xs">
+                <FormLabel>Daily Loss Limit (USD)</FormLabel>
+                <FormControl>
+                  <Input
+                    type="number"
+                    step="1"
+                    min="1"
+                    className="tabular-nums"
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription>
+                  Stop copying once the day&rsquo;s loss exceeds this limit
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </Section>
+
+        <Separator />
+
+        {/* ---- Execution Params ---- */}
+        <Section
+          title="Execution model"
+          hint="Slippage and fill delay applied to every simulated trade."
+        >
+          <div className="grid grid-cols-2 gap-5">
+            <FormField
+              control={form.control}
+              name="slippage_bps"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Slippage (bps)</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      step="1"
+                      min="0"
+                      className="tabular-nums"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormDescription>150 bps = 1.5%</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="execution_delay_seconds"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Execution Delay (s)</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      step="1"
+                      min="0"
+                      className="tabular-nums"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormDescription>Simulated fill delay</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+
+          <FormField
+            control={form.control}
+            name="category_whitelist_raw"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Category Whitelist</FormLabel>
+                <FormControl>
+                  <Input
+                    placeholder="Politics, Sports, Economy"
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription>
+                  Comma-separated. Leave blank to include all categories.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </Section>
+
+        <Separator />
+
+        {/* ---- Scenario ---- */}
+        <Section
+          title="Scenario"
+          hint="Run a single execution model, or all three side by side."
+        >
+          <FormField
+            control={form.control}
+            name="scenario"
+            render={({ field }) => (
+              <FormItem className="max-w-md">
+                <FormLabel>Run Mode</FormLabel>
+                <Select
+                  onValueChange={field.onChange}
+                  defaultValue={field.value}
+                >
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select scenario" />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value="triple">
+                      Triple (all 3 scenarios, recommended)
+                    </SelectItem>
+                    <SelectItem value="optimistic">
+                      Optimistic (50 bps slippage, 10 s delay)
+                    </SelectItem>
+                    <SelectItem value="neutral">
+                      Neutral (150 bps, 30 s)
+                    </SelectItem>
+                    <SelectItem value="pessimistic">
+                      Pessimistic (300 bps, 60 s)
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <FormDescription>
+                  &ldquo;Triple&rdquo; runs all three at once so you can
+                  compare best, base, and worst case (PRD §5.4).
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </Section>
+
+        <div className="flex items-center justify-end gap-4 pt-2">
+          <p className="text-xs text-muted-foreground">
+            Queues the job. A worker processes it shortly after.
+          </p>
+          <Button type="submit" disabled={submitting}>
+            {submitting ? "Queueing…" : "Queue Backtest"}
+          </Button>
+        </div>
       </form>
     </Form>
   );

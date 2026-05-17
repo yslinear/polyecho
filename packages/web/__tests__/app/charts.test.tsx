@@ -45,6 +45,39 @@ describe("LeaderScoreChart", () => {
       screen.queryByText("No score history recorded yet.")
     ).not.toBeInTheDocument();
   });
+
+  it("renders a reserved-space skeleton while loading (no layout shift)", () => {
+    const { container } = render(<LeaderScoreChart data={[]} loading />);
+    const sk = container.querySelector(".h-\\[260px\\]");
+    expect(sk).toBeInTheDocument();
+    // Loading must not fall through to the empty-state copy.
+    expect(
+      screen.queryByText("No score history recorded yet.")
+    ).not.toBeInTheDocument();
+  });
+
+  it("tints the line via --gain for a rising score history", () => {
+    const data: ScorePoint[] = [
+      { date: "2025-01-01", total_score: 30 },
+      { date: "2025-01-02", total_score: 70 },
+    ] as ScorePoint[];
+    const { container } = render(<LeaderScoreChart data={data} />);
+    // shadcn ChartContainer injects the config color as a CSS var on a
+    // <style> block scoped to the chart id; assert the gain token is used.
+    expect(container.innerHTML).toContain("hsl(var(--gain))");
+    // Accessible trend caption is present for screen readers.
+    expect(screen.getByText(/trending up/)).toBeInTheDocument();
+  });
+
+  it("tints the line via --loss for a falling score history", () => {
+    const data: ScorePoint[] = [
+      { date: "2025-01-01", total_score: 80 },
+      { date: "2025-01-02", total_score: 40 },
+    ] as ScorePoint[];
+    const { container } = render(<LeaderScoreChart data={data} />);
+    expect(container.innerHTML).toContain("hsl(var(--loss))");
+    expect(screen.getByText(/trending down/)).toBeInTheDocument();
+  });
 });
 
 describe("BacktestPnlChart", () => {
