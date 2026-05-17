@@ -788,12 +788,14 @@ events (
 
 > **進度註記（2026-05-17）**：Phase 0–2 完成並 push（19 commits，`origin/main`）。容器內 `pytest packages/{shared,discovery,backtest,cli}` → **134 passed / 0 failed**。UI 定案：**只深用 shadcn/ui**（PRD §10），dashboard 已換 shadcn sidebar shell + data-table + chart。回測 live MTM 有 1 個 `TODO(verify)`（fixture 路徑不受影響）。
 
-### Phase 3：帳號管理 + 唯讀 Dashboard（1–2 週）
+### Phase 3：帳號管理 + 唯讀 Dashboard（1–2 週）✅ 完成（2026-05-17）
 
-- [ ] 4 種錢包類型偵測
-- [ ] CLI 私鑰匯入工具
-- [ ] Dashboard 主頁、交易歷史、持倉頁面
-- [ ] Tailscale Serve 正式上線
+- [x] 4 種錢包類型偵測（`polyecho.shared.accounts`：derive_wallets 4 候選 + 依「持倉≫餘額≫活動」evidence 排序的 detect；factory/CREATE2 常數官方未公開 → `# TODO(verify)`，type-0 精確、偵測以鏈上證據排序故不受影響）
+- [x] CLI 私鑰匯入工具（`polyecho account detect/import/list/balance`：隱藏 passphrase＋私鑰輸入、AES-256-GCM、CLI-only、絕不記錄；status pending_key_import→ready）
+- [x] Dashboard 主頁、交易歷史、持倉頁面（`/` `/trades` `/positions` `/accounts` 唯讀 shadcn；`encrypted_private_key` 永不查詢）
+- [x] Tailscale Serve 正式上線（`docs/operations/tailscale.md` 完整 runbook；實際在主機 `tailscale serve` 上線為使用者動作）
+
+> **進度註記（2026-05-17）**：Phase 0–3 完成並 push，GitHub CI 4 job 全綠（run 25990373652 @ 65aa99a）。容器 `uv run pytest` **369 passed / 89.62% cov**；web vitest 132 passed。Phase 3 由並行 swarm（p3-accounts ∥ p3-dashboard）完成。
 
 ### Phase 4：實時跟單（2–3 週）
 
