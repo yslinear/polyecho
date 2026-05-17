@@ -47,6 +47,7 @@ from typing import Any
 from py_clob_client_v2 import ApiCreds, ClobClient  # type: ignore[import-untyped]
 
 from polyecho.shared.config import get_settings
+from polyecho.shared.copytrading import assert_live_allowed
 
 
 class PolymarketClient:
@@ -210,32 +211,50 @@ class PolymarketClient:
         size: float,
         order_type: str = "FOK",
         tick_size: str = "0.01",
+        neg_risk: bool = False,
     ) -> dict[str, Any]:
-        """Place a limit order on the Polymarket CLOB.
+        """Place an order on the Polymarket CLOB (Phase-4 W2 live call).
+
+        Signing is mode-agnostic and owned entirely by
+        ``py_clob_client_v2`` — this wrapper does NOT hand-roll
+        EIP-712/HMAC/rounding (brief §2/§8/§9).  The live SDK call is
+        ``ClobClient.create_and_post_order(order_args, options,
+        order_type)`` with per-market ``neg_risk`` + ``tick_size`` passed
+        through ``options`` (fixes PolyHermes' static-tick gap, brief §2).
 
         Args:
             token_id:   Outcome token ID (e.g. the YES token for a market).
             side:       ``"BUY"`` or ``"SELL"``.
             price:      Limit price per share (0.01 – 0.99).
             size:       Number of shares.
-            order_type: ``"GTC"`` (Good-Till-Cancelled), ``"FOK"``
-                        (Fill-Or-Kill), or ``"IOC"`` (Immediate-Or-Cancel).
-                        PRD §5.5 defaults to FOK for copy-trades.
-            tick_size:  Minimum price increment — ``"0.1"``, ``"0.01"``,
-                        ``"0.001"``, ``"0.0001"``.
+            order_type: ``"FOK"`` / ``"FAK"`` (taker, brief §2 default) or
+                        ``"GTC"`` (maker).  PRD §5.5 copy-trades use FAK/FOK.
+            tick_size:  Per-market min price increment — fetched from Gamma
+                        per market (brief §2), NOT static.
+            neg_risk:   Per-market NegRisk flag — selects the NegRisk
+                        Exchange contract (brief §2/§9; orthogonal to wallet
+                        mode, passed straight to the SDK).
 
         Returns:
             Response dict from CLOB including ``orderID`` and ``status``.
 
         Raises:
-            NotImplementedError: Phase 4 deliverable.
+            LiveTradingLockedError: If ``POLYECHO_LIVE_TRADING`` is off
+                                    (the HARD lock — checked FIRST).
+            NotImplementedError:    Phase-4 W2 deliverable (the live SDK
+                                    call site).
         """
+        # The single live-money chokepoint — MUST be first, before any
+        # irreversible work (brief: default-OFF hard lock).
+        assert_live_allowed("place_order")
         raise NotImplementedError(
-            "Phase 4: implement place_order via ClobClient.create_and_post_order()"
+            "Phase-4 W2: ClobClient.create_and_post_order(order_args, "
+            "options={neg_risk, tick_size}, order_type) — SDK owns "
+            "EIP-712/HMAC/rounding (brief §2/§9)"
         )
 
     async def cancel_order(self, order_id: str) -> dict[str, Any]:
-        """Cancel an open limit order by its CLOB order ID.
+        """Cancel an open order by its CLOB order ID (Phase-4 W2).
 
         Args:
             order_id: The CLOB order ID (hex string returned by
@@ -245,10 +264,12 @@ class PolymarketClient:
             Response dict confirming cancellation.
 
         Raises:
-            NotImplementedError: Phase 4 deliverable.
+            LiveTradingLockedError: If ``POLYECHO_LIVE_TRADING`` is off.
+            NotImplementedError:    Phase-4 W2 deliverable.
         """
+        assert_live_allowed("cancel_order")
         raise NotImplementedError(
-            "Phase 4: implement cancel_order via ClobClient.cancel_order()"
+            "Phase-4 W2: ClobClient.cancel_order(order_id)"
         )
 
     # ------------------------------------------------------------------
