@@ -8,11 +8,15 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
+import { eq } from "drizzle-orm";
+
 import { AppSidebar } from "@/components/app-sidebar";
 import { SidebarProvider, SidebarTrigger, SidebarInset } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/sonner";
-import { Button } from "@/components/ui/button";
-import { PauseCircle } from "lucide-react";
+import { GlobalPauseToggle } from "@/components/global-pause-toggle";
+import { db } from "@/lib/db";
+import { settings } from "@/lib/db/schema";
+import { GLOBAL_PAUSED_KEY, coerceBoolSetting } from "@/lib/settings-keys";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -23,15 +27,38 @@ const inter = Inter({
 export const metadata: Metadata = {
   title: "PolyEcho Dashboard",
   description: "Personal Polymarket copy-trading monitor",
-  // PWA manifest linked for Phase 5 Web Push (not implemented yet)
-  manifest: "/manifest.json",
+  // PWA manifest is served by app/manifest.ts; Next injects the
+  // <link rel="manifest"> automatically — do NOT hard-code it here.
 };
 
-export default function RootLayout({
+/**
+ * The shell reads the global-pause settings row, so the layout must be
+ * dynamic (never statically prerendered). This matches every data page's
+ * `export const dynamic = "force-dynamic"` and stops the build from trying
+ * to hit Postgres while prerendering static routes like /_not-found.
+ */
+export const dynamic = "force-dynamic";
+
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  // Resilient read: a transient DB outage must never blank the whole app
+  // shell — fall back to "not paused" and let the page-level reads surface
+  // the real error.
+  let globalPaused = false;
+  try {
+    const [pauseRow] = await db
+      .select({ value: settings.value })
+      .from(settings)
+      .where(eq(settings.key, GLOBAL_PAUSED_KEY))
+      .limit(1);
+    globalPaused = coerceBoolSetting(pauseRow?.value);
+  } catch {
+    globalPaused = false;
+  }
+
   return (
     <html lang="en" suppressHydrationWarning>
       <body
@@ -55,21 +82,8 @@ export default function RootLayout({
                 aria-label="Toggle navigation sidebar"
               />
               <div className="flex-1" />
-              {/* Global Pause/Resume — Phase 4/5 placeholder (disabled). */}
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-1.5 text-xs transition-colors duration-180 ease-calm"
-                disabled
-                aria-label="Pause or resume all copy-trading (available in Phase 4/5)"
-                title="Pause/Resume all copy-trading (Phase 4/5)"
-              >
-                <PauseCircle className="h-3.5 w-3.5" aria-hidden="true" />
-                Pause All
-                <span className="ml-1 rounded bg-muted px-1 font-medium text-muted-foreground">
-                  Phase 4/5
-                </span>
-              </Button>
+              {/* Global 全域暫停/恢復 — PRD §5.8 one-click safe write. */}
+              <GlobalPauseToggle paused={globalPaused} />
             </header>
 
             <main id="main" className="flex-1 overflow-y-auto p-6">

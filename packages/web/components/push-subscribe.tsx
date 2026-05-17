@@ -1,0 +1,231 @@
+"use client";
+
+/**
+ * PushSubscribe — Web Push opt-in island (PRD §5.8).
+ *
+ * Confirmed browser-API pattern (context7):
+ *   navigator.serviceWorker.register('/sw.js')
+ *   -> registration.pushManager.subscribe({ userVisibleOnly:true,
+ *        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC) })
+ *   -> POST subscription.toJSON() ({endpoint,keys:{p256dh,auth}}) + device
+ *      label to the subscribePush Server Action (UPSERTs on UNIQUE endpoint).
+ *
+ * Notification.permission is requested ONLY on an explicit button click.
+ * The VAPID PUBLIC key arrives as a prop from a Server Component reading the
+ * `vapid_public_key` settings row — the private key is never exposed.
+ *
+ * iOS Safari 16.4+ only delivers Web Push when the app is installed to the
+ * Home Screen, so we surface that hint plainly. No modal — a calm inline
+ * panel matching the /settings register.
+ */
+
+import * as React from "react";
+import { Bell, BellOff, Info } from "lucide-react";
+import { toast } from "sonner";
+
+import { Button } from "@/components/ui/button";
+import { subscribePush, unsubscribePush } from "@/app/alerts/actions";
+
+/**
+ * base64url VAPID key -> Uint8Array for applicationServerKey.
+ *
+ * Backed by an explicit ArrayBuffer (not ArrayBufferLike) so the type
+ * matches the DOM `PushSubscriptionOptionsInit.applicationServerKey`
+ * (BufferSource) under TS 5.7's stricter typed-array generics.
+ */
+function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding)
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+  const raw = atob(base64);
+  const buffer = new ArrayBuffer(raw.length);
+  const out = new Uint8Array(buffer);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+/** Compact device label from the UA (best effort, never PII-heavy). */
+function deviceLabelFromUA(): string {
+  if (typeof navigator === "undefined") return "未知裝置";
+  const ua = navigator.userAgent;
+  const os = /iPhone|iPad|iPod/.test(ua)
+    ? "iOS"
+    : /Android/.test(ua)
+      ? "Android"
+      : /Mac/.test(ua)
+        ? "macOS"
+        : /Windows/.test(ua)
+          ? "Windows"
+          : "其他";
+  const browser = /CriOS|Chrome/.test(ua)
+    ? "Chrome"
+    : /Firefox/.test(ua)
+      ? "Firefox"
+      : /Safari/.test(ua)
+        ? "Safari"
+        : "瀏覽器";
+  return `${os} ${browser}`;
+}
+
+type State = "idle" | "working" | "subscribed" | "unsupported";
+
+export function PushSubscribe({ vapidPublicKey }: { vapidPublicKey: string }) {
+  const [state, setState] = React.useState<State>("idle");
+  const [endpoint, setEndpoint] = React.useState<string | null>(null);
+
+  const supported = React.useMemo(
+    () =>
+      typeof window !== "undefined" &&
+      "serviceWorker" in navigator &&
+      "PushManager" in window &&
+      "Notification" in window,
+    []
+  );
+
+  // Reflect an already-active subscription on mount (no permission prompt).
+  React.useEffect(() => {
+    if (!supported) {
+      setState("unsupported");
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        const existing = await reg?.pushManager.getSubscription();
+        if (!cancelled && existing) {
+          setEndpoint(existing.endpoint);
+          setState("subscribed");
+        }
+      } catch {
+        /* non-fatal: leave state idle */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [supported]);
+
+  async function onSubscribe() {
+    if (!vapidPublicKey) {
+      toast.error("尚未設定 VAPID 公鑰，請先在後端設定推播金鑰。");
+      return;
+    }
+    setState("working");
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        toast.error("未授予通知權限，無法開啟推播。");
+        setState("idle");
+        return;
+      }
+      const reg = await navigator.serviceWorker.register("/sw.js");
+      const sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+      });
+      const json = sub.toJSON() as {
+        endpoint?: string;
+        keys?: { p256dh?: string; auth?: string };
+      };
+      const res = await subscribePush(
+        {
+          endpoint: json.endpoint ?? "",
+          keys: {
+            p256dh: json.keys?.p256dh ?? "",
+            auth: json.keys?.auth ?? "",
+          },
+        },
+        deviceLabelFromUA()
+      );
+      if (res.ok) {
+        setEndpoint(sub.endpoint);
+        setState("subscribed");
+        toast.success(res.message);
+      } else {
+        setState("idle");
+        toast.error(res.message);
+      }
+    } catch {
+      setState("idle");
+      toast.error("訂閱推播失敗，請確認瀏覽器支援並重試。");
+    }
+  }
+
+  async function onUnsubscribe() {
+    setState("working");
+    try {
+      const reg = await navigator.serviceWorker.getRegistration();
+      const sub = await reg?.pushManager.getSubscription();
+      const ep = sub?.endpoint ?? endpoint;
+      if (sub) await sub.unsubscribe();
+      if (ep) await unsubscribePush(ep);
+      setEndpoint(null);
+      setState("idle");
+      toast.success("已關閉此裝置的推播通知。");
+    } catch {
+      setState("subscribed");
+      toast.error("取消訂閱失敗，請重試。");
+    }
+  }
+
+  if (state === "unsupported") {
+    return (
+      <p className="max-w-prose text-sm text-muted-foreground">
+        此瀏覽器不支援 Web Push。請改用支援的瀏覽器，iPhone 需先將本站
+        以 Safari『加入主畫面』安裝為 App（iOS 16.4 以上）。
+      </p>
+    );
+  }
+
+  const isSubscribed = state === "subscribed";
+  const busy = state === "working";
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-3">
+        {isSubscribed ? (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy}
+            onClick={onUnsubscribe}
+            aria-label="關閉此裝置的推播通知"
+          >
+            <BellOff className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+            {busy ? "處理中…" : "關閉推播"}
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            disabled={busy}
+            onClick={onSubscribe}
+            aria-label="開啟此裝置的推播通知"
+          >
+            <Bell className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+            {busy ? "處理中…" : "開啟推播通知"}
+          </Button>
+        )}
+        <span
+          className="text-xs text-muted-foreground"
+          aria-live="polite"
+          role="status"
+        >
+          {isSubscribed ? "此裝置已訂閱警示推播。" : "尚未在此裝置開啟推播。"}
+        </span>
+      </div>
+
+      <p className="flex max-w-prose items-start gap-1.5 text-xs text-muted-foreground">
+        <Info
+          className="mt-0.5 h-3.5 w-3.5 shrink-0"
+          aria-hidden="true"
+        />
+        <span>
+          iPhone 使用者：先用 Safari 開啟本站，點分享後選『加入主畫面』，
+          從主畫面圖示開啟 App 再開啟推播（iOS 16.4 以上才支援）。
+        </span>
+      </p>
+    </div>
+  );
+}

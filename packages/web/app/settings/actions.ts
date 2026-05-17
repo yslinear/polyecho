@@ -18,6 +18,11 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { settings } from "@/lib/db/schema";
+import {
+  RISK_MODE_KEY,
+  GLOBAL_PAUSED_KEY,
+  type RiskMode,
+} from "@/lib/settings-keys";
 
 const SETTINGS_KEY = "polymarket_proxy_url";
 
@@ -99,5 +104,76 @@ export async function setPolymarketProxy(
     ok: true,
     message: "Proxy saved. Takes effect on the next Polymarket call.",
     value: trimmed,
+  };
+}
+
+// --- 旅行/保守模式 (PRD §5.6) --------------------------------------------
+
+export interface SetRiskModeResult {
+  ok: boolean;
+  message: string;
+  value: RiskMode;
+}
+
+/**
+ * setRiskMode — upsert the `risk_mode` settings row as a BARE STRING
+ * ("normal" | "conservative"), IDENTICAL shape convention to the
+ * polymarket_proxy_url row above. Python `polyecho.shared.risk_mode` reads
+ * this live; conservative tightens copy ratio + risk caps (PRD §5.6).
+ */
+export async function setRiskMode(
+  mode: RiskMode
+): Promise<SetRiskModeResult> {
+  const value: RiskMode = mode === "conservative" ? "conservative" : "normal";
+  const updated_at = new Date();
+  await db
+    .insert(settings)
+    .values({ key: RISK_MODE_KEY, value, updated_at })
+    .onConflictDoUpdate({
+      target: settings.key,
+      set: { value, updated_at },
+    });
+  return {
+    ok: true,
+    message:
+      value === "conservative"
+        ? "已切換為保守/旅行模式：跟單比例與風險上限自動收緊。"
+        : "已切換為正常模式。",
+    value,
+  };
+}
+
+// --- 全域暫停/恢復 (PRD §5.8) --------------------------------------------
+
+export interface SetGlobalPausedResult {
+  ok: boolean;
+  message: string;
+  paused: boolean;
+}
+
+/**
+ * setGlobalPaused — upsert the `global_paused` settings row as the bare
+ * string "true" | "false" (same convention). trader-core's reconcile loop
+ * honours this as a kill-switch across every follow relation; consistent
+ * with the per-leader pause in app/leaders/actions.ts.
+ */
+export async function setGlobalPaused(
+  paused: boolean
+): Promise<SetGlobalPausedResult> {
+  const value = paused ? "true" : "false";
+  const updated_at = new Date();
+  await db
+    .insert(settings)
+    .values({ key: GLOBAL_PAUSED_KEY, value, updated_at })
+    .onConflictDoUpdate({
+      target: settings.key,
+      set: { value, updated_at },
+    });
+  return {
+    ok: true,
+    message: paused
+      ? "已全域暫停：trader-core 停止所有跟單。"
+      : "已恢復：trader-core 於下一筆領隊交易繼續跟單。",
+    paused,
   };
 }

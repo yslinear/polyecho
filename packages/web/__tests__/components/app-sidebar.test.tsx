@@ -44,6 +44,7 @@ const EXPECTED_NAV = [
   ["Trades", "/trades"],
   ["Positions", "/positions"],
   ["Accounts", "/accounts"],
+  ["Alerts", "/alerts"],
   ["Settings", "/settings"],
 ] as const;
 
