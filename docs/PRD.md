@@ -776,15 +776,17 @@ events (
 
 > **進度註記（2026-05-17）**：Phase 0–1 由 agent swarm 完成；容器內 `pytest packages/shared packages/discovery` → **95 passed / 0 failed**。資料來源預設 fixture（PRD §8.1 台灣地域限制），live client 已實作並藏在 interface 後。尚未 push（使用者掌控）。
 
-### Phase 2：回測引擎（1–2 週）
+### Phase 2：回測引擎（1–2 週）✅ 完成（2026-05-17）
 
-- [ ] 模擬引擎核心
-- [ ] 滑價/延遲/流動性模型
-- [ ] 三情境並排比較
-- [ ] backtest_jobs queue + worker
-- [ ] Web 上的回測頁面
+- [x] 模擬引擎核心（`BacktestEngine.run()`：時序逐筆、風控閘、copy size、mark-to-market）
+- [x] 滑價/延遲/流動性模型（slippage_bps + 延遲 adverse 移動 + 流動性 skip，假設皆內嵌註記）
+- [x] 三情境並排比較（樂觀 50/10、中性 150/30、悲觀 300/60）
+- [x] backtest_jobs queue + worker（`jobs.py` poll pending→running→done/failed；`python -m polyecho.backtest`）
+- [x] Web 上的回測頁面（`/backtest/new` shadcn form + Server Action 入列；`/backtest/[id]` 結果＋三情境圖）
 
 **里程碑**：對 5 個甜蜜點 leader 完成深度回測，做出實盤跟單決策。
+
+> **進度註記（2026-05-17）**：Phase 0–2 完成並 push（19 commits，`origin/main`）。容器內 `pytest packages/{shared,discovery,backtest,cli}` → **134 passed / 0 failed**。UI 定案：**只深用 shadcn/ui**（PRD §10），dashboard 已換 shadcn sidebar shell + data-table + chart。回測 live MTM 有 1 個 `TODO(verify)`（fixture 路徑不受影響）。
 
 ### Phase 3：帳號管理 + 唯讀 Dashboard（1–2 週）
 
