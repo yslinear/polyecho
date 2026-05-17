@@ -158,6 +158,38 @@ API docs.  Use `FixtureDataSource` (the default) until this is confirmed.
 |---|---|---|
 | `POLYECHO_DATASOURCE` | `fixture` | Selects `FixtureDataSource` or `LiveDataSource` |
 
+## Account derivation & signature-type detection (`polyecho.shared.accounts`)
+
+Phase 3 adds wallet derivation + signature-type auto-detection (PRD §5.1).
+
+```python
+from polyecho.shared.accounts import derive_wallets, detect_signature_type
+
+wallets = derive_wallets("0xEOA…")   # {0: eoa, 1: poly_proxy, 2: safe, 3: safe}
+result  = await detect_signature_type("0xEOA…", datasource)  # DetectionResult
+```
+
+* `derive_wallets(eoa)` → the 4 candidate funder addresses keyed by signature
+  type (0..3), all lowercased. Type 0 is the EOA itself; types 2 and 3
+  intentionally share the Gnosis-Safe proxy address (the 1271 flag only
+  changes signature *verification*, not the on-chain holder).
+* `detect_signature_type(eoa, datasource, *, usdc_balance_fn=None)` queries
+  the **frozen** `DataSource` (`get_positions` / `get_user_activity`, consumed
+  as-is, never extended) for each candidate and ranks by
+  **positions ≫ balance ≫ activity**. Returns a frozen `DetectionResult`
+  (per-type `TypeEvidence`, `recommended_type/address`, `confidence`).
+* `fetch_usdc_balance(address, *, client=None)` is an **optional** standalone
+  best-effort `httpx` probe of the Polymarket data-api — deliberately *not*
+  part of the `DataSource` protocol. Any failure → `None`.
+
+> **TODO(verify):** The official docs confirm signature types 0/1/2 and that
+> proxy wallets are *deterministic*, but do **not** publish the factory
+> addresses / CREATE2 salt / proxy init-code hash; `py-clob-client-v2` ships
+> no derivation helper. The factory/singleton constants in `accounts.py` are
+> the community-known Polygon values, isolated as module constants and marked
+> `# TODO(verify)`. Type 0 is always exact; detection ranks by observed
+> on-chain evidence and does **not** require types 1/2/3 to be byte-exact.
+
 ## Security notes
 
 - `encrypted_private_key` is written only by the CLI (`polyecho account import`).

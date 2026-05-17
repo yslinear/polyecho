@@ -103,6 +103,47 @@ Exits with code 1 if the job is not found.
 
 ---
 
+## `polyecho account` (Phase 3 — implemented)
+
+Account management. Private keys are **CLI-only** and never touch the Web UI.
+
+### `polyecho account detect <eoa>`
+
+Derives the 4 candidate funder addresses for an EOA, queries the configured
+datasource (positions/activity) for each, and prints a ranked Rich table plus
+a recommended signature type + confidence. Read-only (no DB writes).
+
+```
+polyecho account detect 0xabc…
+```
+
+### `polyecho account import <eoa>`
+
+```
+polyecho account import <eoa> [--signature-type 0|1|2|3] [--name NAME]
+```
+
+Prompts (hidden) for the encryption **passphrase** (with confirmation) and
+then the **private key**. The key is **never** a CLI argument and is never
+echoed, logged, or printed. It is encrypted in-process with AES-256-GCM
+(`shared.crypto`) and the `accounts` row is upserted with
+`signature_type` / `funder_address` / `encrypted_private_key`, transitioning
+`status` `pending_key_import` → `ready`. Exits non-zero on bad address /
+empty key / DB error.
+
+### `polyecho account list`
+
+Renders a Rich table of all accounts (name, EOA, funder, sig type, status,
+and whether an encrypted key is present). **Never** displays key material.
+
+### `polyecho account balance <name>`
+
+Resolves an account by name or EOA, sums open-position mark-to-market via the
+datasource, and shows a best-effort USDC value (unavailable is reported
+gracefully, not an error).
+
+---
+
 ## `polyecho db migrate`
 
 ```

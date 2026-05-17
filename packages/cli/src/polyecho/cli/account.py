@@ -5,48 +5,438 @@ Account management sub-commands (Phase 3).
 
 Commands
 --------
-* ``polyecho account detect <eoa>``   — detect wallet signature type
-* ``polyecho account import <eoa>``   — securely import private key
-* ``polyecho account list``            — list registered accounts
-* ``polyecho account balance <name>`` — query account balance
+* ``polyecho account detect <eoa>``   — derive 4 candidate wallets and rank
+  them by on-chain evidence (positions ≫ balance ≫ activity).
+* ``polyecho account import <eoa>``   — securely import + encrypt a private
+  key (CLI only; prompts are hidden; the key is never a CLI arg and never
+  logged/printed).
+* ``polyecho account list``           — list registered accounts (never any
+  key material).
+* ``polyecho account balance <name>`` — best-effort USDC value for an account.
+
+Security
+--------
+The private key and passphrase are read via hidden ``typer.prompt`` only,
+encrypted in-process via :func:`polyecho.shared.crypto.encrypt_private_key`,
+and written to ``accounts.encrypted_private_key``.  They are never echoed,
+logged, returned, or placed on the command line.
 """
 
 from __future__ import annotations
 
-import typer
+import asyncio
+from typing import Any
 
-from polyecho.cli._stub import not_implemented
+import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 app = typer.Typer(no_args_is_help=True)
+_console = Console()
 
-_PHASE = 3
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _short(addr: str | None) -> str:
+    """Abbreviate an address for table display (``0x1234…abcd``)."""
+    if not addr:
+        return "-"
+    return addr if len(addr) <= 14 else f"{addr[:8]}…{addr[-6:]}"
 
 
+def _confidence_style(confidence: str) -> str:
+    return {
+        "high": "bold green",
+        "medium": "yellow",
+        "low": "dim",
+        "none": "red",
+    }.get(confidence, "white")
+
+
+# ---------------------------------------------------------------------------
+# detect
+# ---------------------------------------------------------------------------
 @app.command(name="detect")
 def detect(
     eoa: str = typer.Argument(..., help="EOA wallet address (0x…)"),
 ) -> None:
-    """Detect the Polymarket signature type (Type 0–3) for an EOA address."""
-    not_implemented(f"account detect {eoa}", _PHASE)
+    """Detect the Polymarket signature type (Type 0–3) for an EOA address.
+
+    Derives the four candidate funder addresses, queries the configured
+    datasource for positions/activity on each, and prints a ranked table
+    plus a recommendation.  Read-only — never writes the DB.
+    """
+    from polyecho.shared.accounts import (
+        SIGNATURE_TYPE_DESCRIPTIONS,
+        detect_signature_type,
+    )
+    from polyecho.shared.datasource import get_datasource
+
+    try:
+        ds = get_datasource()
+
+        async def _run() -> Any:
+            obj = ds
+            aenter = getattr(ds, "__aenter__", None)
+            if aenter is not None:
+                obj = await aenter()
+            try:
+                return await detect_signature_type(eoa, obj)
+            finally:
+                aexit = getattr(ds, "__aexit__", None)
+                if aexit is not None:
+                    await aexit(None, None, None)
+
+        result = asyncio.run(_run())
+    except ValueError as exc:
+        _console.print(f"[red]Invalid address:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    table = Table(
+        title=f"Signature-type detection for {result.eoa}",
+        title_style="bold",
+    )
+    table.add_column("Type", justify="right")
+    table.add_column("Name")
+    table.add_column("Candidate address")
+    table.add_column("Positions", justify="right")
+    table.add_column("Activity", justify="right")
+    table.add_column("USDC", justify="right")
+    table.add_column("When to use")
+
+    for ev in result.evidence:
+        is_rec = ev.signature_type == result.recommended_type
+        row_style = "bold green" if is_rec else ""
+        bal = "-" if ev.usdc_balance is None else f"{ev.usdc_balance:,.2f}"
+        table.add_row(
+            f"{ev.signature_type}{' ★' if is_rec else ''}",
+            ev.name,
+            ev.address,
+            str(ev.position_count),
+            str(ev.activity_count),
+            bal,
+            SIGNATURE_TYPE_DESCRIPTIONS.get(ev.signature_type, ""),
+            style=row_style,
+        )
+
+    _console.print(table)
+
+    if result.recommended_type is None:
+        _console.print(
+            Panel(
+                "[red]No positions or activity found for any candidate "
+                "address.[/red]\nThe EOA may be unused on Polymarket, or the "
+                "datasource has no data for it.",
+                title="[dim]Recommendation[/dim]",
+                border_style="red",
+            )
+        )
+        return
+
+    style = _confidence_style(result.confidence)
+    _console.print(
+        Panel(
+            f"Recommended: [bold]Type {result.recommended_type}[/bold] "
+            f"([bold]{result.evidence_for(result.recommended_type).name}[/bold])\n"
+            f"Funder address: {result.recommended_address}\n"
+            f"Confidence: [{style}]{result.confidence}[/{style}]\n\n"
+            f"[dim]Next:[/dim] polyecho account import {result.eoa}",
+            title="[dim]Recommendation[/dim]",
+            border_style="green" if result.confidence == "high" else "yellow",
+        )
+    )
 
 
+# ---------------------------------------------------------------------------
+# import
+# ---------------------------------------------------------------------------
 @app.command(name="import")
 def import_key(
-    eoa: str = typer.Argument(..., help="EOA wallet address whose private key to import."),
+    eoa: str = typer.Argument(
+        ..., help="EOA wallet address whose private key to import."
+    ),
+    signature_type: int = typer.Option(
+        2,
+        "--signature-type",
+        "-t",
+        min=0,
+        max=3,
+        help="Polymarket signature type (0=EOA 1=POLY_PROXY "
+        "2=POLY_GNOSIS_SAFE 3=POLY_1271). Run `account detect` first.",
+    ),
+    name: str = typer.Option(
+        "",
+        "--name",
+        help="Friendly account name (defaults to the EOA address).",
+    ),
+    passphrase: str = typer.Option(
+        ...,
+        prompt="Encryption passphrase",
+        confirmation_prompt=True,
+        hide_input=True,
+        help="Passphrase used to derive the AES-256-GCM key (hidden prompt).",
+    ),
 ) -> None:
-    """Securely import a private key for an EOA account (CLI only — never via Web UI)."""
-    not_implemented(f"account import {eoa}", _PHASE)
+    """Securely import a private key for an EOA account (CLI only — never via Web UI).
+
+    The private key is read from a **hidden** prompt (never a CLI argument),
+    encrypted in-process with ``shared.crypto.encrypt_private_key``, and the
+    ``accounts`` row is upserted with ``signature_type`` / ``funder_address``
+    / ``encrypted_private_key`` and ``status`` transitioned
+    ``pending_key_import`` → ``ready``.  The key/passphrase are never echoed,
+    logged, or printed.
+    """
+    from sqlalchemy import select
+
+    from polyecho.shared.accounts import (
+        SIGNATURE_TYPE_NAMES,
+        derive_wallets,
+    )
+    from polyecho.shared.crypto import encrypt_private_key
+    from polyecho.shared.db import session_scope
+    from polyecho.shared.models import Account
+
+    try:
+        wallets = derive_wallets(eoa)
+    except ValueError as exc:
+        _console.print(f"[red]Invalid address:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    eoa_lower = wallets[0]
+    funder = wallets[signature_type]
+    account_name = name or eoa_lower
+
+    # Hidden private-key prompt — NEVER a CLI argument, NEVER logged/echoed.
+    private_key = typer.prompt("Private key (hidden)", hide_input=True)
+    if not private_key or not private_key.strip():
+        _console.print("[red]Empty private key — aborted.[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        encrypted = encrypt_private_key(private_key.strip(), passphrase)
+    finally:
+        # Best-effort: drop the plaintext reference promptly.
+        private_key = ""  # noqa: F841
+
+    async def _run() -> str:
+        async with session_scope() as session:
+            existing = (
+                await session.execute(
+                    select(Account).where(Account.eoa_address == eoa_lower)
+                )
+            ).scalar_one_or_none()
+
+            if existing is None:
+                session.add(
+                    Account(
+                        name=account_name,
+                        eoa_address=eoa_lower,
+                        funder_address=funder,
+                        signature_type=signature_type,
+                        encrypted_private_key=encrypted,
+                        status="ready",
+                    )
+                )
+                return "created"
+
+            existing.name = account_name
+            existing.funder_address = funder
+            existing.signature_type = signature_type
+            existing.encrypted_private_key = encrypted
+            existing.status = "ready"
+            return "updated"
+
+    try:
+        action = asyncio.run(_run())
+    except Exception as exc:  # noqa: BLE001 - surface a clean CLI error
+        _console.print(f"[red]Import failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    _console.print(
+        Panel(
+            f"[bold green]{action}[/bold green] account "
+            f"[bold]{account_name}[/bold]\n"
+            f"EOA       {eoa_lower}\n"
+            f"Funder    {funder}\n"
+            f"Sig type  {signature_type} "
+            f"({SIGNATURE_TYPE_NAMES.get(signature_type, '?')})\n"
+            f"Status    pending_key_import → [bold green]ready[/bold green]\n"
+            f"[dim]Private key encrypted (AES-256-GCM) and stored. "
+            f"Key material is never logged or displayed.[/dim]",
+            title="[dim]polyecho account import[/dim]",
+            border_style="green",
+        )
+    )
 
 
+# ---------------------------------------------------------------------------
+# list
+# ---------------------------------------------------------------------------
 @app.command(name="list")
 def list_accounts() -> None:
-    """List all registered PolyEcho accounts."""
-    not_implemented("account list", _PHASE)
+    """List all registered PolyEcho accounts.
+
+    Never displays key material — only metadata and whether an encrypted key
+    is present.
+    """
+    from sqlalchemy import select
+
+    from polyecho.shared.db import session_scope
+    from polyecho.shared.models import Account
+
+    async def _run() -> list[Any]:
+        async with session_scope() as session:
+            rows = (
+                await session.execute(select(Account).order_by(Account.created_at))
+            ).scalars().all()
+            # Detach plain values so the session can close before rendering.
+            return [
+                (
+                    a.name,
+                    a.eoa_address,
+                    a.funder_address,
+                    a.signature_type,
+                    a.status,
+                    a.encrypted_private_key is not None,
+                )
+                for a in rows
+            ]
+
+    try:
+        accounts = asyncio.run(_run())
+    except Exception as exc:  # noqa: BLE001
+        _console.print(f"[red]Could not load accounts:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if not accounts:
+        _console.print(
+            Panel(
+                "No accounts registered yet.\n"
+                "[dim]Run `polyecho account detect <eoa>` then "
+                "`polyecho account import <eoa>`.[/dim]",
+                title="[dim]polyecho account list[/dim]",
+                border_style="yellow",
+            )
+        )
+        return
+
+    table = Table(title="PolyEcho accounts", title_style="bold")
+    table.add_column("Name")
+    table.add_column("EOA")
+    table.add_column("Funder")
+    table.add_column("Sig", justify="right")
+    table.add_column("Status")
+    table.add_column("Key")
+
+    for name, eoa_address, funder, sig_type, status, has_key in accounts:
+        status_style = {
+            "ready": "green",
+            "pending_key_import": "yellow",
+            "disabled": "dim",
+        }.get(status, "white")
+        table.add_row(
+            name,
+            _short(eoa_address),
+            _short(funder),
+            str(sig_type),
+            f"[{status_style}]{status}[/{status_style}]",
+            "[green]✓ encrypted[/green]" if has_key else "[red]—[/red]",
+        )
+
+    _console.print(table)
 
 
+# ---------------------------------------------------------------------------
+# balance
+# ---------------------------------------------------------------------------
 @app.command(name="balance")
 def balance(
     name: str = typer.Argument(..., help="Account name or EOA address."),
 ) -> None:
-    """Query the USDC balance and authorisation status for an account."""
-    not_implemented(f"account balance {name}", _PHASE)
+    """Query the USDC value and position summary for an account (best-effort).
+
+    Resolves *name* (account name or EOA) to a row, then sums open-position
+    value via the configured datasource and probes USDC balance best-effort.
+    """
+    from sqlalchemy import or_, select
+
+    from polyecho.shared.accounts import fetch_usdc_balance
+    from polyecho.shared.datasource import get_datasource
+    from polyecho.shared.db import session_scope
+    from polyecho.shared.models import Account
+
+    name_lower = name.lower()
+
+    async def _load() -> tuple[str, str | None, int] | None:
+        async with session_scope() as session:
+            row = (
+                await session.execute(
+                    select(Account).where(
+                        or_(
+                            Account.name == name,
+                            Account.eoa_address == name_lower,
+                        )
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            return (row.name, row.funder_address or row.eoa_address, row.signature_type)
+
+    try:
+        loaded = asyncio.run(_load())
+    except Exception as exc:  # noqa: BLE001
+        _console.print(f"[red]Could not load account:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if loaded is None:
+        _console.print(f"[red]Account not found:[/red] {name}")
+        raise typer.Exit(code=1)
+
+    acct_name, funder, sig_type = loaded
+    funder_addr = (funder or "").lower()
+
+    async def _balance() -> tuple[int, float, float | None]:
+        ds = get_datasource()
+        obj = ds
+        aenter = getattr(ds, "__aenter__", None)
+        if aenter is not None:
+            obj = await aenter()
+        try:
+            try:
+                positions = await obj.get_positions(funder_addr)
+            except Exception:  # noqa: BLE001 - best-effort
+                positions = []
+            pos_value = sum(p.current_value for p in positions)
+            usdc = await fetch_usdc_balance(funder_addr)
+            return len(positions), pos_value, usdc
+        finally:
+            aexit = getattr(ds, "__aexit__", None)
+            if aexit is not None:
+                await aexit(None, None, None)
+
+    try:
+        pos_count, pos_value, usdc = asyncio.run(_balance())
+    except Exception as exc:  # noqa: BLE001
+        _console.print(f"[red]Balance query failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    usdc_line = (
+        "[dim]unavailable (best-effort)[/dim]"
+        if usdc is None
+        else f"[bold]{usdc:,.2f}[/bold] USDC"
+    )
+    _console.print(
+        Panel(
+            f"Account   [bold]{acct_name}[/bold]\n"
+            f"Funder    {funder_addr}\n"
+            f"Sig type  {sig_type}\n"
+            f"USDC      {usdc_line}\n"
+            f"Positions {pos_count} open  "
+            f"(mark-to-market ≈ [bold]{pos_value:,.2f}[/bold] USD)",
+            title="[dim]polyecho account balance[/dim]",
+            border_style="cyan",
+        )
+    )
