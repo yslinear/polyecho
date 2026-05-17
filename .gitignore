@@ -10,6 +10,14 @@ venv/
 dist/
 build/
 
+# Tests / coverage artifacts
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+*.lcov
+.vitest/
+
 # uv
 # NOTE: uv.lock IS committed — this is an application monorepo and the lockfile
 # is required for reproducible CI (uv sync --frozen) and the setup-uv cache.
