@@ -18,10 +18,10 @@
     "db:migrate": "drizzle-kit migrate"
   },
   "dependencies": {
-    "next": "15.1.8",
+    "next": "15.5.18",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "drizzle-orm": "^0.39.0",
+    "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.5",
     "recharts": "^2.13.0",
     "class-variance-authority": "^0.7.1",
@@ -52,7 +52,7 @@
     "autoprefixer": "^10.4.20",
     "drizzle-kit": "^0.31.0",
     "eslint": "^9.17.0",
-    "eslint-config-next": "15.1.8",
+    "eslint-config-next": "15.5.18",
     "@eslint/eslintrc": "^3.2.0",
     "vitest": "^2.1.8",
     "@vitejs/plugin-react": "^4.3.4",

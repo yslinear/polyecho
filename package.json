@@ -11,5 +11,13 @@
     "web:lint": "pnpm --filter @polyecho/web lint",
     "db:generate": "pnpm --filter @polyecho/web db:generate",
     "db:migrate": "pnpm --filter @polyecho/web db:migrate"
+  },
+  "pnpm": {
+    "comment": "Controlled audit fix: pin the dev/test-only vite+esbuild (transitive via @vitejs/plugin-react / @vitest/coverage-v8) to patched, vitest-2.x-compatible lines. NOT vite 8 (breaks vitest 2.x; dependabot #2). vite/esbuild never ship in the Next standalone image.",
+    "overrides": {
+      "vite": "^5.4.20",
+      "esbuild": "^0.25.0",
+      "postcss": "^8.4.49"
+    }
   }
 }
