@@ -305,9 +305,30 @@ async def test_conservative_mode_failsafe_normal_on_error(
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _danger_passphrase_provisioned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the FROZEN provisioning predicate to ``True``.
+
+    P0-2 adds an EARLIER fail-closed gate in :class:`PendingActionExecutor`
+    that refuses every confirmed row unless the operator provisioned the
+    danger passphrase.  Existing pending-action invariant tests assume a
+    provisioned operator (they assert the row reaches the live-lock
+    chokepoint), so default it ``True`` here; the new refusal tests
+    monkeypatch it ``False`` explicitly.
+    """
+
+    async def _provisioned(session: Any = None) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        "polyecho.core.pending.is_danger_passphrase_provisioned", _provisioned
+    )
+
+
 def _row(
     action_type: PendingActionType = PendingActionType.MANUAL_SELL,
     status: PendingActionStatus = PendingActionStatus.CONFIRMED,
+    expires_at: Any = None,
     **params: Any,
 ) -> PendingActionRow:
     base: dict[str, Any] = {
@@ -324,6 +345,7 @@ def _row(
         action_type=action_type,
         status=str(status),
         params=base,
+        expires_at=expires_at,
     )
 
 
@@ -473,3 +495,231 @@ async def test_emergency_liquidate_sells_all_open_positions(
     assert all(r.placed is False for r in results)
     assert all(r.skip_reason is SkipReason.LIVE_LOCKED for r in results)
     assert len(events) == 2  # a close event per position
+
+
+# ---------------------------------------------------------------------------
+# C.2  Defense-in-depth P0-2: fail-closed danger-passphrase / TTL gates
+#      (EARLIER than the live-lock chokepoint).
+# ---------------------------------------------------------------------------
+
+
+async def test_confirmed_refused_when_danger_passphrase_not_provisioned(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No danger passphrase ⇒ a confirmed row is refused fail-closed.
+
+    Nothing is placed, the structured WARNING is logged, and the row is
+    NOT marked processed (left for an operator to investigate).
+    """
+    import logging
+
+    from polyecho.shared.config import get_settings
+
+    monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
+    get_settings.cache_clear()
+
+    async def _not_provisioned(session: Any = None) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        "polyecho.core.pending.is_danger_passphrase_provisioned",
+        _not_provisioned,
+    )
+
+    row = _row()
+    placed: list[Any] = []
+    marked: list[str] = []
+
+    async def rows() -> list[PendingActionRow]:
+        return [row]
+
+    async def positions(_a: uuid.UUID) -> list[OpenPosition]:
+        placed.append("positions_called")
+        return []
+
+    async def mark(aid: str, _p: dict[str, Any]) -> None:
+        marked.append(aid)
+
+    ex = PendingActionExecutor(
+        rows_source=rows,
+        positions_for=positions,
+        mark_processed=mark,
+        executor=OrderExecutor(ledger=FifoLedger()),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="polyecho.core.pending"):
+        out = await ex.poll_once()
+
+    assert out == []  # refused: nothing executed
+    assert placed == []  # never reached _execute_row / chokepoint
+    assert marked == []  # NOT marked processed — left for operator
+    assert any(
+        r.message == "pending_action_refused_no_danger_passphrase"
+        for r in caplog.records
+    )
+    # Logged once: a second poll does not re-spam the warning.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="polyecho.core.pending"):
+        out2 = await ex.poll_once()
+    assert out2 == []
+    assert not any(
+        r.message == "pending_action_refused_no_danger_passphrase"
+        for r in caplog.records
+    )
+
+
+async def test_confirmed_provisioned_still_live_locked_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provisioned + live lock OFF (default) ⇒ existing invariant holds.
+
+    The new gate passes, the row reaches the chokepoint, and the HARD
+    live lock still yields placed=False / LIVE_LOCKED (unchanged).
+    """
+    from polyecho.shared.config import get_settings
+    from polyecho.shared.copytrading import SkipReason
+
+    monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
+    get_settings.cache_clear()
+
+    async def _provisioned(session: Any = None) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        "polyecho.core.pending.is_danger_passphrase_provisioned",
+        _provisioned,
+    )
+
+    row = _row()
+    marked: list[str] = []
+
+    async def rows() -> list[PendingActionRow]:
+        return [row]
+
+    async def positions(_a: uuid.UUID) -> list[OpenPosition]:
+        return []
+
+    async def mark(aid: str, _p: dict[str, Any]) -> None:
+        marked.append(aid)
+
+    ex = PendingActionExecutor(
+        rows_source=rows,
+        positions_for=positions,
+        mark_processed=mark,
+        executor=OrderExecutor(ledger=FifoLedger()),
+    )
+    out = await ex.poll_once()
+
+    assert len(out) == 1
+    _aid, results = out[0]
+    assert len(results) == 1
+    assert results[0].placed is False
+    assert results[0].skip_reason is SkipReason.LIVE_LOCKED
+    assert marked == [row.id]  # processed normally (gate passed)
+
+
+async def test_expired_confirmed_row_refused_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A confirmed row past its ``expires_at`` TTL is refused fail-closed."""
+    import logging
+    from datetime import UTC, datetime, timedelta
+
+    from polyecho.shared.config import get_settings
+
+    monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
+    get_settings.cache_clear()
+
+    stale = _row(
+        expires_at=datetime.now(tz=UTC) - timedelta(seconds=1),
+    )
+    marked: list[str] = []
+
+    async def rows() -> list[PendingActionRow]:
+        return [stale]
+
+    async def positions(_a: uuid.UUID) -> list[OpenPosition]:
+        return []
+
+    async def mark(aid: str, _p: dict[str, Any]) -> None:
+        marked.append(aid)
+
+    ex = PendingActionExecutor(
+        rows_source=rows,
+        positions_for=positions,
+        mark_processed=mark,
+        executor=OrderExecutor(ledger=FifoLedger()),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="polyecho.core.pending"):
+        out = await ex.poll_once()
+
+    assert out == []  # refused: stale confirmed row not executed
+    assert marked == []  # NOT marked processed
+    assert any(
+        r.message == "pending_action_refused_expired" for r in caplog.records
+    )
+
+    # A still-valid TTL is unaffected (sanity: same helper, future expiry).
+    fresh = _row(expires_at=datetime.now(tz=UTC) + timedelta(hours=1))
+
+    async def rows2() -> list[PendingActionRow]:
+        return [fresh]
+
+    ex2 = PendingActionExecutor(
+        rows_source=rows2,
+        positions_for=positions,
+        mark_processed=mark,
+        executor=OrderExecutor(ledger=FifoLedger()),
+    )
+    out2 = await ex2.poll_once()
+    assert len(out2) == 1  # not expired ⇒ reaches chokepoint
+    assert marked == [fresh.id]
+
+
+async def test_non_confirmed_rows_still_ignored_with_p0_2_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existing behaviour preserved: non-confirmed rows never execute.
+
+    The P0-2 gates sit AFTER the status filter, so awaiting/expired/
+    processed rows are still short-circuited (and never even consult the
+    provisioning predicate).
+    """
+    from polyecho.shared.config import get_settings
+
+    monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
+    get_settings.cache_clear()
+
+    consulted: list[str] = []
+
+    async def _spy(session: Any = None) -> bool:
+        consulted.append("called")
+        return True
+
+    monkeypatch.setattr(
+        "polyecho.core.pending.is_danger_passphrase_provisioned", _spy
+    )
+
+    awaiting = _row(status=PendingActionStatus.AWAITING_CONFIRM)
+    expired = _row(status=PendingActionStatus.EXPIRED)
+    processed = _row()
+    processed.params["_core_processed_at"] = "2026-01-01T00:00:00+00:00"
+
+    async def rows() -> list[PendingActionRow]:
+        return [awaiting, expired, processed]
+
+    async def positions(_a: uuid.UUID) -> list[OpenPosition]:
+        return []
+
+    async def mark(_aid: str, _p: dict[str, Any]) -> None:
+        return None
+
+    ex = PendingActionExecutor(
+        rows_source=rows, positions_for=positions, mark_processed=mark
+    )
+    out = await ex.poll_once()
+    assert out == []  # nothing eligible (status filter wins)
+    assert consulted == []  # gate not even consulted for ineligible rows

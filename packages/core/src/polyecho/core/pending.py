@@ -13,6 +13,13 @@ HARD invariants preserved
 -------------------------
 * It **never re-verifies the passphrase** — that is web's job; core only
   consumes ``status == 'confirmed'`` rows.
+* **Defense-in-depth (P0-2)**: an EARLIER fail-closed gate refuses any
+  confirmed row when the operator has not provisioned the danger
+  passphrase (``is_danger_passphrase_provisioned() is False`` ⇒ no
+  confirmed row can be legitimate) or when the row is past its
+  ``expires_at`` TTL.  Refused rows are logged once and **not** marked
+  processed (left for an operator to investigate).  This is an
+  *additional* gate, never a replacement for the live-lock chokepoint.
 * Every order placement routes through the existing
   :class:`~polyecho.core.execution.OrderExecutor`, whose live path calls
   :class:`~polyecho.shared.polymarket.client.PolymarketClient.place_order`
@@ -47,6 +54,7 @@ from polyecho.shared.copytrading import (
     TradeSide,
     WalletBinding,
 )
+from polyecho.shared.danger_passphrase import is_danger_passphrase_provisioned
 from polyecho.shared.pending_actions import PendingActionStatus, PendingActionType
 
 logger = logging.getLogger(__name__)
@@ -93,10 +101,27 @@ class PendingActionRow:
     action_type: PendingActionType
     status: str
     params: dict[str, Any] = field(default_factory=dict)
+    #: TTL bound the web layer recorded (``created_at + ttl_seconds``).
+    #: ``None`` ⇒ unknown/unbounded (treated as *not* expired so we never
+    #: spuriously reject a row whose source didn't surface the column).
+    expires_at: datetime | None = None
 
     @property
     def processed(self) -> bool:
         return bool(self.params.get(PROCESSED_MARKER))
+
+    def is_expired(self, *, now: datetime | None = None) -> bool:
+        """``True`` iff a TTL is known and ``now >= expires_at``.
+
+        Naive datetimes are interpreted as UTC (mirrors the FROZEN
+        :mod:`polyecho.shared.pending_actions` ``expires_at`` handling).
+        """
+        if self.expires_at is None:
+            return False
+        exp = self.expires_at
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=UTC)
+        return (now or datetime.now(tz=UTC)) >= exp
 
 
 # Injected DB hooks (kept tiny so the executor is pure / unit-testable).
@@ -179,6 +204,50 @@ class PendingActionExecutor:
             ):
                 continue
             if row.processed or row.id in self._seen:
+                continue
+
+            # --- Defense-in-depth gates (P0-2), strictly EARLIER than the
+            # live-lock chokepoint (OrderExecutor.execute → assert_live_
+            # allowed).  These ADD an earlier fail-closed refusal; they do
+            # NOT replace the HARD live lock, which still gates every SELL.
+
+            # (a) Stale-confirmed guard: a confirmed row past its TTL is
+            # not a legitimate execution target.  Fail-closed: refuse,
+            # log once (seen-set ⇒ no loop-spam), do NOT mark processed.
+            if row.is_expired():
+                if row.id not in self._seen:
+                    self._seen.add(row.id)
+                    logger.warning(
+                        "pending_action_refused_expired",
+                        extra={
+                            "action_id": row.id,
+                            "action_type": str(row.action_type),
+                            "expires_at": (
+                                row.expires_at.isoformat()
+                                if row.expires_at is not None
+                                else None
+                            ),
+                        },
+                    )
+                continue
+
+            # (b) Danger-passphrase provisioning guard: if the operator
+            # never provisioned the danger passphrase, NO confirmed row
+            # can be legitimate (web's confirm path is fail-closed without
+            # it).  A confirmed row appearing here is therefore suspicious
+            # — refuse, log a structured WARNING once, do NOT mark
+            # processed (leave it for an operator to investigate).  The
+            # FROZEN helper is itself fail-safe.
+            if not await is_danger_passphrase_provisioned():
+                if row.id not in self._seen:
+                    self._seen.add(row.id)
+                    logger.warning(
+                        "pending_action_refused_no_danger_passphrase",
+                        extra={
+                            "action_id": row.id,
+                            "action_type": str(row.action_type),
+                        },
+                    )
                 continue
 
             self._seen.add(row.id)  # claim BEFORE any await (idempotent)
