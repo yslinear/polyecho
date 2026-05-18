@@ -396,7 +396,8 @@ class TestBacktestShow:
 
 class TestDbMigrate:
     def test_migrate_reads_sql_file_and_calls_execute(self, tmp_path: Path) -> None:
-        """db migrate should read 0000_init.sql and call exec_driver_sql."""
+        """db migrate reads 0000_init.sql and forwards it to the RAW asyncpg
+        driver_connection.execute (multi-statement simple-query path)."""
         # Create a minimal SQL file
         sql_content = "CREATE TABLE IF NOT EXISTS test_table (id INT);\n"
         sql_file = tmp_path / "0000_init.sql"
@@ -404,21 +405,18 @@ class TestDbMigrate:
 
         executed_sql: list[str] = []
 
-        # Fake async connection context manager
-        async def fake_exec_driver_sql(sql: str) -> None:
+        async def fake_execute(sql: str) -> None:
             executed_sql.append(sql)
 
-        async def fake_commit() -> None:
-            pass
-
-        conn_mock = MagicMock()
-        conn_mock.exec_driver_sql = fake_exec_driver_sql
-        conn_mock.commit = fake_commit
-        conn_mock.__aenter__ = AsyncMock(return_value=conn_mock)
-        conn_mock.__aexit__ = AsyncMock(return_value=False)
+        driver_conn = MagicMock()
+        driver_conn.execute = fake_execute
+        raw = MagicMock()
+        raw.driver_connection = driver_conn
+        raw.close = MagicMock()
 
         engine_mock = MagicMock()
-        engine_mock.connect.return_value = conn_mock
+        engine_mock.raw_connection = AsyncMock(return_value=raw)
+        engine_mock.dispose = AsyncMock()
 
         import polyecho.cli.db as db_module
 
@@ -429,7 +427,7 @@ class TestDbMigrate:
             patch.object(db_module, "_migration_path", fake_migration_path),
             patch("polyecho.shared.db.get_engine", return_value=engine_mock),
         ):
-            result = runner.invoke(app, ["db", "migrate"])
+            result = runner.invoke(app, ["db", "migrate", "--yes"])
 
         assert result.exit_code == 0, result.output
         assert "Applied" in result.output
