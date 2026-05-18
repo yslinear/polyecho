@@ -9,8 +9,14 @@
 ARG PYTHON_VERSION=3.12
 ARG UV_VERSION=0.5
 
+# Base images are digest-pinned (@sha256:) for supply-chain integrity: the
+# human tag stays for readability, the digest makes the pull reproducible and
+# tamper-evident. The ARG tags above are kept in sync with the digests below;
+# both the tags and the @sha256: digests are bumped automatically by
+# renovate/dependabot (the digest takes precedence on pull).
+
 # ── Stage 1: builder ──────────────────────────────────────────────────────────
-FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-bookworm-slim@sha256:fef6dca3a45cd7ac8c4386e78263033ee4b262fe36c1ee077630e53ed6df2070 AS builder
 
 # IMPORTANT: build under the SAME path used at runtime (/app). `uv sync` installs
 # the uv-workspace members as EDITABLE installs whose .pth entries hard-code the
@@ -49,7 +55,8 @@ RUN if [ -f uv.lock ]; then \
     fi
 
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
-FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
+# Digest-pinned (see supply-chain note above); renovate/dependabot bumps both.
+FROM python:${PYTHON_VERSION}-slim-bookworm@sha256:d193c6f51a7dbd10395d6328de3a7edb0516fb0608ca138036576f574c3e07d2 AS runtime
 
 # PACKAGE determines which polyecho sub-module is run (core / discovery / push / backtest)
 ARG PACKAGE

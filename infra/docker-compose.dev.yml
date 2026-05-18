@@ -27,7 +27,9 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/Dockerfile.dev
-    container_name: polyecho-dev
+    # container_name intentionally unset — Compose derives a project-scoped
+    # name so this dev override never collides with a running prod stack
+    # (mirrors the de-hardcoding in infra/docker-compose.yml).
     volumes:
       # Full repo bind-mount so all file changes are reflected instantly
       - ..:/workspace:cached
@@ -104,7 +106,7 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/Dockerfile.web.dev
-    container_name: dashboard-web-dev
+    # container_name intentionally unset — project-scoped name (see note above).
     volumes:
       - ../packages/web:/workspace/packages/web:cached
       - dev_web_node_modules:/workspace/packages/web/node_modules

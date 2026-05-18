@@ -4,7 +4,11 @@
 
 ARG NODE_VERSION=22
 
-FROM node:${NODE_VERSION}-bookworm-slim
+# Base image is digest-pinned (@sha256:) for supply-chain integrity: the human
+# tag stays for readability, the digest makes the pull reproducible and
+# tamper-evident (same digest as Dockerfile.web). Both the tag and the
+# @sha256: digest are bumped automatically by renovate/dependabot.
+FROM node:${NODE_VERSION}-bookworm-slim@sha256:689c11043dad91472750cd824c97dd5e2318e9dd6f954e492fe7af0135d33ceb
 
 RUN corepack enable
 

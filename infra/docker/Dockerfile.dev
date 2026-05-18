@@ -7,14 +7,20 @@ ARG PYTHON_VERSION=3.12
 ARG NODE_VERSION=22
 ARG UV_VERSION=0.5
 
+# Base images are digest-pinned (@sha256:) for supply-chain integrity: the
+# human tag stays for readability, the digest makes the pull reproducible and
+# tamper-evident. The node digest matches Dockerfile.web exactly so the dev
+# toolchain is identical to prod. Both the tags and the @sha256: digests are
+# bumped automatically by renovate/dependabot (digest wins on pull).
+
 # ── Stage 1: node toolchain ───────────────────────────────────────────────────
 # Use the SAME official `node:` image the working Dockerfile.web builds on. It
 # ships node + npm + corepack on /usr/local, guaranteed — unlike the NodeSource
 # apt route the old Dockerfile.dev used.
-FROM node:${NODE_VERSION}-bookworm-slim AS node
+FROM node:${NODE_VERSION}-bookworm-slim@sha256:689c11043dad91472750cd824c97dd5e2318e9dd6f954e492fe7af0135d33ceb AS node
 
 # ── Stage 2: dev image (uv base + copied node toolchain) ──────────────────────
-FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-bookworm-slim
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-bookworm-slim@sha256:fef6dca3a45cd7ac8c4386e78263033ee4b262fe36c1ee077630e53ed6df2070
 
 # ROOT CAUSE of the original `corepack: not found`: Dockerfile.dev installed
 # Node via NodeSource's `setup_${NODE_VERSION}.x` + `apt-get install nodejs`.

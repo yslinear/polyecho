@@ -45,9 +45,16 @@ x-python-defaults: &python-defaults
 services:
 
   # ── PostgreSQL 16 ────────────────────────────────────────────────────────────
+  # NOTE: container_name is intentionally NOT set on any service, and the
+  # pgdata volume has no fixed `name:`. Compose derives project-scoped names
+  # (e.g. <project>-db-1, <project>_pgdata) from `-p/COMPOSE_PROJECT_NAME`
+  # (default: polyecho). This lets an isolated second project
+  # (`docker compose -p other up`) run alongside a live stack WITHOUT
+  # colliding on a global container/volume name. Operators who relied on the
+  # old fixed names (polyecho-db, polyecho_pgdata) should now address
+  # resources by the project-scoped names or via `docker compose` directly.
   db:
     image: postgres:16-bookworm
-    container_name: polyecho-db
     restart: unless-stopped
     environment:
       POSTGRES_DB: polyecho
@@ -76,7 +83,6 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/Dockerfile.cli
-    container_name: polyecho-migrate
     command: ["db", "migrate"]
     env_file:
       - path: ../.env
@@ -104,7 +110,6 @@ services:
       <<: *python-build
       args:
         PACKAGE: core
-    container_name: trader-core
     <<: *python-defaults
     # NO ports — key isolation (PRD §4.2 / §5 G5)
 
@@ -114,7 +119,6 @@ services:
       <<: *python-build
       args:
         PACKAGE: discovery
-    container_name: discovery-worker
     <<: *python-defaults
     # NO ports
 
@@ -127,7 +131,6 @@ services:
       <<: *python-build
       args:
         PACKAGE: backtest
-    container_name: backtest-worker
     <<: *python-defaults
     # NO ports — DB-only communication (PRD §4.2)
 
@@ -137,7 +140,6 @@ services:
       <<: *python-build
       args:
         PACKAGE: push
-    container_name: web-push-sender
     <<: *python-defaults
     # NO ports (sends outbound VAPID push only)
 
@@ -146,7 +148,6 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/Dockerfile.web
-    container_name: dashboard-web
     env_file:
       - path: ../.env
         required: false
@@ -162,6 +163,21 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+    # HTTP healthcheck so `restart: unless-stopped` can detect a hung-but-alive
+    # Next.js process (the runtime image is node:slim — no curl/wget — so probe
+    # with a tiny Node one-liner; exits 0 only on HTTP 200 from `/`).
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:3000/',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
     # Bind to localhost only — not exposed; remote access out of scope (PRD §5.9)
     ports:
       - "127.0.0.1:3000:3000"
@@ -172,7 +188,6 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/Dockerfile.cli
-    container_name: polyecho-cli
     env_file:
       - path: ../.env
         required: false
@@ -190,6 +205,8 @@ services:
     # No restart — on-demand only
 
 # ── Volumes ───────────────────────────────────────────────────────────────────
+# No fixed `name:` — Compose derives a project-scoped volume name
+# (<project>_pgdata) so an isolated second project does not collide with a
+# running stack's data volume. `docker compose down -v` still removes it.
 volumes:
-  pgdata:
-    name: polyecho_pgdata
+  pgdata: {}

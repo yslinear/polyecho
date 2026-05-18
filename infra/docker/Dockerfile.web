@@ -4,8 +4,14 @@
 
 ARG NODE_VERSION=22
 
+# Base image is digest-pinned (@sha256:) for supply-chain integrity: the human
+# tag stays for readability, the digest makes the pull reproducible and
+# tamper-evident. All three stages pin the SAME digest so the build is fully
+# deterministic. Both the tag and the @sha256: digest are bumped automatically
+# by renovate/dependabot (the digest takes precedence on pull).
+
 # ── Stage 1: deps ─────────────────────────────────────────────────────────────
-FROM node:${NODE_VERSION}-bookworm-slim AS deps
+FROM node:${NODE_VERSION}-bookworm-slim@sha256:689c11043dad91472750cd824c97dd5e2318e9dd6f954e492fe7af0135d33ceb AS deps
 
 # Enable corepack so the exact pnpm version from package.json is used
 RUN corepack enable
@@ -23,7 +29,8 @@ COPY packages/web/package.json packages/web/package.json
 RUN pnpm install --frozen-lockfile 2>/dev/null || pnpm install
 
 # ── Stage 2: builder ──────────────────────────────────────────────────────────
-FROM node:${NODE_VERSION}-bookworm-slim AS builder
+# Digest-pinned (see supply-chain note above); renovate/dependabot bumps both.
+FROM node:${NODE_VERSION}-bookworm-slim@sha256:689c11043dad91472750cd824c97dd5e2318e9dd6f954e492fe7af0135d33ceb AS builder
 
 RUN corepack enable
 
@@ -53,7 +60,8 @@ ENV POLYECHO_DB_URL_DRIZZLE=${POLYECHO_DB_URL_DRIZZLE}
 RUN pnpm --filter @polyecho/web build
 
 # ── Stage 3: runtime ──────────────────────────────────────────────────────────
-FROM node:${NODE_VERSION}-bookworm-slim AS runtime
+# Digest-pinned (see supply-chain note above); renovate/dependabot bumps both.
+FROM node:${NODE_VERSION}-bookworm-slim@sha256:689c11043dad91472750cd824c97dd5e2318e9dd6f954e492fe7af0135d33ceb AS runtime
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
