@@ -111,6 +111,28 @@ export function startOfTodayUtc(now: Date = new Date()): Date {
   );
 }
 
+/**
+ * Compact zh-TW relative time, past only (e.g. "12 秒前", "3 分鐘前",
+ * "2 小時前", "5 天前"). Used by the bot-heartbeat pill. Returns "—" for
+ * unparseable input. No em dashes, no locale surprises.
+ */
+export function formatRelativeTime(
+  v: Date | string | null | undefined,
+  now: Date = new Date()
+): string {
+  if (!v) return "—";
+  const d = v instanceof Date ? v : new Date(v);
+  if (Number.isNaN(d.getTime())) return "—";
+  const secs = Math.max(0, Math.floor((now.getTime() - d.getTime()) / 1000));
+  if (secs < 60) return `${secs} 秒前`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins} 分鐘前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} 小時前`;
+  const days = Math.floor(hours / 24);
+  return `${days} 天前`;
+}
+
 /** Sum pnl_usd only for trades whose opened_at falls on/after `since`. */
 export function sumPnlSince(
   rows: ReadonlyArray<{

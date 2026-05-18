@@ -40,13 +40,24 @@ export async function setFollowStatus(
   id: string,
   status: FollowStatus
 ): Promise<SetFollowStatusResult> {
-  await db
+  // rev-web I-1: server-side ownership/existence check. Drizzle's
+  // .returning() yields the rows the UPDATE actually matched (an empty
+  // array when the WHERE matched nothing). Without this an arbitrary or
+  // stale id silently "succeeds" with a 0-row UPDATE and the client toasts
+  // a false positive. Throw a clear error instead so the caller's catch
+  // surfaces the real failure.
+  const updated = await db
     .update(followRelations)
     .set({
       status,
       paused_at: status === "paused" ? new Date() : null,
     })
-    .where(eq(followRelations.id, id));
+    .where(eq(followRelations.id, id))
+    .returning({ id: followRelations.id });
+
+  if (updated.length === 0) {
+    throw new Error(`找不到跟單關係 ${id}，狀態未更新`);
+  }
 
   return { id, status };
 }

@@ -108,4 +108,53 @@ describe("createBacktestJob", () => {
     expect(row.template_params.fixed_size_usd).toBe(25);
     expect(row.template_params.category_whitelist).toEqual(["Politics"]);
   });
+
+  // ---- rev-web I-3: server-side guards before insert ----------------------
+
+  it("rejects a malformed start_date and never inserts", async () => {
+    await expect(
+      createBacktestJob({ ...base, start_date: "2025/01/01" })
+    ).rejects.toThrow(/起始日期格式錯誤/);
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed end_date", async () => {
+    await expect(
+      createBacktestJob({ ...base, end_date: "not-a-date" })
+    ).rejects.toThrow(/結束日期格式錯誤/);
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-positive initial_capital_usd", async () => {
+    await expect(
+      createBacktestJob({ ...base, initial_capital_usd: 0 })
+    ).rejects.toThrow(/初始資金必須大於 0/);
+    await expect(
+      createBacktestJob({ ...base, initial_capital_usd: -100 })
+    ).rejects.toThrow(/初始資金必須大於 0/);
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("rejects negative slippage_bps", async () => {
+    await expect(
+      createBacktestJob({ ...base, slippage_bps: -1, scenario: "triple" })
+    ).rejects.toThrow(/滑價/);
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("rejects negative execution_delay_seconds", async () => {
+    await expect(
+      createBacktestJob({
+        ...base,
+        execution_delay_seconds: -5,
+        scenario: "triple",
+      })
+    ).rejects.toThrow(/執行延遲/);
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("still accepts a fully valid job (no behaviour change)", async () => {
+    await expect(createBacktestJob(base)).rejects.toThrow(/NEXT_REDIRECT/);
+    expect(insert).toHaveBeenCalledTimes(1);
+  });
 });

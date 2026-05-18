@@ -13,12 +13,18 @@
  * the PnL on still-open positions and "realized" is PnL on closed ones.
  */
 
-import { desc, isNull, and, isNotNull } from "drizzle-orm";
+import { desc, isNull, and, isNotNull, eq } from "drizzle-orm";
 
 import { Badge } from "@/components/ui/badge";
 import { Pnl } from "@/components/pnl";
+import { TraderHeartbeatStatus } from "@/components/trader-heartbeat-status";
 import { db } from "@/lib/db";
-import { myTrades, followRelations, events } from "@/lib/db/schema";
+import { myTrades, followRelations, events, settings } from "@/lib/db/schema";
+import {
+  TRADER_HEARTBEAT_KEY,
+  coerceHeartbeat,
+  heartbeatLiveness,
+} from "@/lib/settings-keys";
 import {
   toNum,
   sumPnl,
@@ -43,7 +49,8 @@ const SEVERITY_VARIANT: Record<
 };
 
 export default async function DashboardPage() {
-  const [allTrades, openRows, following, latestEvents] = await Promise.all([
+  const [allTrades, openRows, following, latestEvents, heartbeatRows] =
+    await Promise.all([
     db
       .select({
         pnl_usd: myTrades.pnl_usd,
@@ -64,7 +71,17 @@ export default async function DashboardPage() {
       .select({ id: followRelations.id, status: followRelations.status })
       .from(followRelations),
     db.select().from(events).orderBy(desc(events.created_at)).limit(8),
+    db
+      .select({ value: settings.value })
+      .from(settings)
+      .where(eq(settings.key, TRADER_HEARTBEAT_KEY))
+      .limit(1),
   ]);
+
+  // P1-5: bot liveness, read-only. The supervised loop upserts this row
+  // every cycle; a missing/stale row means the engine is DOWN.
+  const heartbeat = coerceHeartbeat(heartbeatRows[0]?.value);
+  const liveness = heartbeatLiveness(heartbeat);
 
   const closed = allTrades.filter((t) => t.closed_at != null);
   const realizedPnl = sumPnl(closed.map((t) => t.pnl_usd));
@@ -89,7 +106,13 @@ export default async function DashboardPage() {
   return (
     <div className="mx-auto max-w-6xl">
       <header className="mb-8">
-        <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
+          <TraderHeartbeatStatus
+            heartbeat={heartbeat}
+            liveness={liveness}
+          />
+        </div>
         <p className="mt-1 text-sm text-muted-foreground">
           Copy-trading at a glance. Read-only; pauses and follows are explicit
           actions on their own pages.

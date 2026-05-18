@@ -41,6 +41,18 @@ function isoDate(d: Date): string {
 export type LeaderStatus = "watching" | "following" | "rejected";
 
 /**
+ * rev-web I-2: server-side allowlist for candidate_leaders.user_status.
+ * The client island only ever sends these three, but a Server Action is a
+ * public RPC endpoint — never persist an arbitrary string. Anything not in
+ * this set is rejected before the UPDATE.
+ */
+const LEADER_STATUSES: ReadonlySet<string> = new Set<LeaderStatus>([
+  "watching",
+  "following",
+  "rejected",
+]);
+
+/**
  * quickBacktest — one-click 90-day Balanced backtest for a single leader.
  * Returns the new job id; the caller toasts + navigates to /backtest/<id>.
  */
@@ -87,10 +99,19 @@ export async function updateLeaderStatus(
   wallet: string,
   status: LeaderStatus
 ): Promise<{ wallet: string; status: LeaderStatus }> {
-  await db
+  if (!LEADER_STATUSES.has(status)) {
+    throw new Error(`不允許的領單者狀態：${String(status)}`);
+  }
+
+  const updated = await db
     .update(candidateLeaders)
     .set({ user_status: status })
-    .where(eq(candidateLeaders.wallet_address, wallet));
+    .where(eq(candidateLeaders.wallet_address, wallet))
+    .returning({ wallet: candidateLeaders.wallet_address });
+
+  if (updated.length === 0) {
+    throw new Error(`找不到候選領單者 ${wallet}，狀態未更新`);
+  }
 
   return { wallet, status };
 }

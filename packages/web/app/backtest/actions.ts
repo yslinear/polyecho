@@ -36,9 +36,33 @@ export interface BacktestFormValues {
  * createBacktestJob — called from the /backtest/new form's onSubmit handler.
  * Returns the new job ID so the client can toast + navigate.
  */
+/** Postgres DATE shape — the SQL the column accepts. */
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
 export async function createBacktestJob(
   values: BacktestFormValues
 ): Promise<{ id: string }> {
+  // rev-web I-3: the module comment claims a "lightweight manual parse" but
+  // none existed — the form's zod is client-side only and a Server Action is
+  // a public RPC. Validate the load-bearing fields server-side and reject
+  // (clear zh-TW error) BEFORE the insert. Behaviour for valid inputs is
+  // unchanged; only the rejection paths are new.
+  if (!ISO_DATE_RE.test(values.start_date)) {
+    throw new Error(`起始日期格式錯誤（須為 YYYY-MM-DD）：${values.start_date}`);
+  }
+  if (!ISO_DATE_RE.test(values.end_date)) {
+    throw new Error(`結束日期格式錯誤（須為 YYYY-MM-DD）：${values.end_date}`);
+  }
+  if (!(values.initial_capital_usd > 0)) {
+    throw new Error("初始資金必須大於 0");
+  }
+  if (!(values.slippage_bps >= 0)) {
+    throw new Error("滑價（slippage_bps）不可為負數");
+  }
+  if (values.execution_delay_seconds < 0) {
+    throw new Error("執行延遲（execution_delay_seconds）不可為負數");
+  }
+
   // Resolve scenario into concrete slippage/delay overrides
   let slippage = values.slippage_bps;
   let delay = values.execution_delay_seconds;

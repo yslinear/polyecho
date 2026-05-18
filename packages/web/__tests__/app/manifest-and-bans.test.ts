@@ -65,6 +65,7 @@ describe("DESIGN.md absolute bans — new Phase-5 Wave-2 files", () => {
     "app/settings/risk-mode-form.tsx",
     "components/push-subscribe.tsx",
     "components/global-pause-toggle.tsx",
+    "components/trader-heartbeat-status.tsx",
   ].map((f) => ({
     name: f,
     src: readFileSync(resolve(WEB, f), "utf8"),

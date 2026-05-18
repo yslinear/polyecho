@@ -13,7 +13,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  * that is CLI-only (PRD §5.7 high-danger tier).
  */
 
-const updateWhere = vi.fn().mockResolvedValue(undefined);
+// .returning() resolves to the rows the UPDATE matched (empty when none).
+const returning = vi.fn().mockResolvedValue([{ id: "rel-1" }]);
+const updateWhere = vi.fn(() => ({ returning }));
 const updateSet = vi.fn(() => ({ where: updateWhere }));
 const update = vi.fn(() => ({ set: updateSet }));
 
@@ -29,7 +31,8 @@ describe("setFollowStatus", () => {
   beforeEach(() => {
     update.mockClear();
     updateSet.mockClear();
-    updateWhere.mockClear().mockResolvedValue(undefined);
+    updateWhere.mockClear();
+    returning.mockClear().mockResolvedValue([{ id: "rel-1" }]);
   });
 
   it("pauses: sets status='paused' and a paused_at Date", async () => {
@@ -47,6 +50,13 @@ describe("setFollowStatus", () => {
     const set = updateSet.mock.calls[0][0] as Record<string, unknown>;
     expect(set.status).toBe("active");
     expect(set.paused_at).toBeNull();
+  });
+
+  it("rejects (throws) when no row matched the id (rev-web I-1)", async () => {
+    returning.mockResolvedValueOnce([]);
+    await expect(setFollowStatus("ghost-id", "paused")).rejects.toThrow(
+      /找不到跟單關係/
+    );
   });
 
   it("exposes NO live-trading enable/disable action (CLI-only, PRD §5.7)", () => {
