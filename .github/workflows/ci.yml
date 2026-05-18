@@ -11,6 +11,23 @@ jobs:
   python:
     name: Python (ruff + mypy + pytest)
     runs-on: ubuntu-latest
+    # Ephemeral postgres:16 so test_schema_reflect.py RUNS (not skips) in the
+    # python job — same creds/db as the schema/smoke jobs. This is what makes
+    # 3-way schema drift a hard CI failure on the full-suite run.
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_DB: polyecho
+          POSTGRES_USER: polyecho
+          POSTGRES_PASSWORD: polyecho
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U polyecho -d polyecho"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -37,9 +54,17 @@ jobs:
         # Coverage flags live in [tool.pytest.ini_options] addopts so the gate
         # (--cov-fail-under=70, scoped to packages/*/src) is enforced by the
         # canonical `pytest` invocation itself, not just here.
+        #
+        # POLYECHO_DATASOURCE=fixture keeps all external HTTP hermetic, while
+        # POLYECHO_TEST_DATABASE_URL / POLYECHO_DB_URL point at the ephemeral
+        # postgres:16 service so test_schema_reflect.py RUNS (asserts the
+        # 3-way schema is byte-consistent) instead of skipping. Full-suite
+        # run keeps --cov-fail-under=70 honest.
         run: uv run pytest
         env:
           POLYECHO_DATASOURCE: fixture
+          POLYECHO_TEST_DATABASE_URL: postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho
+          POLYECHO_DB_URL: postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho
 
   # ── Schema sanity: spin postgres:16, apply baseline, verify tables ───────────
   schema:
@@ -67,19 +92,61 @@ jobs:
           psql postgresql://polyecho:polyecho@localhost:5432/polyecho \
             -f infra/migrations/0000_init.sql
 
-      - name: Schema sanity check — list tables
+      - name: Schema sanity check — exact 14-table set
         run: |
-          psql postgresql://polyecho:polyecho@localhost:5432/polyecho \
-            -c "\dt" | tee /tmp/tables.txt
-          # Verify all 12 expected tables exist
-          for tbl in accounts candidate_leaders candidate_score_history \
-                     copy_templates follow_relations leader_trades my_trades \
-                     settings backtest_jobs pending_actions push_subscriptions \
-                     events; do
-            grep -q "$tbl" /tmp/tables.txt \
-              || { echo "MISSING TABLE: $tbl"; exit 1; }
+          set -euo pipefail
+          DB=postgresql://polyecho:polyecho@localhost:5432/polyecho
+          # Exact count: the frozen A1 schema (0000_init.sql) defines exactly
+          # 14 public tables (incl. redeem_jobs + copy_skips). Any drift —
+          # extra OR missing — fails the gate.
+          count=$(psql "$DB" -tAc \
+            "SELECT count(*) FROM information_schema.tables \
+             WHERE table_schema='public' AND table_type='BASE TABLE';")
+          echo "public BASE TABLE count = ${count}"
+          if [ "$count" != "14" ]; then
+            psql "$DB" -c "\dt"
+            echo "FAIL: expected exactly 14 tables, got ${count}"
+            exit 1
+          fi
+          # Full explicit name list — every one must be present.
+          for tbl in accounts backtest_jobs candidate_leaders \
+                     candidate_score_history copy_skips copy_templates \
+                     events follow_relations leader_trades my_trades \
+                     pending_actions push_subscriptions redeem_jobs \
+                     settings; do
+            psql "$DB" -tAc \
+              "SELECT to_regclass('public.${tbl}');" | grep -qx "$tbl" \
+              || { echo "MISSING TABLE: $tbl"; psql "$DB" -c "\dt"; exit 1; }
           done
-          echo "All 12 tables present."
+          echo "All 14 expected tables present (exact set verified)."
+
+      # Exercise the documented in-container migration path: the same
+      # `polyecho db migrate` the compose `migrate` one-shot service runs.
+      # Idempotent (CREATE … IF NOT EXISTS) so running it after the psql
+      # baseline above is safe and proves the raw-asyncpg multi-statement
+      # path works end-to-end against a real postgres.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.5.x"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install workspace dependencies
+        run: uv sync --frozen
+
+      - name: polyecho db migrate (idempotent re-apply over baseline)
+        env:
+          POLYECHO_DB_URL: postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho
+          POLYECHO_DB_MIGRATE_YES: "1"
+        run: |
+          uv run polyecho db migrate --dry-run
+          uv run polyecho db migrate
+          uv run polyecho db migrate   # second run proves idempotency
+          echo "polyecho db migrate succeeded and is idempotent."
 
   # ── Web: lint + build ────────────────────────────────────────────────────────
   web:

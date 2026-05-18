@@ -55,6 +55,7 @@ infra/
 | Compose key | container_name     | Image              | Ports (host)          | Restart          |
 |-------------|--------------------|--------------------|----------------------|------------------|
 | `db`        | `polyecho-db`      | postgres:16        | `127.0.0.1:5432`     | unless-stopped   |
+| `migrate`   | `polyecho-migrate` | Dockerfile.cli     | none (one-shot job)  | no               |
 | `core`      | `trader-core`      | Dockerfile.python  | none (by design)     | unless-stopped   |
 | `discovery` | `discovery-worker` | Dockerfile.python  | none                 | unless-stopped   |
 | `push`      | `web-push-sender`  | Dockerfile.python  | none                 | unless-stopped   |
@@ -67,20 +68,50 @@ infra/
 # 1. Copy and fill in secrets
 cp .env.example .env
 
-# 2. Start all services
-bash scripts/dev.sh up
+# 2. Start the stack — the one-shot `migrate` service applies
+#    infra/migrations/0000_init.sql (14 tables) on a healthy DB BEFORE any
+#    app service starts (depends_on: migrate: service_completed_successfully).
+#    A fresh volume is fully self-sufficient — no manual migrate step.
+docker compose -f infra/docker-compose.yml up -d
+# (or: bash scripts/dev.sh up)
 
 # 3. Run health check
 bash scripts/dev.sh doctor
 
-# 4. Apply DB migrations
-pnpm db:migrate
-# or via Docker:
-docker compose -f infra/docker-compose.yml run --rm --profile tools cli polyecho db migrate
+# 4. (optional) Re-apply migrations manually — idempotent
+docker compose -f infra/docker-compose.yml run --rm cli polyecho db migrate --yes
 
 # 5. Tail logs
 bash scripts/dev.sh logs
 ```
+
+> **Startup ordering:** `db` (healthy) → `migrate` (completed-successfully)
+> → `core` / `discovery` / `push` / `backtest` / `web`. This is the root-cause
+> fix for the recurring "empty DB → services crash on `relation … does not
+> exist`" incident: the schema is guaranteed to exist before any worker
+> connects.
+
+## Database Backup (PRD §7.3)
+
+```bash
+# pg_dump the configured DB → timestamped gzip artifact under <out>
+docker compose -f infra/docker-compose.yml run --rm \
+  -v "$PWD/backups:/backups" cli polyecho db backup --out /backups
+
+# Preview the resolved (password-redacted) target + artifact path only:
+docker compose -f infra/docker-compose.yml run --rm cli \
+  polyecho db backup --dry-run
+
+# Optional at-rest encryption for an offsite copy:
+docker compose -f infra/docker-compose.yml run --rm \
+  -v "$PWD/backups:/backups" cli \
+  polyecho db backup --out /backups --gpg-recipient ops@example.com
+```
+
+`db backup` produces `polyecho-<db>-<UTC-timestamp>.sql.gz` and exits
+non-zero on failure. **Off-site replication (e.g. GCP Cloud Storage) is the
+operator's responsibility and is explicitly out of project scope** (PRD
+note) — pair this with a host-side cron + `gsutil rsync` if desired.
 
 ## Development Workflow (host stays clean)
 

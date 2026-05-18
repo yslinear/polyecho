@@ -3,7 +3,7 @@
 PolyEcho uses a two-track approach:
 
 1. **Phase 1 baseline** — `0000_init.sql` is a hand-authored, reviewable SQL
-   file that creates all 12 core tables and performance indexes.  It is
+   file that creates all **14** core tables and performance indexes.  It is
    idempotent (`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`).
 2. **Ongoing changes** — after the baseline, use **Drizzle ORM** (`drizzle-kit`)
    to generate incremental migration files; never hand-edit those generated files.
@@ -37,11 +37,31 @@ docker compose -f infra/docker-compose.yml exec db \
   psql -U polyecho -d polyecho -f /tmp/0000_init.sql
 ```
 
-### Via the CLI container (matches `polyecho db migrate`)
+### Automatically, via the compose `migrate` one-shot service (recommended)
+
+`infra/docker-compose.yml` ships a dedicated **`migrate`** service: it builds
+`Dockerfile.cli`, runs `polyecho db migrate` once against a *healthy* `db`,
+then exits 0. Every app service (`core`, `discovery`, `push`, `backtest`,
+`web`) declares `depends_on: { migrate: { condition:
+service_completed_successfully } }`, so a plain:
 
 ```bash
-docker compose -f infra/docker-compose.yml run --rm --profile tools \
-  cli polyecho db migrate
+docker compose -f infra/docker-compose.yml up -d
+```
+
+on a **fresh volume** populates the full 14-table schema *before* any worker
+connects — the stack is self-sufficient (no manual migrate step required).
+Ordering is: `db` healthy → `migrate` completed-successfully → apps start.
+
+### Manually, via the CLI container (matches `polyecho db migrate`)
+
+```bash
+docker compose -f infra/docker-compose.yml run --rm cli \
+  polyecho db migrate --yes
+
+# Inspect the resolved (password-redacted) target without executing:
+docker compose -f infra/docker-compose.yml run --rm cli \
+  polyecho db migrate --dry-run
 ```
 
 ---
@@ -76,7 +96,7 @@ docker compose -f infra/docker-compose.yml run --rm --profile tools \
 
 | Path | Description |
 |------|-------------|
-| `0000_init.sql` | Phase 1 baseline — all 12 tables + indexes |
+| `0000_init.sql` | Phase 1 baseline — all 14 tables + indexes |
 | `*.sql` | Drizzle-generated incremental migrations (committed to git) |
 | `meta/` | Drizzle internal snapshot directory (committed to git) |
 | `.gitkeep` | Ensures directory exists before the first migration |
