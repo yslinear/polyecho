@@ -45,6 +45,8 @@ Commands
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -308,9 +310,57 @@ def pause_all() -> None:
     )
 
 
+def _confirm_live_or_die(yes: bool, action: str) -> None:
+    """Require explicit confirmation for *action* when the live lock is ON.
+
+    Mirrors the danger UX (``db migrate`` / ``enable-live``): when
+    :func:`polyecho.shared.copytrading.is_live_enabled` is True, re-enabling
+    copy-trading could resume placing **real** orders, so a deliberate
+    ``--yes`` (or ``POLYECHO_TRADER_RESUME_YES=1``) is required.  When the
+    live lock is OFF this is a harmless safe-write — no gate (pause-all is
+    likewise never gated).  Non-TTY + no ``--yes`` ⇒ refuse (exit 2) rather
+    than block forever.
+    """
+    from polyecho.shared.copytrading import is_live_enabled
+
+    if not is_live_enabled():
+        return
+    if yes or os.environ.get("POLYECHO_TRADER_RESUME_YES") == "1":
+        return
+    if not sys.stdin.isatty():
+        _console.print(
+            f"[red]Refusing to {action} while LIVE-TRADING is "
+            "UNLOCKED without confirmation.[/red] Pass [bold]--yes[/bold] "
+            "or set [bold]POLYECHO_TRADER_RESUME_YES=1[/bold] "
+            "(non-interactive / not a TTY)."
+        )
+        raise typer.Exit(code=2)
+    _console.print(
+        "[bold red]⚠  LIVE-TRADING is UNLOCKED[/bold red] — resuming will "
+        "let the core engine place [bold red]real orders[/bold red]."
+    )
+    typer.confirm(f"Proceed to {action}?", abort=True)
+
+
 @app.command(name="resume-all")
-def resume_all() -> None:
-    """Globally resume copy-trading (safe-write): all follows → ``active``."""
+def resume_all(
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the live-mode confirmation (also via "
+        "POLYECHO_TRADER_RESUME_YES=1). Required when LIVE-TRADING is "
+        "UNLOCKED and stdin is not a TTY.",
+    ),
+) -> None:
+    """Globally resume copy-trading (safe-write): all follows → ``active``.
+
+    When the host live lock (:func:`is_live_enabled`) is ON, this requires
+    an explicit ``--yes``/confirm (mirrors the danger UX) because resuming
+    could re-start placing real orders.  When the live lock is OFF it is an
+    unguarded safe-write (pause-all is likewise never guarded).
+    """
+    _confirm_live_or_die(yes, "resume ALL follow relations")
     try:
         n = _bulk_set_status("active")
     except Exception as exc:  # noqa: BLE001

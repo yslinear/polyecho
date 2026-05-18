@@ -334,6 +334,61 @@ class TestAccountImport:
         # Even on failure the key must not leak.
         assert _PRIVATE_KEY not in result.output
 
+    def test_passphrase_is_not_a_bindable_option(self) -> None:
+        """P3 hardening: the passphrase MUST NOT be a Typer Option (no
+        ``--passphrase``) so it can never land in argv / shell history /
+        process listing / CI logs — it is a standalone hidden+confirm
+        ``typer.prompt`` (matches ``account set-danger-passphrase``)."""
+        result = runner.invoke(
+            app, ["account", "import", "--help"], env={"COLUMNS": "200"}
+        )
+        assert result.exit_code == 0, result.output
+        # Strip the help text to its option/argument tokens so a docstring
+        # that merely *mentions* the word can't false-positive: a real
+        # Typer Option renders as a ``--name`` token on an Options row.
+        option_tokens = {
+            tok
+            for line in result.output.splitlines()
+            for tok in line.split()
+            if tok.startswith("--")
+        }
+        assert "--passphrase" not in option_tokens
+        # Authoritative proof it is not bindable is
+        # ``test_passphrase_via_argv_is_rejected`` below.
+
+    def test_passphrase_via_argv_is_rejected(self) -> None:
+        """Passing ``--passphrase`` on the command line is an unknown
+        option (not silently accepted) — proves it cannot be injected."""
+        result = runner.invoke(
+            app,
+            [
+                "account",
+                "import",
+                _EOA,
+                "-t",
+                "1",
+                "--passphrase",
+                "leaked-secret",
+            ],
+            input=f"{_PASSPHRASE}\n{_PASSPHRASE}\n{_PRIVATE_KEY}\n",
+        )
+        assert result.exit_code != 0
+        assert "leaked-secret" not in result.output
+
+    def test_empty_passphrase_aborts_before_db(self) -> None:
+        """A blank passphrase aborts non-zero before any DB access (and the
+        private-key prompt is never even reached)."""
+        scope = _make_session_scope(scalar_result=None)
+        with patch("polyecho.shared.db.session_scope", scope):
+            result = runner.invoke(
+                app,
+                ["account", "import", _EOA, "-t", "1"],
+                input="   \n   \n",
+            )
+        assert result.exit_code != 0
+        assert "Empty passphrase" in result.output
+        assert "session" not in scope._captured
+
 
 # ---------------------------------------------------------------------------
 # list

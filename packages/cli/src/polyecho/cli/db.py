@@ -7,7 +7,8 @@ Commands
 --------
 * ``polyecho db migrate``    — apply 0000_init.sql against the configured DB
 * ``polyecho db backup``     — pg_dump the configured DB to a host path (gzip)
-* ``polyecho db reconcile``  — (stub, Phase 4) reconcile on-chain vs DB records
+* ``polyecho db reconcile``  — on-chain ↔ DB reconciliation; invokes the
+  frozen :mod:`polyecho.core.onchain_reconcile` (read-only single pass).
 """
 
 from __future__ import annotations
@@ -25,8 +26,6 @@ from typing import Annotated
 import typer
 from rich.console import Console
 from rich.panel import Panel
-
-from polyecho.cli._stub import not_implemented
 
 app = typer.Typer(no_args_is_help=True)
 _console = Console()
@@ -360,11 +359,150 @@ def backup(
 
 
 # ---------------------------------------------------------------------------
-# db reconcile (Phase 4 stub)
+# db reconcile — invoke the frozen polyecho.core.onchain_reconcile
 # ---------------------------------------------------------------------------
 
 
+def _render_reconcile_report(report: object) -> None:
+    """Render a :class:`ReconcileReport`-shaped object to a Rich panel.
+
+    The frozen contract (C-reconcile) returns a ``ReconcileReport``.  We do
+    not import its type (avoids an import-time coupling on a parallel
+    package); we render it duck-typed: a ``summary``/``__str__`` for the
+    human line and an optional ``drift_count`` / ``drifts`` for detail.
+    """
+    summary = getattr(report, "summary", None)
+    if callable(summary):
+        summary = summary()
+    body = str(summary) if summary is not None else str(report)
+
+    drift_count = getattr(report, "drift_count", None)
+    if drift_count is None:
+        drifts = getattr(report, "drifts", None)
+        drift_count = len(drifts) if drifts is not None else None
+
+    has_drift = bool(drift_count) if drift_count is not None else None
+    border = "yellow" if has_drift else "green"
+    _console.print(
+        Panel(
+            body,
+            title="[dim]polyecho db reconcile[/dim]",
+            border_style=border,
+        )
+    )
+
+
 @app.command(name="reconcile")
-def reconcile() -> None:
-    """Reconcile on-chain positions vs DB records and report discrepancies."""
-    not_implemented("db reconcile", 4)
+def reconcile(
+    strict: Annotated[
+        bool,
+        typer.Option(
+            "--strict",
+            help="Exit non-zero when drift is detected (default: drift is "
+            "REPORTED, not a failure — only a real reconcile error fails).",
+        ),
+    ] = False,
+) -> None:
+    """Reconcile on-chain positions/balances vs DB records (read-only).
+
+    Invokes the FROZEN ``polyecho.core.onchain_reconcile`` contract
+    (delivered by the parallel C-reconcile agent): a single-pass,
+    READ-ONLY comparison of our DB ``my_trades``/positions against the
+    on-chain ERC-1155/USDC state.  No live-lock is needed (it never
+    writes / trades).
+
+    Wiring
+    ------
+    Prefer importing and awaiting
+    :func:`polyecho.core.onchain_reconcile.run_reconcile` (same in-process
+    style every other ``db``/``trader`` command uses — ``asyncio.run`` over
+    a shared/core coroutine).  If that import is unavailable at call time,
+    fall back to ``python -m polyecho.core.onchain_reconcile --once`` (the
+    frozen module entry-point: exit 0 on success/no-drift, non-zero on a
+    real error) so the operator path still works.
+
+    Exit code
+    ---------
+    Drift detected is **reported**, not a failure — exit stays 0 unless
+    ``--strict`` is passed.  A genuine reconcile *error* (RPC down, DB
+    unreachable, the frozen entry-point itself failing) always exits
+    non-zero.
+    """
+    # Resolve the FROZEN contract dynamically via importlib: the module is
+    # delivered by a *parallel* package (C-reconcile), so a static
+    # ``from polyecho.core.onchain_reconcile import …`` would couple this
+    # package's type-check / import graph to one that may not be present at
+    # check time.  importlib keeps the coupling purely runtime; an absent
+    # module (ImportError) or a module missing ``run_reconcile``
+    # (AttributeError) both fall back to the ``python -m`` entry-point.
+    import importlib
+
+    try:
+        _mod = importlib.import_module("polyecho.core.onchain_reconcile")
+        run_reconcile = _mod.run_reconcile
+    except (ImportError, AttributeError):
+        _reconcile_via_subprocess(strict=strict)
+        return
+
+    async def _run() -> object:
+        return await run_reconcile()
+
+    try:
+        report = asyncio.run(_run())
+    except Exception as exc:  # noqa: BLE001 - clean CLI error, no traceback
+        _console.print(f"[red]Reconcile failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    _render_reconcile_report(report)
+
+    if strict:
+        drift_count = getattr(report, "drift_count", None)
+        if drift_count is None:
+            drifts = getattr(report, "drifts", None)
+            drift_count = len(drifts) if drifts is not None else 0
+        if drift_count:
+            _console.print(
+                f"[yellow]--strict: {drift_count} drift(s) detected — "
+                "exiting non-zero.[/yellow]"
+            )
+            raise typer.Exit(code=1)
+
+
+def _reconcile_via_subprocess(*, strict: bool) -> None:
+    """Fallback path: ``python -m polyecho.core.onchain_reconcile --once``.
+
+    Used only when ``run_reconcile`` cannot be imported (an undesirable
+    import-time coupling on the parallel core package).  The frozen module
+    entry-point is ``--once`` (single pass), exit 0 on success/no-drift and
+    non-zero on a real error.  ``--strict`` is forwarded so the same
+    drift-fails-or-not policy holds for the subprocess path.
+    """
+    cmd = [sys.executable, "-m", "polyecho.core.onchain_reconcile", "--once"]
+    if strict:
+        cmd.append("--strict")
+    _console.print(f"[dim]$ {' '.join(cmd)}[/dim]")
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            cmd, check=False
+        )
+    except OSError as exc:
+        _console.print(f"[red]Reconcile failed to launch:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if completed.returncode != 0:
+        _console.print(
+            f"[red]Reconcile error[/red] (onchain_reconcile exited "
+            f"{completed.returncode})."
+        )
+        raise typer.Exit(code=completed.returncode)
+
+    _console.print(
+        Panel(
+            "[bold green]Reconcile complete.[/bold green]\n"
+            "[dim]Ran via `python -m polyecho.core.onchain_reconcile "
+            "--once` (frozen entry-point). See its structured log for the "
+            "ReconcileReport detail.[/dim]",
+            title="[dim]polyecho db reconcile[/dim]",
+            border_style="green",
+        )
+    )

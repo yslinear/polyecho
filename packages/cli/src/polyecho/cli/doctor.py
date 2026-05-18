@@ -89,11 +89,31 @@ def _check_config() -> _CheckResult:
             detail=f"Missing required env vars: {', '.join(missing)}",
         )
 
+    # P3 hardening: parse the DSN STRUCTURALLY with SQLAlchemy's make_url
+    # — never string-split a raw connection string.  The old
+    # ``db_url_value.split('+')[1].split('://')[0]`` raised IndexError for
+    # any DSN without a ``+driver`` (e.g. ``postgresql://…``), and the
+    # uncaught exception bubbled the *raw URL* (with password) into the
+    # error surface.  make_url gives us ``.drivername`` / ``.host`` safely
+    # and we never echo the password.
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.exc import ArgumentError
+
+    try:
+        parsed = make_url(db_url_value)
+    except ArgumentError:
+        return _CheckResult(
+            "Config",
+            ok=False,
+            detail="POLYECHO_DB_URL is not a valid SQLAlchemy URL.",
+        )
+
     return _CheckResult(
         "Config",
         ok=True,
         detail=(
-            f"DB driver={db_url_value.split('+')[1].split('://')[0]}  "
+            f"DB driver={parsed.drivername}  "
+            f"host={parsed.host or '-'}  "
             f"log_level={settings.log_level}"
         ),
     )

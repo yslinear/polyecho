@@ -238,6 +238,91 @@ class TestBulkPauseResume:
 
 
 # ---------------------------------------------------------------------------
+# resume-all live-mode danger gate (P3 hardening)
+# ---------------------------------------------------------------------------
+class TestResumeAllLiveGate:
+    """When LIVE-TRADING is UNLOCKED, resume-all must require --yes/confirm
+    (mirrors the danger UX). pause-all is NEVER gated."""
+
+    def test_resume_all_blocked_without_yes_when_live_nontty(self) -> None:
+        """live ON + no --yes + non-TTY (CliRunner) ⇒ refuse, exit 2, the
+        bulk UPDATE never runs."""
+        scope = _make_scope(rowcount=9)
+        with (
+            patch(
+                "polyecho.shared.copytrading.is_live_enabled",
+                return_value=True,
+            ),
+            patch("polyecho.shared.db.session_scope", scope),
+        ):
+            result = runner.invoke(app, ["trader", "resume-all"])
+        assert result.exit_code == 2, result.output
+        assert "LIVE-TRADING is UNLOCKED" in result.output
+        # The status UPDATE was never issued.
+        assert scope._captured["executed"] == []
+
+    def test_resume_all_allowed_with_yes_when_live(self) -> None:
+        """live ON + --yes ⇒ proceeds (explicit operator intent)."""
+        scope = _make_scope(rowcount=3)
+        with (
+            patch(
+                "polyecho.shared.copytrading.is_live_enabled",
+                return_value=True,
+            ),
+            patch("polyecho.shared.db.session_scope", scope),
+        ):
+            result = runner.invoke(app, ["trader", "resume-all", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "Resumed 3" in result.output
+
+    def test_resume_all_env_var_bypasses_gate_when_live(self) -> None:
+        scope = _make_scope(rowcount=2)
+        with (
+            patch(
+                "polyecho.shared.copytrading.is_live_enabled",
+                return_value=True,
+            ),
+            patch("polyecho.shared.db.session_scope", scope),
+            patch.dict(
+                "os.environ",
+                {"POLYECHO_TRADER_RESUME_YES": "1"},
+                clear=False,
+            ),
+        ):
+            result = runner.invoke(app, ["trader", "resume-all"])
+        assert result.exit_code == 0, result.output
+        assert "Resumed 2" in result.output
+
+    def test_resume_all_unguarded_when_live_lock_off(self) -> None:
+        """live OFF ⇒ NO gate even without --yes (harmless safe-write)."""
+        scope = _make_scope(rowcount=5)
+        with (
+            patch(
+                "polyecho.shared.copytrading.is_live_enabled",
+                return_value=False,
+            ),
+            patch("polyecho.shared.db.session_scope", scope),
+        ):
+            result = runner.invoke(app, ["trader", "resume-all"])
+        assert result.exit_code == 0, result.output
+        assert "Resumed 5" in result.output
+
+    def test_pause_all_never_gated_even_when_live(self) -> None:
+        """pause-all stays unguarded regardless of the live lock."""
+        scope = _make_scope(rowcount=6)
+        with (
+            patch(
+                "polyecho.shared.copytrading.is_live_enabled",
+                return_value=True,
+            ),
+            patch("polyecho.shared.db.session_scope", scope),
+        ):
+            result = runner.invoke(app, ["trader", "pause-all"])
+        assert result.exit_code == 0, result.output
+        assert "Paused 6" in result.output
+
+
+# ---------------------------------------------------------------------------
 # start  (handoff guidance + optional dry-run check)
 # ---------------------------------------------------------------------------
 class TestStart:

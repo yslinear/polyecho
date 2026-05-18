@@ -243,22 +243,24 @@ def import_key(
         "have NO trustworthy offline derivation — see runbook §2.3. For "
         "type 0/1 the verified derived funder is used and this is ignored.",
     ),
-    passphrase: str = typer.Option(
-        ...,
-        prompt="Encryption passphrase",
-        confirmation_prompt=True,
-        hide_input=True,
-        help="Passphrase used to derive the AES-256-GCM key (hidden prompt).",
-    ),
 ) -> None:
     """Securely import a private key for an EOA account (CLI only — never via Web UI).
 
-    The private key is read from a **hidden** prompt (never a CLI argument),
-    encrypted in-process with ``shared.crypto.encrypt_private_key``, and the
-    ``accounts`` row is upserted with ``signature_type`` / ``funder_address``
-    / ``encrypted_private_key`` and ``status`` transitioned
-    ``pending_key_import`` → ``ready``.  The key/passphrase are never echoed,
-    logged, or printed.
+    Both the **passphrase** and the **private key** are read via standalone
+    hidden ``typer.prompt`` calls — NEVER Typer Options.  This is the P3
+    hardening: a ``typer.Option(..., prompt=...)`` is still bindable as a
+    CLI flag, so the secret could land in ``argv`` / shell history /
+    process listings / CI logs.  A bare
+    ``typer.prompt(hide_input=True, confirmation_prompt=True)`` has no
+    corresponding flag and therefore cannot (matches
+    ``account set-danger-passphrase``).
+
+    The private key is encrypted in-process with
+    ``shared.crypto.encrypt_private_key`` and the ``accounts`` row is
+    upserted with ``signature_type`` / ``funder_address`` /
+    ``encrypted_private_key`` and ``status`` transitioned
+    ``pending_key_import`` → ``ready``.  The key/passphrase are never
+    echoed, logged, or printed.
     """
     from eth_utils.address import is_address
     from sqlalchemy import select
@@ -320,6 +322,18 @@ def import_key(
 
     account_name = name or eoa_lower
 
+    # Hidden + confirmation passphrase prompt — NOT a Typer Option, so it
+    # can never appear in argv / shell history / logs (P3 hardening; this
+    # matches `account set-danger-passphrase`).
+    passphrase = typer.prompt(
+        "Encryption passphrase (hidden)",
+        hide_input=True,
+        confirmation_prompt=True,
+    )
+    if not passphrase or not passphrase.strip():
+        _console.print("[red]Empty passphrase — aborted.[/red]")
+        raise typer.Exit(code=1)
+
     # Hidden private-key prompt — NEVER a CLI argument, NEVER logged/echoed.
     private_key = typer.prompt("Private key (hidden)", hide_input=True)
     if not private_key or not private_key.strip():
@@ -329,8 +343,9 @@ def import_key(
     try:
         encrypted = encrypt_private_key(private_key.strip(), passphrase)
     finally:
-        # Best-effort: drop the plaintext reference promptly.
+        # Best-effort: drop the plaintext references promptly.
         private_key = ""  # noqa: F841
+        passphrase = ""  # noqa: F841
 
     async def _run() -> str:
         async with session_scope() as session:

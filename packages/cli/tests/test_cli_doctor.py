@@ -78,6 +78,48 @@ class TestCheckConfig:
         assert "Failed to load settings" in result.detail
         assert "boom" in result.detail
 
+    def test_config_no_driver_dsn_does_not_crash(self) -> None:
+        """P3 hardening: a DSN with NO ``+driver`` (e.g. plain
+        ``postgresql://``) must NOT raise IndexError (the old
+        ``split('+')[1]`` bug that leaked the raw URL). make_url parses it
+        structurally and the password never appears."""
+        fake_settings = MagicMock()
+        fake_settings.db_url = SecretStr(
+            "postgresql://user:s3cr3t@db.internal:5432/polyecho"
+        )
+        fake_settings.polymarket_clob_url = "https://clob.example"
+        fake_settings.polymarket_data_api_url = "https://data.example"
+        fake_settings.log_level = "DEBUG"
+
+        with patch.object(
+            doctor_mod, "get_settings", return_value=fake_settings
+        ):
+            result = doctor_mod._check_config()
+
+        assert result.ok is True
+        assert "postgresql" in result.detail
+        assert "db.internal" in result.detail
+        # The password must NEVER be echoed.
+        assert "s3cr3t" not in result.detail
+
+    def test_config_malformed_dsn_reported_not_leaked(self) -> None:
+        """A DSN make_url cannot parse is reported cleanly (ok=False) and
+        the raw value (with any secret) is NOT echoed back."""
+        fake_settings = MagicMock()
+        fake_settings.db_url = SecretStr("::::not a url::::s3cr3t")
+        fake_settings.polymarket_clob_url = "https://clob.example"
+        fake_settings.polymarket_data_api_url = "https://data.example"
+        fake_settings.log_level = "INFO"
+
+        with patch.object(
+            doctor_mod, "get_settings", return_value=fake_settings
+        ):
+            result = doctor_mod._check_config()
+
+        assert result.ok is False
+        assert "not a valid SQLAlchemy URL" in result.detail
+        assert "s3cr3t" not in result.detail
+
 
 # ---------------------------------------------------------------------------
 # _check_db  (async SELECT 1)
