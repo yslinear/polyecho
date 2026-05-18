@@ -96,6 +96,20 @@ testpaths = ["packages"]
 # `pytest` invocation — with no path args — always enforces the gate.
 # --cov-fail-under is set CONSERVATIVELY below measured coverage so it acts
 # as a regression floor, never a flaky failure while packages/** evolves.
+#
+# IMPORTANT — this 70% is the WHOLE-SUITE gate over the UNION of all
+# packages/*/src. It is the floor for aggregate regression only and, on its
+# own, MATHEMATICALLY MASKS low coverage in any single package: the
+# heavily-tested `shared` package alone can keep the union ≥70 even if the
+# money-path `core` were near zero (the R19/R20 "false confidence" root).
+# It is therefore deliberately NOT the only gate. A SEPARATE, additive,
+# CI-failing per-package money-path floor (`packages/core/src` ≥ 80) is
+# enforced by the dedicated "Per-package money-path coverage floor" step in
+# .github/workflows/ci.yml. That step measures core IN ISOLATION via
+# `coverage report --include='*/packages/core/src/polyecho/core/*'`
+# (report-time --include is honoured even though [run] source is set, unlike
+# [run] include) so the number is honest core-only coverage, not the union
+# artifact. Do not raise/lower either gate to make the other pass.
 addopts = "--import-mode=importlib --cov --cov-report=term-missing --cov-fail-under=70"
 consider_namespace_packages = true
 

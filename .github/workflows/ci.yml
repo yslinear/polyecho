@@ -66,6 +66,46 @@ jobs:
           POLYECHO_TEST_DATABASE_URL: postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho
           POLYECHO_DB_URL: postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho
 
+      # ── Per-package money-path coverage floor (R19/R20 remediation) ─────────
+      # The whole-suite --cov-fail-under=70 above is over the UNION of all
+      # packages/*/src; the heavily-tested `shared` package alone keeps that
+      # union green even when the money-path `core` is near zero (R19's "false
+      # confidence" root). This ADDITIVE, independent, CI-FAILING step enforces
+      # a distinct floor of >=80% on packages/core/src ALONE. It does NOT
+      # replace the gate above — both must pass.
+      #
+      # Mechanism (chosen after context7-verifying coverage.py 7.14 /
+      # pytest-cov 7.1 behaviour against the frozen, asyncpg-only toolchain):
+      #   1. Re-run ONLY core's own test suite, collecting coverage with the
+      #      normal pyproject [tool.coverage.run] config (broad source — the
+      #      sole config form proven to measure correctly in this PEP-420
+      #      src-layout workspace). A dedicated COVERAGE_FILE keeps this fully
+      #      isolated from the full-suite .coverage written above.
+      #   2. `coverage report --include='*/packages/core/src/polyecho/core/*'
+      #      --fail-under=80`. Report-time --include IS honoured even though
+      #      [run] source is set (only [run] *include* is ignored in that
+      #      case — verified via context7), so the % is honest core-ONLY
+      #      coverage with zero `shared/*` masking, and a sub-80 result exits
+      #      non-zero and fails CI.
+      # Same postgres:16 service + fixture datasource as the full run, so
+      # money-path DB collaborators execute (not skip). NOTE: --cov flags from
+      # pytest-cov do NOT replace pyproject's multi-package [run] source (they
+      # combine), which is exactly why the two-step collect-then-report form
+      # is required to get an un-masked core number.
+      - name: Per-package money-path coverage floor (packages/core/src >= 80)
+        env:
+          POLYECHO_DATASOURCE: fixture
+          POLYECHO_TEST_DATABASE_URL: postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho
+          POLYECHO_DB_URL: postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho
+          COVERAGE_FILE: .coverage.core
+        run: |
+          set -euo pipefail
+          uv run pytest --cov --cov-report= -p no:cacheprovider packages/core
+          uv run coverage report \
+            --data-file=.coverage.core \
+            --include='*/packages/core/src/polyecho/core/*' \
+            --fail-under=80 --show-missing
+
   # ── Schema sanity: spin postgres:16, apply baseline, verify tables ───────────
   schema:
     name: Schema sanity (postgres:16 + 0000_init.sql)
