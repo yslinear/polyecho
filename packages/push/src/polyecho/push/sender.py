@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -116,6 +117,55 @@ _DEFAULT_TTL_SECONDS = 60 * 60 * 24 * 28
 #: next startup backfill retries the whole event.
 _MAX_TRANSIENT_RETRIES = 3
 _RETRY_BACKOFF_BASE_SECONDS = 0.5
+
+
+#: Default period (seconds) for the safety-net fallback scan (R13 #3 / R2).
+#: The live path is LISTEN/NOTIFY, but ``pg_listen_iter``'s bounded buffer
+#: *drops the oldest NOTIFY* on overflow (see ``polyecho.shared.db``
+#: ``pg_listen_queue_overflow_dropped_oldest``).  A dropped NOTIFY has no
+#: reconnect/restart to trigger the existing backfill, so that event would
+#: sit ``pushed_at IS NULL`` forever.  An independent periodic re-scan of
+#: ``pushed_at IS NULL`` (idempotent with the existing
+#: ``pushed_at IS NOT NULL`` skip in :meth:`_safe_deliver`) guarantees a
+#: dropped NOTIFY can strand an event for at most one interval.  300s
+#: (5 min) bounds worst-case latency without meaningfully loading the DB
+#: (one cheap indexed ``SELECT ... WHERE pushed_at IS NULL``).
+_FALLBACK_SCAN_DEFAULT_SECONDS = 300
+
+#: Floor so a mis-set env can't turn the safety net into a tight busy-loop.
+_FALLBACK_SCAN_MIN_SECONDS = 10
+
+
+def _fallback_scan_interval_seconds() -> int:
+    """Resolve the fallback-scan period (env-overridable, floored).
+
+    Read from ``POLYECHO_PUSH_FALLBACK_SCAN_SECONDS`` (consistent with the
+    repo-wide ``POLYECHO_`` env convention) so operators can tune the
+    safety-net cadence without a code change.  An unset / unparseable /
+    too-small value falls back to the safe default; a non-positive or
+    sub-floor value is clamped to :data:`_FALLBACK_SCAN_MIN_SECONDS` so a
+    typo can never produce a CPU/DB-hammering tight loop.
+    """
+    raw = os.environ.get("POLYECHO_PUSH_FALLBACK_SCAN_SECONDS")
+    if raw is None or raw.strip() == "":
+        return _FALLBACK_SCAN_DEFAULT_SECONDS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        log.warning(
+            "web_push_fallback_scan_bad_env",
+            value=raw,
+            using=_FALLBACK_SCAN_DEFAULT_SECONDS,
+        )
+        return _FALLBACK_SCAN_DEFAULT_SECONDS
+    if value < _FALLBACK_SCAN_MIN_SECONDS:
+        log.warning(
+            "web_push_fallback_scan_floored",
+            requested=value,
+            using=_FALLBACK_SCAN_MIN_SECONDS,
+        )
+        return _FALLBACK_SCAN_MIN_SECONDS
+    return value
 
 
 #: Cap on concurrent ``webpush`` worker threads per event fan-out (I6).
@@ -273,6 +323,51 @@ class WebPushSender:
                 log.warning("web_push_once_db_unavailable", error=str(exc))
                 return 0
             raise
+
+    async def run_fallback_scan(self) -> int:
+        """Periodic safety-net re-scan of ``pushed_at IS NULL`` (R13 #3 / R2).
+
+        The live delivery path is LISTEN/NOTIFY, but the shared
+        ``pg_listen_iter`` buffer is bounded and **drops the oldest NOTIFY**
+        on overflow.  A dropped NOTIFY is *not* followed by a
+        reconnect/restart, so nothing would ever trigger the existing
+        backfill for that event — it would stay ``pushed_at IS NULL``
+        forever.  This method is scheduled on an independent timer
+        (:func:`_fallback_scan_interval_seconds`) so a dropped NOTIFY can
+        strand an event for at most one interval rather than indefinitely.
+
+        It is *exactly* :meth:`run_backfill` (same idempotent query; the
+        ``pushed_at IS NOT NULL`` skip in :meth:`_safe_deliver` makes any
+        overlap with the live stream a no-op) wrapped in the same
+        DB-unavailable tolerance as :meth:`run_once`: the scheduler must
+        never crash the supervised process just because the DB blipped
+        between scans — the live loop is what *retries* a down DB; the
+        safety net simply no-ops until the next tick.
+
+        Returns:
+            The number of events processed (``0`` if the DB is unreachable).
+        """
+        log.info("web_push_fallback_scan")
+        try:
+            return await self.run_backfill()
+        except (asyncio.CancelledError, PushConfigError):
+            # Cancellation must propagate; bad VAPID must halt (I4) — never
+            # let the safety net swallow either.
+            raise
+        except OSError as exc:
+            log.warning("web_push_fallback_scan_db_unavailable", error=str(exc))
+            return 0
+        except Exception as exc:  # noqa: BLE001 - safety net must not crash
+            if _is_db_down(exc):
+                log.warning(
+                    "web_push_fallback_scan_db_unavailable", error=str(exc)
+                )
+                return 0
+            # Unexpected non-DB error: log and swallow so one bad scan does
+            # not kill the scheduler / supervised process; the next tick
+            # (and the live loop) retry.
+            log.error("web_push_fallback_scan_failed", error=str(exc))
+            return 0
 
     async def run_backfill(self) -> int:
         """Deliver every ``events`` row with ``pushed_at IS NULL`` (id ASC).
@@ -441,7 +536,25 @@ class WebPushSender:
             *(_bounded(sub) for sub in subs), return_exceptions=True
         )
 
+        # ``all_durable`` — every subscription reached a terminal state (no
+        # "transient" / unexpected error left), so the event must NOT be
+        # retried and ``pushed_at`` is stamped.  ``content_error`` (413 /
+        # other non-gone 4xx) is *intentionally* durable: the identical
+        # oversized/malformed body will always fail, so stamping prevents an
+        # infinite backfill retry loop (R13 #1 — KEEP this).
+        #
+        # ``any_real_delivery`` — true only when at least one subscription
+        # returned ``"ok"`` (a genuine 2xx).  Without this, an event whose
+        # every subscription returned ``content_error`` would still be
+        # stamped *and* logged as ``web_push_event_delivered`` with
+        # ``subscriptions=len(subs)`` — misleading operators that devices
+        # received the push when in fact zero did (R13 #1).  When the event
+        # is durable but no real delivery happened we still stamp (no
+        # behaviour change) but emit a *distinct*
+        # ``web_push_event_content_error_stamped`` event so operators are
+        # not told a delivery occurred.
         all_durable = True
+        any_real_delivery = False
         for sub, outcome in zip(subs, results, strict=True):
             if isinstance(outcome, PushConfigError):
                 # Bad VAPID — halt delivery; do NOT stamp the event.
@@ -459,15 +572,29 @@ class WebPushSender:
                 continue
             if outcome == "transient":
                 all_durable = False
+            elif outcome == "ok":
+                any_real_delivery = True
 
         if all_durable:
             event.pushed_at = _now()
-            log.info(
-                "web_push_event_delivered",
-                event_id=event.id,
-                event_type=event.event_type,
-                subscriptions=len(subs),
-            )
+            if any_real_delivery:
+                log.info(
+                    "web_push_event_delivered",
+                    event_id=event.id,
+                    event_type=event.event_type,
+                    subscriptions=len(subs),
+                )
+            else:
+                # Durable (so not retried) but ZERO devices actually
+                # received it — every sub was content_error / gone. Stamp
+                # is intentional (no infinite retry); the distinct event
+                # name stops operators reading this as a real delivery.
+                log.warning(
+                    "web_push_event_content_error_stamped",
+                    event_id=event.id,
+                    event_type=event.event_type,
+                    subscriptions=len(subs),
+                )
         else:
             log.warning(
                 "web_push_event_deferred",

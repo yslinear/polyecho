@@ -685,6 +685,245 @@ async def test_413_is_distinct_content_error_stamped_not_delivery(
 
 
 # ---------------------------------------------------------------------------
+# R13 #1: when EVERY subscription returns content_error the event is still
+# stamped (KEEP — prevents an infinite retry of an un-deliverable body) but
+# it must NOT be logged as web_push_event_delivered; a distinct
+# web_push_event_content_error_stamped is logged and `any_real_delivery`
+# stays false (no operator should read "delivered" when zero devices got it).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_all_content_error_stamps_but_logs_distinct_not_delivered(
+    _patched_scope: Any,
+) -> None:
+    """All-413 event: pushed_at stamped (no infinite retry) but the log
+    event is the distinct content-error one, NOT `_delivered`, and no real
+    delivery was recorded (no last_used_at, nothing deleted)."""
+    ev = _FakeEvent(11, {"data": {}, "push": {"title": "t", "body": "b" * 9}})
+    subs = [
+        _FakeSub("https://push.example/big1"),
+        _FakeSub("https://push.example/big2"),
+    ]
+    session = _FakeSession({11: ev}, subs)
+    sender = _make_sender()
+
+    events_logged: list[str] = []
+
+    def _capture(event: str, **_kw: Any) -> None:
+        events_logged.append(event)
+
+    with (
+        patch("polyecho.push.sender.session_scope", _patched_scope(session)),
+        patch(
+            "polyecho.push.sender.webpush",
+            side_effect=_webpush_exc(413),
+        ),
+        patch(
+            "polyecho.push.sender.build_vapid_claims",
+            return_value={"sub": "x"},
+        ),
+        patch.object(sender, "_settings"),
+        patch("polyecho.push.sender.log.info", side_effect=_capture),
+        patch("polyecho.push.sender.log.warning", side_effect=_capture),
+        patch("polyecho.push.sender.log.error", side_effect=_capture),
+    ):
+        await sender._safe_deliver(11)
+
+    # Stamped (intentional — KEEP: an oversized body always 413s, so not
+    # retrying forever is correct)...
+    assert ev.pushed_at is not None
+    # ...but the misleading "delivered" event must NOT have been logged...
+    assert "web_push_event_delivered" not in events_logged
+    # ...the distinct content-error event WAS logged instead...
+    assert "web_push_event_content_error_stamped" in events_logged
+    # ...and zero real deliveries happened (no last_used_at, none deleted).
+    assert session.updated_last_used == []
+    assert session.deleted_subs == []
+
+
+@pytest.mark.asyncio
+async def test_mixed_ok_and_content_error_still_logs_delivered(
+    _patched_scope: Any,
+) -> None:
+    """If at least one sub returns a real 2xx ("ok"), the event IS a real
+    delivery → the normal `web_push_event_delivered` event is logged (the
+    distinct content-error event is reserved for the zero-real-delivery
+    case only)."""
+    ev = _FakeEvent(12, {"data": {}, "push": {"title": "t", "body": "b"}})
+    ok_sub = _FakeSub("https://push.example/ok")
+    big_sub = _FakeSub("https://push.example/big")
+    session = _FakeSession({12: ev}, [ok_sub, big_sub])
+    sender = _make_sender()
+
+    def _webpush(*, subscription_info: Any, **_kw: Any) -> None:
+        if subscription_info["endpoint"].endswith("/big"):
+            raise _webpush_exc(413)
+        return None
+
+    events_logged: list[str] = []
+
+    with (
+        patch("polyecho.push.sender.session_scope", _patched_scope(session)),
+        patch("polyecho.push.sender.webpush", side_effect=_webpush),
+        patch(
+            "polyecho.push.sender.build_vapid_claims",
+            return_value={"sub": "x"},
+        ),
+        patch(
+            "polyecho.push.sender.log.info",
+            side_effect=lambda e, **_k: events_logged.append(e),
+        ),
+        patch(
+            "polyecho.push.sender.log.warning",
+            side_effect=lambda e, **_k: events_logged.append(e),
+        ),
+    ):
+        await sender._safe_deliver(12)
+
+    assert ev.pushed_at is not None
+    # A real delivery happened (the ok sub) → normal delivered event...
+    assert "web_push_event_delivered" in events_logged
+    # ...and the content-error-only event must NOT fire when any "ok" exists.
+    assert "web_push_event_content_error_stamped" not in events_logged
+    assert ok_sub.id in session.updated_last_used
+
+
+# ---------------------------------------------------------------------------
+# R13 #3 / R2: a dropped NOTIFY (pg_listen_iter buffer overflow) leaves an
+# event pushed_at IS NULL with no reconnect/restart to ever retry it. The
+# periodic fallback scan re-delivers such an event independent of stream
+# activity; it is idempotent (already-pushed events are skipped) and
+# best-effort (DB-down does not crash it).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fallback_scan_delivers_event_with_no_notify(
+    _patched_scope: Any,
+) -> None:
+    """An event sitting pushed_at IS NULL (its NOTIFY was dropped on buffer
+    overflow — no stream event, no restart) is eventually delivered purely
+    by the periodic fallback scan."""
+    stranded = _FakeEvent(
+        21, {"data": {}, "push": {"title": "t", "body": "b"}}
+    )
+    sub = _FakeSub("https://push.example/stranded")
+    session = _FakeSession({21: stranded}, [sub])
+    sender = _make_sender()
+
+    assert stranded.pushed_at is None  # NOTIFY was dropped; never delivered
+
+    with (
+        patch("polyecho.push.sender.session_scope", _patched_scope(session)),
+        patch("polyecho.push.sender.webpush", return_value=None) as wp,
+        patch(
+            "polyecho.push.sender.build_vapid_claims",
+            return_value={"sub": "x"},
+        ),
+    ):
+        # No NOTIFY, no reconnect — only the timer-driven safety net runs.
+        processed = await sender.run_fallback_scan()
+
+    assert processed == 1
+    wp.assert_called_once()
+    assert stranded.pushed_at is not None  # rescued by the fallback scan
+    assert session.updated_last_used == [sub.id]
+
+
+@pytest.mark.asyncio
+async def test_fallback_scan_is_idempotent_skips_already_pushed(
+    _patched_scope: Any,
+) -> None:
+    """The fallback scan reuses the backfill query + the pushed_at IS NOT
+    NULL skip, so an already-delivered event is a no-op (no double push)."""
+    done = _FakeEvent(31, {"data": {}, "push": {"title": "t", "body": "b"}})
+    done.pushed_at = datetime.now()
+    pending = _FakeEvent(32, {"data": {}, "push": None})
+    session = _FakeSession({31: done, 32: pending}, [])
+    sender = _make_sender()
+
+    with (
+        patch("polyecho.push.sender.session_scope", _patched_scope(session)),
+        patch("polyecho.push.sender.webpush") as wp,
+    ):
+        processed = await sender.run_fallback_scan()
+
+    # Only the still-pending one is in the scan set; the done one untouched.
+    assert processed == 1
+    wp.assert_not_called()  # pending is a non-push event; done was skipped
+
+
+@pytest.mark.asyncio
+async def test_fallback_scan_db_down_returns_zero_no_crash() -> None:
+    """Best-effort: a DB blip during a scan must not crash the supervised
+    process — the scan no-ops (0) and the next tick / live loop retries."""
+    sender = _make_sender()
+
+    @asynccontextmanager
+    async def _boom() -> Any:
+        raise OSError("Connect call failed ('127.0.0.1', 5432)")
+        yield  # pragma: no cover
+
+    with patch("polyecho.push.sender.session_scope", _boom):
+        processed = await sender.run_fallback_scan()
+
+    assert processed == 0
+
+
+def test_fallback_scan_interval_env_override_and_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The interval is env-configurable (POLYECHO_PUSH_FALLBACK_SCAN_SECONDS)
+    with a safe default and a floor so a typo can't make a busy-loop."""
+    from polyecho.push import sender as smod
+
+    monkeypatch.delenv("POLYECHO_PUSH_FALLBACK_SCAN_SECONDS", raising=False)
+    assert (
+        smod._fallback_scan_interval_seconds()
+        == smod._FALLBACK_SCAN_DEFAULT_SECONDS
+    )
+
+    monkeypatch.setenv("POLYECHO_PUSH_FALLBACK_SCAN_SECONDS", "60")
+    assert smod._fallback_scan_interval_seconds() == 60
+
+    # Sub-floor / non-positive / garbage are all clamped or defaulted.
+    monkeypatch.setenv("POLYECHO_PUSH_FALLBACK_SCAN_SECONDS", "1")
+    assert (
+        smod._fallback_scan_interval_seconds()
+        == smod._FALLBACK_SCAN_MIN_SECONDS
+    )
+    monkeypatch.setenv("POLYECHO_PUSH_FALLBACK_SCAN_SECONDS", "not-an-int")
+    assert (
+        smod._fallback_scan_interval_seconds()
+        == smod._FALLBACK_SCAN_DEFAULT_SECONDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_scheduler_registers_fallback_scan_job() -> None:
+    """`_build_scheduler` wires BOTH the daily cron AND the interval-driven
+    fallback scan; `--once` (which never builds the scheduler) is intact."""
+    from polyecho.push import __main__ as entry
+
+    sender = _make_sender()
+    scheduler = entry._build_scheduler(sender, "Asia/Taipei")
+    job_ids = {j.id for j in scheduler.get_jobs()}
+    assert "daily_pnl_summary" in job_ids
+    assert "fallback_scan" in job_ids
+
+    fb = scheduler.get_job("fallback_scan")
+    # It is an interval trigger bound to the resolved seconds.
+    from apscheduler.triggers.interval import (  # type: ignore[import-untyped]
+        IntervalTrigger,
+    )
+
+    assert isinstance(fb.trigger, IntervalTrigger)
+    # Its target is the safety-net coroutine, not the daily digest.
+    assert fb.func == sender.run_fallback_scan
+
+
+# ---------------------------------------------------------------------------
 # I6: per-event fan-out is concurrent but bounded by the semaphore (a slow
 # subscription does not head-of-line block the others, and at most
 # _FANOUT_CONCURRENCY webpush threads run at once).

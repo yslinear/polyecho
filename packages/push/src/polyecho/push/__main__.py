@@ -24,8 +24,9 @@ import sys
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
-from polyecho.push.sender import WebPushSender
+from polyecho.push.sender import WebPushSender, _fallback_scan_interval_seconds
 from polyecho.shared.config import get_settings
 from polyecho.shared.logging import configure_logging
 
@@ -37,10 +38,29 @@ _DAILY_SUMMARY_MINUTE = 0
 
 
 def _build_scheduler(sender: WebPushSender, tz: str) -> AsyncIOScheduler:
-    """Create the APScheduler instance with the 23:00 daily-summary job.
+    """Create the APScheduler instance with the 23:00 daily-summary job and
+    the periodic safety-net fallback scan (R13 #3 / R2).
 
-    The job is *not* started here; the caller starts/shuts it down around
-    the supervised stream so the scheduler shares the running event loop.
+    Two jobs (3.x ``AsyncIOScheduler.add_job`` — the stable API; ``apscheduler
+    <4`` is pinned in ``pyproject.toml``):
+
+    * ``daily_pnl_summary`` — the 23:00 ``settings.tz`` PnL digest cron;
+    * ``fallback_scan`` — an :class:`IntervalTrigger` re-scan of
+      ``pushed_at IS NULL`` every :func:`_fallback_scan_interval_seconds`.
+      The live path is LISTEN/NOTIFY, but ``pg_listen_iter`` drops the
+      oldest NOTIFY on buffer overflow and nothing else would ever retry
+      that event (only reconnect/restart triggers backfill today).  This
+      independent timer guarantees a dropped NOTIFY strands an event for at
+      most one interval. It is idempotent (``run_fallback_scan`` reuses the
+      backfill query; the ``pushed_at IS NOT NULL`` skip makes overlap with
+      the live stream a no-op) and best-effort (``run_fallback_scan``
+      swallows DB-down so a blip never crashes the supervised process).
+      ``max_instances=1`` + ``coalesce=True`` so a slow scan can't pile up
+      overlapping runs or a backlog burst.
+
+    Neither job is *started* here; the caller starts/shuts the scheduler
+    around the supervised stream so it shares the running event loop.  The
+    ``--once`` path never builds/starts the scheduler, so it is unaffected.
     """
     scheduler = AsyncIOScheduler(timezone=tz)
     scheduler.add_job(
@@ -53,6 +73,20 @@ def _build_scheduler(sender: WebPushSender, tz: str) -> AsyncIOScheduler:
         id="daily_pnl_summary",
         replace_existing=True,
         misfire_grace_time=3600,
+    )
+    fallback_seconds = _fallback_scan_interval_seconds()
+    scheduler.add_job(
+        sender.run_fallback_scan,
+        IntervalTrigger(seconds=fallback_seconds),
+        id="fallback_scan",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=fallback_seconds,
+    )
+    logger.info(
+        "web-push-sender fallback scan scheduled",
+        extra={"interval_seconds": fallback_seconds},
     )
     return scheduler
 
