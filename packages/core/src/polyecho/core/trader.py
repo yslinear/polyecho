@@ -64,9 +64,33 @@ from polyecho.shared.risk_mode import RiskMode, apply_conservative, get_risk_mod
 
 logger = logging.getLogger(__name__)
 
+#: Funder USDC balance (in USD) at/under which SYSTEM_LOW_BALANCE fires.
+#:
+#: Rationale: Polymarket's CLOB enforces a $1 minimum order notional, and a
+#: copy-trade leg also has to clear the configured ``min_trade_size_usd``
+#: (the bundled templates default this to $1) PLUS leave headroom for the
+#: maker/taker fee + price slippage on the next fill.  A funder sitting at
+#: only a couple of dollars can therefore no longer place even the smallest
+#: copy order, so $5 is a defensible "you will start missing fills now"
+#: early-warning floor — high enough to warn *before* the account goes
+#: fully dead, low enough never to false-alarm a normally funded account.
+#: It is a documented constant (not env-tunable) so the alert threshold is
+#: part of the reviewed contract; tune here if the min-order economics move.
+LOW_BALANCE_THRESHOLD_USD: float = 5.0
+
+#: Engine-injected, optional async balance probe:
+#: ``async (account_id) -> funder USDC balance in USD | None``.  Defaults to
+#: ``None`` (no probe) so the fixture / ``--once`` / unit paths stay
+#: network-free and unchanged; the live wiring injects a real
+#: funder-balance reader.  A ``None`` return == "balance unknown" ⇒ never
+#: alarms (best-effort, fail-open for the *alert* — the money lock is
+#: unaffected either way).
+BalanceFetcher = Callable[[uuid.UUID], Awaitable[float | None]]
+
 __all__ = [
     "Decision",
     "DecisionOutcome",
+    "LOW_BALANCE_THRESHOLD_USD",
     "TraderCore",
     "FollowSpec",
     "PendingActionExecutor",
@@ -134,6 +158,7 @@ class TraderCore:
         market_end_for: Callable[[str], datetime | None] | None = None,
         redeem_candidate_source: Callable[[], Awaitable[list[RedeemCandidate]]] | None = None,
         pending_action_executor: PendingActionExecutor | None = None,
+        balance_for: BalanceFetcher | None = None,
     ) -> None:
         self._settings = get_settings()
         self._ds: DataSource = datasource if datasource is not None else get_datasource()
@@ -177,6 +202,21 @@ class TraderCore:
         self._pending_executor = pending_action_executor
         # SYSTEM_BOT_RESTART fires exactly once per process start.
         self._bot_restart_emitted = False
+
+        # --- PRD §5.8 system-health debounce state ----------------------
+        # SYSTEM_API_FAILURE coalescing: a PolymarketClient call can fail
+        # on every tick of a hot loop, so we emit ONLY on the transition
+        # into a failing state, keyed per call-site (``"orderbook"`` /
+        # ``"risk_context"`` / ``"order_place"``).  A call-site that is in
+        # ``_api_failing`` has already pushed; it is cleared on the next
+        # success so a *fresh* failure transition re-alerts (a flapping
+        # API alerts once per outage, not once per tick).
+        self._balance_for = balance_for
+        self._api_failing: set[str] = set()
+        # SYSTEM_LOW_BALANCE edge-trigger: per-account "we are currently
+        # below threshold and have already pushed" set — emit once on the
+        # downward crossing, re-arm only after recovery ≥ threshold.
+        self._low_balance_alerted: set[str] = set()
 
     # ------------------------------------------------------------------
     # Evaluator / risk hooks
@@ -505,9 +545,17 @@ class TraderCore:
                 return
 
             condition_id = str(trade.get("condition_id") or "")
+            checked_accounts: set[uuid.UUID] = set()
             for spec in self._follows:
                 if spec.leader_address.lower() != leader:
                     continue
+                # SYSTEM_LOW_BALANCE: probe each funding account at most
+                # once per detected trade (edge-triggered inside the
+                # helper — emits once on the downward crossing, never
+                # once-per-poll).  No-op unless a balance probe is wired.
+                if spec.account_id not in checked_accounts:
+                    checked_accounts.add(spec.account_id)
+                    await self._check_low_balance(spec.account_id)
                 await self._process_for_follow(spec, trade, condition_id, tx_hash)
 
     async def _process_for_follow(
@@ -549,7 +597,8 @@ class TraderCore:
         )
         if not risk.passed:
             reason = risk.skip_reason or SkipReason.DATA_UNAVAILABLE
-            await self._record_skip(evaluated, reason, risk.detail or "risk reject")
+            detail = risk.detail or "risk reject"
+            await self._record_skip(evaluated, reason, detail)
             await self._emit_event(
                 "risk_triggered",
                 {
@@ -558,8 +607,39 @@ class TraderCore:
                     "skip_reason": reason.value,
                 },
             )
+            # A DATA_UNAVAILABLE reject whose detail marks a Polymarket
+            # fetch error IS an API failure (the risk gate fails closed on
+            # the orderbook / context fetch — see risk.py).  Map it to a
+            # debounced SYSTEM_API_FAILURE keyed per call-site; any other
+            # reject is a normal risk decision (NOT an API outage) and only
+            # clears the orderbook flag if the fetch itself succeeded.
+            if reason is SkipReason.DATA_UNAVAILABLE and (
+                "orderbook fetch failed" in detail
+                or "risk context fetch failed" in detail
+            ):
+                call_site = (
+                    "orderbook"
+                    if "orderbook fetch failed" in detail
+                    else "risk_context"
+                )
+                await self._note_api_outcome(
+                    call_site=call_site,
+                    ok=False,
+                    error=detail,
+                    leader=spec.leader_address,
+                    condition_id=condition_id,
+                )
+            else:
+                # Reached the gate body ⇒ the orderbook fetch (if any) did
+                # NOT raise; treat the API as healthy so a later real
+                # outage re-alerts.
+                await self._note_api_outcome(call_site="orderbook", ok=True)
             await self._emit_risk_event(spec, tx_hash, reason, risk.detail or "")
             return
+
+        # A PASSED gate means every required Polymarket fetch succeeded.
+        await self._note_api_outcome(call_site="orderbook", ok=True)
+        await self._note_api_outcome(call_site="risk_context", ok=True)
 
         self.stats.copied += 1
 
@@ -570,6 +650,26 @@ class TraderCore:
         size = risk.adjusted_size if risk.adjusted_size is not None else decision.size
         price = decision.price or Decimal(0)
         outcome_name = str(trade.get("outcome") or decision.token_id or condition_id)
+
+        # SYSTEM_API_FAILURE for the live order-placement call: the
+        # executor returns DATA_UNAVAILABLE with this detail only after it
+        # has exhausted its re-sign retries against PolymarketClient
+        # (execution.py).  Debounced per "order_place" call-site; a placed
+        # / live-locked / any-other result clears it.
+        if (
+            not result.placed
+            and result.skip_reason is SkipReason.DATA_UNAVAILABLE
+            and "order placement failed after retries" in (result.detail or "")
+        ):
+            await self._note_api_outcome(
+                call_site="order_place",
+                ok=False,
+                error=result.detail or "",
+                leader=spec.leader_address,
+                condition_id=condition_id,
+            )
+        else:
+            await self._note_api_outcome(call_site="order_place", ok=True)
 
         if result.placed:  # pragma: no cover - live-only
             self.stats.placed += 1
@@ -734,6 +834,107 @@ class TraderCore:
                 body="trader-core 已啟動並開始監控領單者",
                 url="/dashboard",
                 tag="system_bot_restart",
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # SYSTEM_API_FAILURE / SYSTEM_LOW_BALANCE (PRD §5.8 health pushes)
+    # ------------------------------------------------------------------
+
+    async def _note_api_outcome(
+        self,
+        *,
+        call_site: str,
+        ok: bool,
+        error: str = "",
+        leader: str | None = None,
+        condition_id: str | None = None,
+    ) -> None:
+        """Edge-triggered SYSTEM_API_FAILURE for a PolymarketClient call.
+
+        ``call_site`` is the logical Polymarket call that failed/succeeded
+        (e.g. ``"orderbook"``, ``"risk_context"``, ``"order_place"``).  We
+        emit WARNING **once on the transition into a failing state** per
+        call-site and clear the flag on the next success, so a Polymarket
+        API that is flapping inside the hot copy loop alerts once per
+        outage instead of once per tick (debounce / coalesce).  Best-effort
+        via :func:`safe_emit` — a NOTIFY/DB hiccup never stalls the loop.
+        """
+        if ok:
+            self._api_failing.discard(call_site)
+            return
+        if call_site in self._api_failing:
+            return  # already alerted for this ongoing outage — coalesce
+        self._api_failing.add(call_site)
+        await self._emit_push_event(
+            event_type=EventType.SYSTEM_API_FAILURE,
+            severity=Severity.WARNING,
+            payload={
+                "call_site": call_site,
+                "error": error,
+                "leader": leader,
+                "condition_id": condition_id,
+            },
+            push=PushPayload(
+                title="API 異常",
+                body=(
+                    f"Polymarket {call_site} 連線異常，已暫停受影響的跟單，"
+                    f"系統將自動重試"
+                ),
+                url="/alerts",
+                tag="system_api_failure",
+                data={"call_site": call_site},
+            ),
+        )
+
+    async def _check_low_balance(self, account_id: uuid.UUID) -> None:
+        """Edge-triggered SYSTEM_LOW_BALANCE for a funder USDC balance.
+
+        Probes the optional injected :attr:`_balance_for` (no-op when not
+        wired, so fixture/``--once`` stay network-free).  Emits WARNING
+        **once on the downward crossing** below
+        :data:`LOW_BALANCE_THRESHOLD_USD` and re-arms only after the
+        balance recovers to ≥ threshold — never once-per-poll.  Best-effort
+        (any probe error is swallowed; the alert fails open, the money
+        lock is independent).
+        """
+        if self._balance_for is None:
+            return
+        acct = str(account_id)
+        try:
+            balance = await self._balance_for(account_id)
+        except Exception as exc:  # noqa: BLE001 - best-effort: alert only
+            logger.warning(
+                "low_balance_probe_failed_continuing",
+                extra={"account_id": acct, "error": str(exc)},
+            )
+            return
+        if balance is None:
+            return  # balance unknown ⇒ never alarm
+        if balance >= LOW_BALANCE_THRESHOLD_USD:
+            self._low_balance_alerted.discard(acct)  # recovered ⇒ re-arm
+            return
+        if acct in self._low_balance_alerted:
+            return  # already alerted on this downward crossing
+        self._low_balance_alerted.add(acct)
+        await self._emit_push_event(
+            event_type=EventType.SYSTEM_LOW_BALANCE,
+            severity=Severity.WARNING,
+            payload={
+                "account_id": acct,
+                "balance_usd": balance,
+                "threshold": LOW_BALANCE_THRESHOLD_USD,
+            },
+            push=PushPayload(
+                title="餘額不足",
+                body=(
+                    f"帳戶 USDC 餘額 ${balance:.2f} 已低於 "
+                    f"${LOW_BALANCE_THRESHOLD_USD:.2f}，可能無法繼續跟單，"
+                    f"請儘速充值"
+                ),
+                url="/accounts",
+                tag=f"low_balance:{acct}",
+                data={"account_id": acct},
             ),
         )
 
