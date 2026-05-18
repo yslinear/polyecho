@@ -71,13 +71,16 @@ export default async function AccountsPage() {
         </p>
       </header>
 
-      <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-900/60 dark:bg-amber-950/30">
-        <p className="text-sm text-amber-900 dark:text-amber-200">
+      <div className="flex items-start gap-3 rounded-lg border border-border bg-muted px-4 py-3">
+        <Badge variant="destructive" className="mt-0.5 shrink-0 text-xs">
+          CLI only
+        </Badge>
+        <p className="text-sm text-foreground">
           <strong className="font-semibold">
             Private-key import is CLI-only.
           </strong>{" "}
           Run{" "}
-          <code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-xs dark:bg-amber-900/50">
+          <code className="rounded bg-background px-1 py-0.5 font-mono text-xs">
             polyecho account import &lt;eoa&gt;
           </code>{" "}
           on the trader-core host. This dashboard is read-only and never
@@ -98,7 +101,7 @@ export default async function AccountsPage() {
       ) : (
         <div className="overflow-hidden rounded-lg border">
           <Table>
-            <TableHeader className="sticky top-0 z-10 bg-muted/60 backdrop-blur supports-[backdrop-filter]:bg-muted/60">
+            <TableHeader className="sticky top-0 z-10 bg-muted">
               <TableRow className="hover:bg-transparent">
                 <TableHead>Name</TableHead>
                 <TableHead>EOA address</TableHead>

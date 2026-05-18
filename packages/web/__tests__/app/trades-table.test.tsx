@@ -77,9 +77,17 @@ describe("TradesTable (client island)", () => {
     expect(screen.getAllByText("0xabcd…ef01").length).toBeGreaterThan(0);
   });
 
-  it("renders an empty state with no data", () => {
+  it("renders an honest empty state (no bare 'No results.') with no data", () => {
     render(<TradesTable data={[]} />);
-    expect(screen.getByText("No results.")).toBeInTheDocument();
+    // DESIGN.md ban: no terse "No results." — one calm sentence + the
+    // real next action.
+    expect(screen.queryByText("No results.")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/No copy trades recorded yet\./i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/trader-core executes a copy/i)
+    ).toBeInTheDocument();
   });
 
   it("sorts by Size ascending then descending", async () => {

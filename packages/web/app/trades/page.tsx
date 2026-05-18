@@ -34,7 +34,16 @@ export default async function TradesPage() {
         </p>
       </header>
 
-      <TradesTable data={rows} />
+      {rows.length === 0 ? (
+        <div className="rounded-lg border border-dashed py-16 text-center">
+          <p className="text-sm text-muted-foreground">
+            No copy trades recorded yet. They appear here once trader-core
+            executes a copy for a followed leader.
+          </p>
+        </div>
+      ) : (
+        <TradesTable data={rows} />
+      )}
     </div>
   );
 }

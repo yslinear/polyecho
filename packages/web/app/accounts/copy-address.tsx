@@ -41,7 +41,7 @@ export function CopyAddress({ address }: CopyAddressProps) {
         aria-label={copied ? "Copied" : "Copy address"}
       >
         {copied ? (
-          <Check className="h-3 w-3 text-green-600" />
+          <Check className="h-3 w-3 text-gain" />
         ) : (
           <Copy className="h-3 w-3" />
         )}

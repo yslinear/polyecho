@@ -55,7 +55,7 @@ export function SkipsTable({
       ) : (
         <div className="overflow-hidden rounded-lg border">
           <Table>
-            <TableHeader className="sticky top-0 z-10 bg-muted/60 backdrop-blur supports-[backdrop-filter]:bg-muted/60">
+            <TableHeader className="sticky top-0 z-10 bg-muted">
               <TableRow className="hover:bg-transparent">
                 <TableHead>Reason</TableHead>
                 <TableHead>Leader</TableHead>
