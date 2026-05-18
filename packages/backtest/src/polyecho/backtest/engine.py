@@ -81,6 +81,13 @@ class BacktestParams:
         max_concurrent_positions: Maximum number of open positions allowed.
         slippage_bps:            Adverse slippage in basis points (1 bp = 0.01%).
                                  Default 150 (1.5%) per PRD §5.4.
+        fee_bps:                 Per-leg trading fee in basis points, charged
+                                 as ``copy_usdc * fee_bps / 10_000`` on every
+                                 BUY open AND every SELL close (PRD §5.4
+                                 non-negotiable — backtest MUST model fee).
+                                 Default 0 (Polymarket's headline taker fee is
+                                 currently 0 bps; operators set this to model a
+                                 conservative scenario or future fee schedule).
         execution_delay_seconds: Simulated execution delay in seconds.
                                  Modelled as extra adverse slippage at
                                  0.5 bps/s (ASSUMPTION-DELAY).
@@ -102,6 +109,7 @@ class BacktestParams:
     max_concurrent_positions: int = 10
     fixed_size_usd: float = 0.0  # 0 = disabled; use copy_ratio instead
     slippage_bps: int = 150  # default 1.5 %
+    fee_bps: int = 0  # per-leg trading fee (BUY open + SELL close); PRD §5.4
     execution_delay_seconds: int = 30
     category_whitelist: list[str] | None = None
 
@@ -155,6 +163,7 @@ class BacktestResult:
     max_drawdown_pct: float = 0.0
     win_rate: float = 0.0
     avg_hold_hours: float = 0.0
+    total_fees_usd: float = 0.0
 
     # Skip analysis
     skip_stats: SkipStats = field(default_factory=SkipStats)
@@ -187,6 +196,7 @@ class BacktestResult:
                 "daily_loss_limit_usd": self.params.daily_loss_limit_usd,
                 "max_concurrent_positions": self.params.max_concurrent_positions,
                 "slippage_bps": self.params.slippage_bps,
+                "fee_bps": self.params.fee_bps,
                 "execution_delay_seconds": self.params.execution_delay_seconds,
                 "category_whitelist": self.params.category_whitelist,
             },
@@ -198,6 +208,7 @@ class BacktestResult:
                 "max_drawdown_pct": self.max_drawdown_pct,
                 "win_rate": self.win_rate,
                 "avg_hold_hours": self.avg_hold_hours,
+                "total_fees_usd": self.total_fees_usd,
             },
             "skip_analysis": self.skip_stats.to_dict(),
             "leader_vs_copy": {
@@ -231,6 +242,71 @@ def apply_slippage(price: float, side: str, slippage_bps: int) -> float:
     if side == "BUY":
         return min(1.0, price * (1.0 + factor))
     return max(0.0, price * (1.0 - factor))
+
+
+def compute_fee(copy_usdc: float, fee_bps: int) -> float:
+    """Trading fee for one leg of a copy trade (PRD §5.4 — non-negotiable).
+
+    The fee is a flat basis-point charge on the *notional* USDC of the leg,
+    deducted on every BUY open and every SELL close.  It is a pure cost: it
+    never improves PnL.
+
+    Args:
+        copy_usdc: Notional USDC of this leg (already capped at
+                   ``max_position_usd``).
+        fee_bps:   Fee in basis points (1 bp = 0.01%).  0 disables the fee.
+
+    Returns:
+        Fee cost in USD (>= 0.0).
+    """
+    if fee_bps <= 0 or copy_usdc <= 0.0:
+        return 0.0
+    return copy_usdc * fee_bps / 10_000.0
+
+
+def compute_settlement_price(
+    last_price: float,
+    *,
+    resolved: bool | None = None,
+    voided: bool | None = None,
+    entry_price: float = 0.0,
+) -> float:
+    """Snap a mark-to-market price to its settlement value (PRD §5.4).
+
+    Polymarket binary markets settle at exactly $1 (the winning outcome) or
+    $0 (the losing outcome).  Near a resolution the live mid price collapses
+    toward one of those poles, so the engine must *snap*:
+
+    * last price >= 0.95  → $1.00  (treated as resolved-YES)
+    * last price <= 0.05  → $0.00  (treated as resolved-NO)
+    * 0.05 < last price < 0.95 → unchanged live MTM (market still open)
+    * ``voided``/invalid market → return ``entry_price`` so the position's
+      MTM PnL is exactly zero (the trade is effectively unwound at cost).
+
+    ``resolved``/``voided`` are sourced from the position/market ``raw`` blob
+    when available (live data); fixtures carry no resolution field, so the
+    price-band rule is the load-bearing path there.  An explicit
+    ``resolved=True`` still applies the price-band snap; ``voided=True`` wins
+    over everything (a voided market never pays out).
+
+    Args:
+        last_price:  Live mark-to-market price (0–1).
+        resolved:    Tri-state resolution flag from ``raw`` (None = unknown).
+        voided:      Tri-state void/invalid flag from ``raw`` (None = unknown).
+        entry_price: The position's own entry fill price (zero-MTM fallback
+                     for voided markets).
+
+    Returns:
+        Settlement-snapped price in [0.0, 1.0].
+    """
+    if voided:
+        # Voided / invalid market: no payout, unwind at cost → zero MTM PnL.
+        return float(entry_price)
+    if last_price >= 0.95:
+        return 1.0
+    if last_price <= 0.05:
+        return 0.0
+    return float(last_price)
 
 
 def compute_sharpe(daily_pnl: list[float], *, risk_free: float = 0.0) -> float:
@@ -405,6 +481,25 @@ class BacktestEngine:
                 leader_open, leader_daily_pnl, trade, positions_map
             )
 
+            # ---- C4: SELL with no matching open BUY ------------------------
+            # A SELL whose condition_id is not in open_positions has no copy
+            # position to close: either the leader opened the BUY *before*
+            # start_date (out of window), or this is a duplicate / partial
+            # SELL whose BUY was already closed.  The previous code fell
+            # through to the trade-log append with side="SELL", pnl_usd=0.0
+            # and skipped=False, which inflated the *closed-trade* count and
+            # therefore distorted win_rate (a 0-PnL phantom "loss").  Skip it
+            # BEFORE computing fill price / shares so it is recorded as a
+            # genuine skip with an explicit reason and never reaches the
+            # closed-trade / win-rate population.
+            if side == "SELL" and cond_id not in open_positions:
+                skip_stats.risk_triggered += 1
+                skip_stats.total += 1
+                trade_log.append(
+                    self._skip_entry(trade, "no_open_position", params)
+                )
+                continue
+
             # ---- Category whitelist filter ---------------------------------
             if params.category_whitelist is not None:
                 title = str(trade.raw.get("title") or "")
@@ -464,9 +559,17 @@ class BacktestEngine:
             # ---- Adverse fill price (slippage + delay) ---------------------
             fill_price = apply_slippage(leader_price, side, total_slippage_bps)
 
+            # ---- P1-10a: per-leg trading fee (PRD §5.4 non-negotiable) -----
+            # Charged on BOTH legs: the BUY open consumes extra capital, the
+            # SELL close deducts from realised PnL.  A pure cost — never
+            # improves PnL — so high fee_bps must monotonically reduce return.
+            fee_usd = compute_fee(copy_usdc, params.fee_bps)
+
             # ---- Capital check (only BUY consumes capital) -----------------
             if side == "BUY":
-                if copy_usdc > capital_remaining:
+                # The fee is paid up-front alongside the notional, so the
+                # capital gate must cover copy_usdc + fee_usd.
+                if copy_usdc + fee_usd > capital_remaining:
                     # Partial fill not modelled; skip to keep it simple
                     skip_stats.risk_triggered += 1
                     skip_stats.total += 1
@@ -474,7 +577,7 @@ class BacktestEngine:
                         self._skip_entry(trade, "risk_insufficient_capital", params)
                     )
                     continue
-                capital_remaining -= copy_usdc
+                capital_remaining -= copy_usdc + fee_usd
 
             # ---- Compute copy token size (shares = usdc / fill_price) ------
             copy_shares = copy_usdc / fill_price if fill_price > 0.0 else 0.0
@@ -482,14 +585,20 @@ class BacktestEngine:
             # ---- PnL realisation -------------------------------------------
             pnl_usd = 0.0
             closed_at: datetime | None = None
+            opened_at: datetime | None = None
 
             if side == "SELL" and cond_id in open_positions:
                 # Close existing BUY position
                 pos = open_positions.pop(cond_id)
                 entry_price = pos["fill_price"]
                 entry_shares = pos["shares"]
-                # Sell at worse (lower) price → PnL = shares × (sell_price - buy_price)
-                pnl_usd = min(copy_shares, entry_shares) * (fill_price - entry_price)
+                opened_at = pos["opened_at"]
+                # Sell at worse (lower) price → gross PnL = shares ×
+                # (sell_price - buy_price).  The SELL-leg fee is then deducted
+                # so the *net* realised PnL (and daily-loss tracking) reflects
+                # the true cost of the round-trip.
+                gross_pnl = min(copy_shares, entry_shares) * (fill_price - entry_price)
+                pnl_usd = gross_pnl - fee_usd
                 capital_remaining += copy_usdc + pnl_usd
                 closed_at = trade.timestamp
 
@@ -503,7 +612,9 @@ class BacktestEngine:
                             extra={"date": str(trade_date), "loss": daily_loss[trade_date]},
                         )
             elif side == "BUY":
-                # Open new position
+                # Open new position. The BUY-leg fee is *already* deducted
+                # from capital_remaining above; recording it on the trade-log
+                # entry keeps total_fees_usd a faithful both-legs total.
                 open_positions[cond_id] = {
                     "shares": copy_shares,
                     "fill_price": fill_price,
@@ -521,6 +632,11 @@ class BacktestEngine:
                 "copy_usdc": copy_usdc,
                 "copy_shares": copy_shares,
                 "pnl_usd": pnl_usd,
+                "fee_usd": fee_usd,
+                # I8: the matching BUY's open time, stored on the SELL entry so
+                # avg_hold_hours = SELL ts − BUY opened_at (was ≈0 because it
+                # used SELL ts − SELL closed_at, both the SELL timestamp).
+                "opened_at": opened_at.isoformat() if opened_at else None,
                 "closed_at": closed_at.isoformat() if closed_at else None,
                 "skipped": False,
             }
@@ -528,10 +644,33 @@ class BacktestEngine:
 
         # ---- 4. Mark-to-market open positions at period end ----------------
         # ASSUMPTION-MTM
+        #
+        # P1-10c (look-ahead bias): the period-end "last known price" is
+        # derived FROM THE TRADE LOG ITSELF — the last in-window fill price
+        # observed for each condition_id — NOT from a live get_positions()
+        # snapshot taken at *run* time.  A live snapshot reflects the leader's
+        # CURRENT state (potentially long after end_date) and would leak
+        # future information into in-window MTM.  Building last_in_window_price
+        # from trades that already passed the chronological [start,end] filter
+        # guarantees no datum after end_date can influence the result.
+        #
+        # P1-10b (settlement snap): the derived last price is then snapped to
+        # its settlement value — $1 if >= 0.95, $0 if <= 0.05, unchanged in
+        # (0.05, 0.95); a voided/invalid market unwinds at entry (zero MTM).
+        last_in_window_price = self._derive_last_known_prices(trade_log)
         mtm_pnl = 0.0
         for cond_id, pos in open_positions.items():
-            last_price = self._get_mtm_price(cond_id, pos, positions_map)
-            mtm = pos["shares"] * (last_price - pos["fill_price"])
+            last_price = self._get_mtm_price(
+                cond_id, pos, last_in_window_price, positions_map
+            )
+            resolved, voided = self._resolution_flags(cond_id, positions_map)
+            settle_price = compute_settlement_price(
+                last_price,
+                resolved=resolved,
+                voided=voided,
+                entry_price=pos["fill_price"],
+            )
+            mtm = pos["shares"] * (settle_price - pos["fill_price"])
             mtm_pnl += mtm
             trade_log.append(
                 {
@@ -544,10 +683,14 @@ class BacktestEngine:
                     "condition_id": cond_id,
                     "side": "MTM",
                     "leader_price": pos["fill_price"],
-                    "fill_price": last_price,
+                    "fill_price": settle_price,
                     "copy_usdc": pos["copy_usdc"],
                     "copy_shares": pos["shares"],
                     "pnl_usd": mtm,
+                    "fee_usd": 0.0,
+                    "opened_at": pos["opened_at"].isoformat()
+                    if pos.get("opened_at")
+                    else None,
                     "closed_at": str(params.end_date),
                     "skipped": False,
                 }
@@ -564,7 +707,14 @@ class BacktestEngine:
         )
 
         # ---- 7. Compute statistics -----------------------------------------
-        stats = self._compute_statistics(pnl_curve, trade_log)
+        stats = self._compute_statistics(pnl_curve, trade_log, params)
+        total_fees_usd = float(
+            sum(
+                float(e.get("fee_usd") or 0.0)
+                for e in trade_log
+                if not e.get("skipped")
+            )
+        )
 
         result = BacktestResult(
             params=params,
@@ -575,6 +725,7 @@ class BacktestEngine:
             max_drawdown_pct=stats["max_drawdown_pct"],
             win_rate=stats["win_rate"],
             avg_hold_hours=stats["avg_hold_hours"],
+            total_fees_usd=total_fees_usd,
             skip_stats=skip_stats,
             leader_pnl_curve=leader_pnl_curve,
             leader_total_return_usd=(
@@ -617,6 +768,40 @@ class BacktestEngine:
             end=end_dt,
             activity_type="TRADE",
         )
+
+        # I7: silent activity truncation.
+        # context7-verified (Polymarket Data API `GET /activity`,
+        # docs.polymarket.com/api-reference/core/get-user-activity): this
+        # endpoint paginates by ``offset`` (max 10000) + ``limit`` (max 500)
+        # ONLY — it exposes NO cursor / next_cursor (cursor pagination exists
+        # only for `GET /markets` keyset and the CLOB `GET /orders`).  Because
+        # the API itself offers no cursor for this endpoint, switching to
+        # cursor pagination is impossible at the source; per the remediation
+        # plan (B-backtest I7: "改 cursor（或記錄 10k 截斷警告）") we take the
+        # documented fallback: emit a loud truncation warning so a very
+        # active leader's window is never silently incomplete.  LiveDataSource
+        # stops at ``offset >= 10_000``, so a returned count at/above that cap
+        # means trades were dropped from the tail of the window.
+        _ACTIVITY_OFFSET_CAP = 10_000  # Polymarket /activity offset hard cap
+        if len(records) >= _ACTIVITY_OFFSET_CAP:
+            logger.warning(
+                "backtest.activity_truncated",
+                extra={
+                    "leader": leader_address,
+                    "fetched": len(records),
+                    "offset_cap": _ACTIVITY_OFFSET_CAP,
+                    "start": str(start_date),
+                    "end": str(end_date),
+                    "detail": (
+                        "Polymarket /activity offset cap reached; trades "
+                        "beyond the 10,000th in this window were silently "
+                        "dropped (no cursor pagination available for this "
+                        "endpoint). Backtest results for this leader are "
+                        "based on a TRUNCATED activity history."
+                    ),
+                },
+            )
+
         # DataSource guarantees ascending timestamp order per fixture README,
         # but sort defensively for live source compatibility.
         return sorted(records, key=lambda r: r.timestamp)
@@ -628,37 +813,118 @@ class BacktestEngine:
         positions = await self._ds.get_positions(leader_address)
         return {p.condition_id: p for p in positions}
 
+    @staticmethod
+    def _derive_last_known_prices(
+        trade_log: list[dict[str, Any]],
+    ) -> dict[str, float]:
+        """Period-end last-known price per condition_id, from the trade log.
+
+        P1-10c (look-ahead bias fix).  The engine must value still-open
+        positions at the **last price observed *within* the backtest
+        window**, not at a live get_positions() snapshot taken at run time
+        (which reflects the leader's CURRENT — i.e. post-end_date — state and
+        would leak future information).
+
+        Every executed (non-skipped, non-MTM) trade-log entry already passed
+        the chronological ``[start_date, end_date]`` filter applied in
+        :meth:`_fetch_leader_trades`, and entries are appended in time order,
+        so the *last* ``fill_price`` recorded for a ``condition_id`` is, by
+        construction, that market's last in-window mark — provably free of
+        any datum dated after ``end_date``.
+
+        Args:
+            trade_log: The trade log built during :meth:`run` (pre-MTM).
+
+        Returns:
+            ``condition_id -> last in-window fill price``.
+        """
+        last: dict[str, float] = {}
+        for entry in trade_log:
+            if entry.get("skipped") or entry.get("side") == "MTM":
+                continue
+            cond = entry.get("condition_id")
+            fp = entry.get("fill_price")
+            if cond and fp is not None:
+                last[str(cond)] = float(fp)
+        return last
+
+    @staticmethod
+    def _resolution_flags(
+        cond_id: str,
+        positions_map: dict[str, PositionRecord],
+    ) -> tuple[bool | None, bool | None]:
+        """Best-effort (resolved, voided) flags sourced from position ``raw``.
+
+        Fixture data carries no resolution field, so both are ``None`` there
+        and the price-band settlement rule (P1-10b) is the load-bearing path.
+        For live data we read common Polymarket markers off the position's
+        ``raw`` blob *only* (never from a price/value computed at run time):
+
+        * voided/invalid  → ``raw.umaResolutionStatus == "void"`` or an
+          explicit ``raw.invalid``/``raw.voided`` truthy flag.
+        * resolved        → ``raw.resolved`` / ``raw.closed`` truthy, or
+          ``raw.umaResolutionStatus == "resolved"``.
+
+        Returns ``(None, None)`` when ``cond_id`` is unknown so the caller
+        falls back purely to the price-band snap.
+        """
+        p = positions_map.get(cond_id)
+        if p is None:
+            return (None, None)
+        raw = p.raw or {}
+        uma = str(raw.get("umaResolutionStatus") or "").lower()
+        voided = bool(
+            raw.get("voided")
+            or raw.get("invalid")
+            or uma in ("void", "voided", "invalid")
+        )
+        resolved_flag = raw.get("resolved")
+        closed_flag = raw.get("closed")
+        resolved: bool | None
+        if resolved_flag is not None or closed_flag is not None or uma:
+            resolved = bool(resolved_flag or closed_flag or uma == "resolved")
+        else:
+            resolved = None
+        # Only assert "not voided" when the raw blob actually carries a
+        # void/invalid/uma signal; otherwise leave it unknown (None) so the
+        # price-band rule alone decides.
+        void_signal_present = bool(
+            "voided" in raw or "invalid" in raw or uma
+        )
+        return (resolved, voided if void_signal_present else None)
+
     def _get_mtm_price(
         self,
         cond_id: str,
         pos: dict[str, Any],
-        positions_map: dict[str, PositionRecord],
+        last_in_window_price: dict[str, float],
+        positions_map: dict[str, PositionRecord],  # noqa: ARG002 — see docstring
     ) -> float:
-        """Return mark-to-market price for an open position.
+        """Return the look-ahead-free mark-to-market price for a position.
 
-        ASSUMPTION-MTM: use PositionRecord.current_value / size as last price;
-        fall back to the position's own entry price (→ zero MTM PnL) when no
-        position-snapshot record exists for ``cond_id``.
+        P1-10c: resolution order is
+
+        1. last in-window fill price for ``cond_id`` (derived from the trade
+           log — provably no post-``end_date`` data); else
+        2. the position's own entry price → ``shares * (price - entry) == 0``
+           (zero MTM PnL: "no new in-window information").
+
+        ``positions_map`` (a live get_positions() snapshot taken at run time)
+        is **deliberately no longer consulted for price** — using it was the
+        look-ahead bug, because it reflects the leader's CURRENT state, not
+        the state as-of ``end_date``.  It is still threaded through only so
+        :meth:`_resolution_flags` can read static resolution markers off
+        ``raw`` (which describe whether the market resolved, not a run-time
+        price); the parameter is otherwise unused here.
 
         This helper is called with two differently-shaped position dicts:
-
-        * copy positions built in :meth:`run` use the key ``"fill_price"``;
-        * leader positions built in :meth:`_update_leader_tracking` use the
-          key ``"price"``.
-
-        The original fallback hard-coded ``pos["fill_price"]`` and therefore
-        raised ``KeyError: 'fill_price'`` for every leader position whose
-        ``condition_id`` was absent from ``positions_map`` — i.e. any leader
-        still holding an open position with no matching position fixture
-        (reproducible with the scalper archetype).  We now accept either
-        key so both call sites are safe, defaulting to 0.0 only if neither
-        is present.
+        copy positions use the key ``"fill_price"``; leader positions use
+        ``"price"``.  Either is accepted (the prior code raised
+        ``KeyError: 'fill_price'`` for leader positions).
         """
-        if cond_id in positions_map:
-            p = positions_map[cond_id]
-            if p.size > 0.0:
-                return p.current_value / p.size
-        # Fallback: no new information → use the position's own entry price
+        if cond_id in last_in_window_price:
+            return float(last_in_window_price[cond_id])
+        # Fallback: no in-window mark → use the position's own entry price
         # so that shares * (last_price - entry_price) == 0 (zero MTM PnL).
         entry = pos.get("fill_price")
         if entry is None:
@@ -702,10 +968,23 @@ class BacktestEngine:
         idx = pd.date_range(str(start_date), str(end_date), freq="D").date
         daily: dict[date, float] = defaultdict(float, leader_daily_pnl)
 
-        # Add MTM for leader's open positions
+        # Add MTM for leader's open positions.
+        # P1-10c: a still-open leader position has, by definition, no later
+        # in-window SELL, so its last in-window mark IS its own entry price
+        # → zero MTM contribution (no look-ahead; the live positions_map
+        # snapshot, which reflects the leader's post-end_date state, is
+        # deliberately NOT used for price).  We still apply the P1-10b
+        # settlement snap and honour static void/resolution markers from
+        # the position raw blob.
         for cond_id, pos in leader_open.items():
-            mtm_price = self._get_mtm_price(cond_id, pos, positions_map)
-            pnl = pos["shares"] * (mtm_price - pos["price"])
+            resolved, voided = self._resolution_flags(cond_id, positions_map)
+            settle_price = compute_settlement_price(
+                pos["price"],
+                resolved=resolved,
+                voided=voided,
+                entry_price=pos["price"],
+            )
+            pnl = pos["shares"] * (settle_price - pos["price"])
             daily[end_date] += pnl
 
         series = pd.Series(
@@ -761,6 +1040,7 @@ class BacktestEngine:
         self,
         pnl_curve: pd.Series,
         trade_log: list[dict[str, Any]],
+        params: BacktestParams,
     ) -> dict[str, float]:
         """Compute summary statistics from the PnL curve and trade log.
 
@@ -782,13 +1062,21 @@ class BacktestEngine:
 
         total_return_usd = float(pnl_curve.iloc[-1])
 
-        # Annualised return (ASSUMPTION-ANNUALIZE)
+        # Annualised return (ASSUMPTION-ANNUALIZE).
+        # I6: the denominator MUST be the *initial capital*, not
+        # ``pnl_curve.iloc[0]``.  The PnL curve starts at day-1 *cumulative
+        # PnL above initial capital* — almost always 0.0 (no trade closes on
+        # the very first calendar day), and even when non-zero it is a
+        # meaningless, wildly volatile divisor.  Dividing by it produced
+        # absurd / undefined annualised returns.  Correct form per the
+        # mandate:
+        #     (total_return_usd / initial_capital_usd) * (365 / n_days) * 100
         n_days = len(pnl_curve)
-        if n_days > 0 and pnl_curve.iloc[0] != 0.0:
-            # Use simple linear scaling from total return
-            annualised_return_pct = (total_return_usd / abs(pnl_curve.iloc[0])) * (
-                365.0 / n_days
-            ) * 100.0
+        capital = float(params.initial_capital_usd)
+        if n_days > 0 and capital > 0.0:
+            annualised_return_pct = (
+                (total_return_usd / capital) * (365.0 / n_days) * 100.0
+            )
         else:
             annualised_return_pct = 0.0
 
@@ -811,17 +1099,22 @@ class BacktestEngine:
         else:
             win_rate = 0.0
 
-        # Average hold hours
+        # Average hold hours.
+        # I8: hold = SELL timestamp − the *matching BUY's* opened_at.  The
+        # old code computed SELL ``timestamp`` − SELL ``closed_at``; on a
+        # closing SELL both are the SELL's own timestamp, so every hold was
+        # ≈0 h.  The matching BUY open time is now carried on the SELL
+        # trade-log entry as ``opened_at`` (set in :meth:`run`).
         hold_hours: list[float] = []
         for entry in trade_log:
             if entry.get("skipped") or entry.get("side") in (None, "BUY", "MTM"):
                 continue
-            ts_str = entry.get("timestamp")
-            closed_str = entry.get("closed_at")
-            if not ts_str or not closed_str:
+            opened_str = entry.get("opened_at")
+            closed_str = entry.get("closed_at") or entry.get("timestamp")
+            if not opened_str or not closed_str:
                 continue
             try:
-                opened = datetime.fromisoformat(str(ts_str))
+                opened = datetime.fromisoformat(str(opened_str))
                 closed_dt = datetime.fromisoformat(str(closed_str))
                 hours = (closed_dt - opened).total_seconds() / 3600.0
                 if hours >= 0:
@@ -857,6 +1150,8 @@ class BacktestEngine:
             "copy_usdc": None,
             "copy_shares": None,
             "pnl_usd": 0.0,
+            "fee_usd": 0.0,
+            "opened_at": None,
             "closed_at": None,
             "skipped": True,
             "skip_reason": reason,

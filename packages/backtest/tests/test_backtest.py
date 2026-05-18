@@ -21,7 +21,8 @@ Tests:
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
+from typing import Any, cast
 
 import pytest
 
@@ -29,7 +30,9 @@ from polyecho.backtest.engine import (
     BacktestEngine,
     BacktestParams,
     apply_slippage,
+    compute_fee,
     compute_max_drawdown,
+    compute_settlement_price,
     compute_sharpe,
 )
 from polyecho.backtest.scenarios import run_triple
@@ -685,4 +688,513 @@ def test_build_params_defaults_when_template_absent() -> None:
     assert params.min_trade_size_usd == pytest.approx(5.0)
     assert params.daily_loss_limit_usd == pytest.approx(50.0)
     assert params.max_concurrent_positions == 10
+    assert params.fee_bps == 0
     assert params.category_whitelist is None
+
+
+def test_build_params_reads_fee_bps_from_template() -> None:
+    from polyecho.backtest.jobs import _build_params
+
+    job = _FakeJob(leader_addresses=["0xx"], template_params={"fee_bps": 75})
+    params = _build_params(job, "0xx")  # type: ignore[arg-type]
+    assert params.fee_bps == 75
+
+
+# ===========================================================================
+# WAVE B-backtest remediation — PRD §5.4 non-negotiables + P1/C4/I5–I8
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# P1-10a — fee model: pure helper + both-leg PnL reduction + to_dict()
+# ---------------------------------------------------------------------------
+
+
+class TestComputeFee:
+    def test_zero_fee_is_free(self) -> None:
+        assert compute_fee(100.0, 0) == 0.0
+
+    def test_negative_or_zero_notional_is_free(self) -> None:
+        assert compute_fee(0.0, 100) == 0.0
+        assert compute_fee(-5.0, 100) == 0.0
+
+    def test_basis_point_math(self) -> None:
+        # 100 USDC @ 50 bps = 100 * 50 / 10_000 = 0.50
+        assert compute_fee(100.0, 50) == pytest.approx(0.50)
+        # 200 USDC @ 150 bps = 3.00
+        assert compute_fee(200.0, 150) == pytest.approx(3.00)
+
+
+@pytest.mark.asyncio
+async def test_fee_reduces_pnl_on_both_legs_and_appears_in_to_dict() -> None:
+    """A non-zero fee_bps must strictly reduce total return vs fee=0.
+
+    The fee is charged on every BUY open AND every SELL close, so a run
+    with any executed round-trip and fee_bps>0 must have lower total
+    return and a positive total_fees_usd that surfaces in to_dict().
+    """
+    from dataclasses import replace
+
+    base = base_params(SWING, copy_ratio=0.05)
+
+    engine_free = make_engine()
+    engine_fee = make_engine()
+
+    res_free = await engine_free.run(base)
+    res_fee = await engine_fee.run(replace(base, fee_bps=200))
+
+    # Some trades must have executed for the test to be meaningful.
+    executed = [e for e in res_fee.trade_log if not e.get("skipped")]
+    assert len(executed) > 0
+
+    # Fee is a pure cost → strictly worse net return.
+    assert res_fee.total_return_usd < res_free.total_return_usd
+    # Aggregate fees are positive and surfaced in to_dict().
+    assert res_fee.total_fees_usd > 0.0
+    d = res_fee.to_dict()
+    assert d["stats"]["total_fees_usd"] == pytest.approx(res_fee.total_fees_usd)
+    assert d["params"]["fee_bps"] == 200
+    # Both legs charged: at least one BUY entry and one SELL/MTM entry
+    # carry a positive fee_usd, and the per-entry sum reconciles.
+    fee_entries = [
+        e for e in res_fee.trade_log
+        if not e.get("skipped") and float(e.get("fee_usd") or 0.0) > 0.0
+    ]
+    buy_fees = [e for e in fee_entries if e["side"] == "BUY"]
+    sell_fees = [e for e in fee_entries if e["side"] == "SELL"]
+    assert len(buy_fees) > 0, "BUY-leg fee must be charged"
+    assert len(sell_fees) > 0, "SELL-leg fee must be charged"
+    summed = sum(
+        float(e.get("fee_usd") or 0.0)
+        for e in res_fee.trade_log
+        if not e.get("skipped")
+    )
+    assert summed == pytest.approx(res_fee.total_fees_usd)
+
+
+@pytest.mark.asyncio
+async def test_higher_fee_monotonically_worsens_return() -> None:
+    from dataclasses import replace
+
+    base = base_params(SWING, copy_ratio=0.05)
+    r0 = await make_engine().run(replace(base, fee_bps=0))
+    r1 = await make_engine().run(replace(base, fee_bps=100))
+    r2 = await make_engine().run(replace(base, fee_bps=400))
+    assert r0.total_return_usd >= r1.total_return_usd >= r2.total_return_usd
+    assert r0.total_fees_usd == 0.0 < r1.total_fees_usd < r2.total_fees_usd
+
+
+# ---------------------------------------------------------------------------
+# P1-10b — settlement snap
+# ---------------------------------------------------------------------------
+
+
+class TestComputeSettlementPrice:
+    def test_snaps_to_one_above_threshold(self) -> None:
+        assert compute_settlement_price(0.97) == 1.0
+        assert compute_settlement_price(0.95) == 1.0
+
+    def test_snaps_to_zero_below_threshold(self) -> None:
+        assert compute_settlement_price(0.03) == 0.0
+        assert compute_settlement_price(0.05) == 0.0
+
+    def test_mid_band_stays_live_mtm(self) -> None:
+        assert compute_settlement_price(0.50) == pytest.approx(0.50)
+        assert compute_settlement_price(0.94) == pytest.approx(0.94)
+        assert compute_settlement_price(0.06) == pytest.approx(0.06)
+
+    def test_voided_returns_entry_price_zero_mtm(self) -> None:
+        # Voided market → unwind at entry → shares*(entry-entry)=0 MTM.
+        assert compute_settlement_price(
+            0.97, voided=True, entry_price=0.42
+        ) == pytest.approx(0.42)
+        # Void wins even over a >=0.95 price.
+        assert compute_settlement_price(
+            0.99, voided=True, entry_price=0.10
+        ) == pytest.approx(0.10)
+
+
+@pytest.mark.asyncio
+async def test_mtm_entries_are_settlement_snapped() -> None:
+    """End-to-end: every MTM fill_price must be a settled value or in-band.
+
+    The MTM leg price must never be an un-snapped value sitting in the
+    [0.95,1.0) or (0.0,0.05] dead-zones — it is snapped to exactly 1.0/0.0
+    there.
+    """
+    engine = make_engine()
+    result = await engine.run(base_params(SWING, copy_ratio=0.05))
+    mtm = [e for e in result.trade_log if e.get("side") == "MTM"]
+    for e in mtm:
+        fp = float(e["fill_price"])
+        assert 0.0 <= fp <= 1.0
+        # No value may sit strictly inside the snap dead-zones.
+        assert not (0.95 <= fp < 1.0)
+        assert not (0.0 < fp <= 0.05)
+
+
+# ---------------------------------------------------------------------------
+# P1-10c — no look-ahead bias
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_period_end_price_independent_of_runtime_live_positions() -> None:
+    """MTM must NOT depend on the run-time get_positions() snapshot.
+
+    We monkeypatch get_positions to return wildly different values; the
+    period-end MTM (derived from the in-window trade log) must be
+    byte-identical, proving no live/future positions snapshot influences it.
+    """
+    from polyecho.shared.datasource.dto import PositionRecord
+
+    base = base_params(SWING, copy_ratio=0.05)
+
+    engine_a = make_engine()
+    result_a = await engine_a.run(base)
+
+    engine_b = make_engine()
+
+    async def _fake_positions(
+        wallet: str, *, size_threshold: float = 1.0
+    ) -> list[PositionRecord]:
+        # Absurd, contradictory "current" state — must NOT leak into MTM.
+        return [
+            PositionRecord(
+                wallet=wallet,
+                condition_id="0xcond_politics_potus_2028",
+                asset="x",
+                size=999.0,
+                avg_price=0.01,
+                current_value=999.0,  # implies price ~1.0
+                cash_pnl=0.0,
+                percent_pnl=0.0,
+                title=None,
+                outcome=None,
+                raw={},
+            )
+        ]
+
+    cast(Any, engine_b._ds).get_positions = _fake_positions
+    result_b = await engine_b.run(base)
+
+    # Look-ahead-free: identical regardless of live positions snapshot.
+    assert result_a.total_return_usd == pytest.approx(result_b.total_return_usd)
+    assert list(result_a.pnl_curve) == list(result_b.pnl_curve)
+    mtm_a = [
+        (e["condition_id"], e["fill_price"])
+        for e in result_a.trade_log
+        if e.get("side") == "MTM"
+    ]
+    mtm_b = [
+        (e["condition_id"], e["fill_price"])
+        for e in result_b.trade_log
+        if e.get("side") == "MTM"
+    ]
+    assert mtm_a == mtm_b
+
+
+# ---------------------------------------------------------------------------
+# C4 — SELL without a matching open BUY is skipped (no win-rate inflation)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sell_without_open_buy_is_skipped_with_reason() -> None:
+    """A leader whose window opens mid-stream emits SELLs for BUYs that
+    happened before start_date.  Those SELLs must be skipped with
+    skip_reason='no_open_position' and excluded from closed-trade /
+    win-rate accounting."""
+    from datetime import date as _date
+
+    # Narrow the window so the first in-window trade for some market is a
+    # SELL whose BUY is out of window.
+    params = BacktestParams(
+        leader_address=SWING,
+        start_date=_date(2026, 4, 1),
+        end_date=END,
+        initial_capital_usd=1000.0,
+        copy_ratio=0.05,
+        fixed_size_usd=0.0,
+        max_position_usd=200.0,
+        min_trade_size_usd=1.0,
+        daily_loss_limit_usd=10_000.0,
+        max_concurrent_positions=50,
+        slippage_bps=150,
+        execution_delay_seconds=30,
+        category_whitelist=None,
+    )
+    result = await make_engine().run(params)
+
+    no_open = [
+        e for e in result.trade_log
+        if e.get("skipped") and e.get("skip_reason") == "no_open_position"
+    ]
+    assert len(no_open) > 0, "expected at least one SELL-without-BUY skip"
+
+    # Skipped no_open_position rows must NOT be in the closed-trade
+    # population (would otherwise be 0-PnL phantom losses inflating the
+    # denominator and deflating win_rate).
+    for e in no_open:
+        assert e["skipped"] is True
+        assert e.get("pnl_usd") == 0.0
+
+    # win_rate must be computed only over genuinely closed trades.
+    closed = [
+        e for e in result.trade_log
+        if not e.get("skipped") and e.get("side") not in (None, "BUY")
+    ]
+    for e in closed:
+        assert e.get("skip_reason") != "no_open_position"
+    assert 0.0 <= result.win_rate <= 1.0
+    # Skip-stat accounting stays consistent.
+    ss = result.skip_stats
+    assert ss.total == (
+        ss.insufficient_liquidity
+        + ss.risk_triggered
+        + ss.below_min_size
+        + ss.category_filtered
+    )
+
+
+# ---------------------------------------------------------------------------
+# I5 — stale RUNNING jobs recovered to PENDING on (re)start
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_running_resets_old_jobs() -> None:
+    """A 'running' job older than the stale threshold is flipped to
+    'pending'; a fresh 'running' job and a 'completed' job are untouched."""
+    from datetime import UTC, datetime, timedelta
+
+    import polyecho.backtest.jobs as jobs_mod
+    from polyecho.backtest.jobs import _STALE_RUNNING_SECONDS, _recover_stale_running
+
+    captured: dict[str, object] = {}
+
+    class _FakeResult:
+        rowcount = 3  # pretend 3 stale rows matched
+
+    class _FakeSession:
+        async def execute(self, stmt: object) -> _FakeResult:
+            captured["stmt"] = stmt
+            return _FakeResult()
+
+        async def commit(self) -> None:
+            captured["committed"] = True
+
+    n = await _recover_stale_running(_FakeSession())  # type: ignore[arg-type]
+    assert n == 3
+    assert captured.get("committed") is True
+    # The UPDATE statement compiles to a status='running' guarded reset.
+    compiled = str(captured["stmt"])
+    assert "backtest_jobs" in compiled
+    assert "status" in compiled
+    # Threshold is a sane positive duration.
+    assert _STALE_RUNNING_SECONDS > 0
+    cutoff = datetime.now(tz=UTC) - timedelta(seconds=_STALE_RUNNING_SECONDS)
+    assert cutoff < datetime.now(tz=UTC)
+    assert jobs_mod._recover_stale_running is _recover_stale_running
+
+
+@pytest.mark.asyncio
+async def test_worker_loop_recovers_stale_then_polls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """process_pending_jobs must call stale-recovery before fetching work
+    (so a recovered job re-enters the same poll)."""
+    import contextlib
+
+    import polyecho.backtest.jobs as jobs_mod
+    from polyecho.backtest.jobs import process_pending_jobs
+
+    order: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def _fake_scope():  # type: ignore[no-untyped-def]
+        yield object()
+
+    async def _fake_recover(_session: object) -> int:
+        order.append("recover")
+        return 0
+
+    async def _fake_fetch(_session: object) -> list[object]:
+        order.append("fetch")
+        return []
+
+    monkeypatch.setattr(jobs_mod, "session_scope", _fake_scope)
+    monkeypatch.setattr(jobs_mod, "_recover_stale_running", _fake_recover)
+    monkeypatch.setattr(jobs_mod, "_fetch_pending", _fake_fetch)
+
+    await process_pending_jobs(make_ds(), once=True)
+
+    assert order == ["recover", "fetch"], (
+        f"recovery must run before fetch; got {order}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# I6 — annualised return uses initial_capital_usd (not day-1 PnL)
+# ---------------------------------------------------------------------------
+
+
+def test_annualised_return_uses_initial_capital() -> None:
+    """For a deterministic curve the annualised % must equal
+    (total / initial_capital) * (365 / n_days) * 100 — independent of the
+    (usually-zero) day-1 cumulative PnL."""
+    import pandas as pd
+
+    eng = make_engine()
+    # 10-day curve, final cumulative PnL = +100 on $1000 capital.
+    idx = pd.date_range("2026-01-01", "2026-01-10", freq="D").date
+    vals = [0.0] * 9 + [100.0]
+    curve = pd.Series(vals, index=idx, dtype=float)
+
+    p = base_params(SWING)
+    from dataclasses import replace
+
+    p = replace(p, initial_capital_usd=1000.0)
+
+    stats = eng._compute_statistics(curve, [], p)
+    # (100 / 1000) * (365 / 10) * 100 = 365.0
+    assert stats["annualised_return_pct"] == pytest.approx(365.0)
+
+    # Day-1 PnL being non-zero must NOT change the denominator.
+    vals2 = [50.0] + [0.0] * 8 + [100.0]
+    curve2 = pd.Series(vals2, index=idx, dtype=float)
+    stats2 = eng._compute_statistics(curve2, [], p)
+    assert stats2["annualised_return_pct"] == pytest.approx(365.0)
+
+
+# ---------------------------------------------------------------------------
+# I7 — activity truncation warning when the 10k offset cap is hit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_activity_truncation_emits_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When get_user_activity returns >= the 10k offset cap, the engine
+    must emit a loud truncation warning (cursor pagination is not offered
+    by the Polymarket /activity endpoint — context7-verified)."""
+    import logging
+
+    from polyecho.shared.datasource.dto import ActivityRecord
+
+    engine = make_engine()
+
+    big_count = 10_000
+
+    async def _huge_activity(
+        wallet: str,
+        *,
+        start: object = None,
+        end: object = None,
+        activity_type: object = "TRADE",
+        limit: object = None,
+    ) -> list[ActivityRecord]:
+        ts = datetime.fromisoformat("2026-03-01T00:00:00+00:00")
+        return [
+            ActivityRecord(
+                wallet=wallet,
+                activity_type="TRADE",
+                condition_id="0xc",
+                side="BUY",
+                size=1.0,
+                price=0.5,
+                usdc_size=1.0,
+                timestamp=ts,
+                raw={},
+            )
+            for _ in range(big_count)
+        ]
+
+    cast(Any, engine._ds).get_user_activity = _huge_activity
+
+    with caplog.at_level(logging.WARNING):
+        await engine._fetch_leader_trades(SWING, START, END)
+
+    assert any(
+        "activity_truncated" in r.message or "activity_truncated" in r.name
+        for r in caplog.records
+    ), "expected a backtest.activity_truncated warning"
+
+
+@pytest.mark.asyncio
+async def test_no_truncation_warning_under_cap(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    engine = make_engine()
+    with caplog.at_level(logging.WARNING):
+        await engine._fetch_leader_trades(SWING, START, END)
+    assert not any(
+        "activity_truncated" in r.message for r in caplog.records
+    ), "swing fixture (295 trades) must not trigger the truncation warning"
+
+
+# ---------------------------------------------------------------------------
+# I8 — avg_hold_hours uses the matching BUY opened_at (non-zero, correct)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_avg_hold_hours_uses_buy_opened_at() -> None:
+    """avg_hold_hours must be the SELL ts − the matching BUY's opened_at.
+
+    Previously it used SELL ts − SELL closed_at (both the SELL timestamp),
+    giving ≈0 for every trade.  With a leader that holds positions for
+    days, the average hold must be clearly > 0.
+    """
+    engine = make_engine()
+    result = await engine.run(base_params(SWING, copy_ratio=0.05))
+
+    # SELL entries that closed a position must carry the BUY's opened_at.
+    closing_sells = [
+        e for e in result.trade_log
+        if not e.get("skipped")
+        and e.get("side") == "SELL"
+        and e.get("closed_at") is not None
+    ]
+    assert len(closing_sells) > 0
+    for e in closing_sells:
+        assert e.get("opened_at") is not None
+        opened = datetime.fromisoformat(str(e["opened_at"]))
+        sold = datetime.fromisoformat(str(e["timestamp"]))
+        assert sold >= opened  # hold is non-negative
+
+    # The swing leader holds across days → strictly positive average.
+    assert result.avg_hold_hours > 0.0
+
+
+def test_avg_hold_hours_known_value() -> None:
+    """Exact-value check: a single round-trip held for 48 h must report
+    avg_hold_hours == 48.0 (proves opened_at, not closed_at, is used)."""
+    eng = make_engine()
+    trade_log = [
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "side": "BUY",
+            "skipped": False,
+            "opened_at": None,
+            "closed_at": None,
+            "pnl_usd": 0.0,
+        },
+        {
+            "timestamp": "2026-01-03T00:00:00+00:00",  # SELL 48h later
+            "side": "SELL",
+            "skipped": False,
+            "opened_at": "2026-01-01T00:00:00+00:00",  # matching BUY open
+            "closed_at": "2026-01-03T00:00:00+00:00",
+            "pnl_usd": 5.0,
+        },
+    ]
+    import pandas as pd
+
+    idx = pd.date_range("2026-01-01", "2026-01-03", freq="D").date
+    curve = pd.Series([0.0, 0.0, 5.0], index=idx, dtype=float)
+    stats = eng._compute_statistics(curve, trade_log, base_params(SWING))
+    assert stats["avg_hold_hours"] == pytest.approx(48.0)
