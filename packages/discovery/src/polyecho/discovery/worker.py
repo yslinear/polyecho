@@ -46,6 +46,10 @@ from typing import Any
 
 from sqlalchemy import select
 
+from polyecho.discovery._perf import (
+    DISCOVERY_CYCLE_TARGET_SECONDS,
+    perf_timer,
+)
 from polyecho.discovery.frequency import (
     FrequencyStats,
     StrategyType,
@@ -843,21 +847,58 @@ class DiscoveryWorker:
     # Orchestration helpers
     # ------------------------------------------------------------------
 
+    def _log_cycle_duration(self, cycle: str, seconds: float) -> None:
+        """Emit the ``discovery_cycle_seconds`` structured log line.
+
+        PRD §7.1 — a full recompute should complete in < 30 min.
+        STRICTLY best-effort: the body is wrapped so a logging / len()
+        failure can never propagate into the discovery pass.  No event is
+        emitted (the shared ``EventType`` enum is frozen) — LOG field only.
+        ``candidate_count`` is the number of distinct candidate wallets
+        accumulated so far (``self._known_wallets``).
+        """
+        try:
+            if seconds < 0:
+                # Sentinel from a misbehaving monotonic clock — skip.
+                return
+            logger.info(
+                "discovery_cycle_complete",
+                extra={
+                    "cycle": cycle,
+                    "discovery_cycle_seconds": round(seconds, 3),
+                    "discovery_cycle_target_seconds": (
+                        DISCOVERY_CYCLE_TARGET_SECONDS
+                    ),
+                    "candidate_count": len(self._known_wallets),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - observability best-effort
+            logger.debug(
+                "discovery_cycle_log_failed_continuing",
+                extra={"error": str(exc)},
+            )
+
     async def run_daily(self) -> None:
         """Run the daily discovery pipeline (sources 1 + 2, PRD §5.2)."""
         logger.info("run_daily: start")
-        await self.discover_leaderboard()
-        await self.discover_hot_market_holders()
+        with perf_timer() as elapsed:
+            await self.discover_leaderboard()
+            await self.discover_hot_market_holders()
         logger.info("run_daily: complete")
+        self._log_cycle_duration("daily", elapsed[0])
 
     async def run_hourly(self) -> None:
         """Run the hourly discovery pipeline (source 3, PRD §5.2)."""
         logger.info("run_hourly: start")
-        await self.discover_large_new_positions()
+        with perf_timer() as elapsed:
+            await self.discover_large_new_positions()
         logger.info("run_hourly: complete")
+        self._log_cycle_duration("hourly", elapsed[0])
 
     async def run_weekly(self) -> None:
         """Run the weekly seed sync (source 4, PRD §5.2)."""
         logger.info("run_weekly: start")
-        await self.sync_smart_money_seed()
+        with perf_timer() as elapsed:
+            await self.sync_smart_money_seed()
         logger.info("run_weekly: complete")
+        self._log_cycle_duration("weekly", elapsed[0])

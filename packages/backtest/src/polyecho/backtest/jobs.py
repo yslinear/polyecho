@@ -28,6 +28,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from polyecho.backtest._perf import BACKTEST_TARGET_SECONDS, perf_timer
 from polyecho.backtest.engine import BacktestEngine, BacktestParams
 from polyecho.backtest.scenarios import run_triple
 from polyecho.shared.datasource import DataSource
@@ -129,22 +130,26 @@ async def _process_job(job: BacktestJob, engine: BacktestEngine) -> None:
     all_results: dict[str, Any] = {}
     n = len(leaders)
 
-    for i, leader in enumerate(leaders):
-        try:
-            params = _build_params(job, leader)
-            triple = await run_triple(engine, params, leader)
-            all_results[leader] = triple
-        except Exception as exc:
-            logger.warning(
-                "jobs.leader_error",
-                extra={"job_id": str(job_id), "leader": leader, "error": type(exc).__name__},
-            )
-            all_results[leader] = {"error": type(exc).__name__ + ": " + str(exc)[:200]}
+    # PRD §7.1 — a single 90-day backtest should complete in < 60 s.
+    # Best-effort monotonic timing around the actual compute; the timer
+    # cannot raise into the job outcome (see polyecho.backtest._perf).
+    with perf_timer() as elapsed:
+        for i, leader in enumerate(leaders):
+            try:
+                params = _build_params(job, leader)
+                triple = await run_triple(engine, params, leader)
+                all_results[leader] = triple
+            except Exception as exc:
+                logger.warning(
+                    "jobs.leader_error",
+                    extra={"job_id": str(job_id), "leader": leader, "error": type(exc).__name__},
+                )
+                all_results[leader] = {"error": type(exc).__name__ + ": " + str(exc)[:200]}
 
-        # Update progress (0→1 range, per PRD §6.1)
-        progress = (i + 1) / n if n else 1.0
-        async with session_scope() as session:
-            await _set_status(session, job_id, "running", progress=progress * 100.0)
+            # Update progress (0→1 range, per PRD §6.1)
+            progress = (i + 1) / n if n else 1.0
+            async with session_scope() as session:
+                await _set_status(session, job_id, "running", progress=progress * 100.0)
 
     async with session_scope() as session:
         await _set_status(
@@ -154,7 +159,22 @@ async def _process_job(job: BacktestJob, engine: BacktestEngine) -> None:
             progress=100.0,
             result={"leaders": all_results},
         )
-    logger.info("jobs.done", extra={"job_id": str(job_id)})
+    # Best-effort backtest-duration observability — wrapped so a
+    # timing/log failure can NEVER affect the completed job outcome.
+    # No event is emitted (shared ``EventType`` is frozen) — LOG only.
+    _done_extra: dict[str, Any] = {"job_id": str(job_id)}
+    try:
+        _secs = elapsed[0]
+        if _secs >= 0:
+            _done_extra["backtest_seconds"] = round(_secs, 3)
+            _done_extra["backtest_target_seconds"] = BACKTEST_TARGET_SECONDS
+            _done_extra["n_leaders"] = n
+    except Exception as exc:  # noqa: BLE001 - observability is best-effort
+        logger.debug(
+            "backtest_seconds_log_failed_continuing",
+            extra={"error": str(exc)},
+        )
+    logger.info("jobs.done", extra=_done_extra)
 
 
 async def _recover_stale_running(session: AsyncSession) -> int:

@@ -34,6 +34,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from polyecho.core._perf import (
+    COPY_LATENCY_TARGET_MS,
+    detect_lag_ms,
+    perf_timer,
+)
 from polyecho.core.detection import (
     ChainCrossCheckListener,
     DetectedTrade,
@@ -140,6 +145,13 @@ class _Stats:
     placed: int = 0
     errors: int = 0
     skip_reasons: dict[str, int] = field(default_factory=dict)
+    #: Observability only (PRD §7.1) — best-effort copy-trade latency
+    #: accumulators surfaced on ``run_once_complete``.  These are NOT
+    #: counters consumed by the exit-code contract; ``degenerate_once_pass``
+    #: never reads them, so a timing failure cannot change ``--once``.
+    copy_latency_ms_total: float = 0.0
+    copy_latency_samples: int = 0
+    copy_latency_ms_max: float = 0.0
 
 
 class TraderCore:
@@ -567,35 +579,109 @@ class TraderCore:
     # ------------------------------------------------------------------
 
     async def process_detected(self, trade: DetectedTrade) -> None:
-        """Run one detected trade through the full pipeline (brief §3/§4)."""
+        """Run one detected trade through the full pipeline (brief §3/§4).
+
+        Observability (PRD §7.1 copy-trade latency < 5 s; PRD §2.3
+        on-chain timestamp lag): the detection→decision/placement-or-skip
+        path is wrapped in a best-effort monotonic timer.  The
+        ``copy_trade_processed`` log line carries ``copy_latency_ms`` (and
+        ``detect_lag_ms`` when the leader trade carries a source ts).  The
+        timing is strictly best-effort — it cannot raise into the trade
+        path and never changes control flow or the exit-code contract.
+        """
         self.stats.detected += 1
         leader = str(trade["leader_address"]).lower()
         tx_hash = str(trade["tx_hash"])
 
         # Idempotency layers 1 & 2 (brief §3): per-tx lock + LRU.
         lock = self._dedup.lock_for(leader, tx_hash)
-        async with lock:
-            if not self._dedup.claim(leader, tx_hash):
-                self.stats.deduped += 1
-                logger.info(
-                    "trade_deduped",
-                    extra={"leader": leader, "tx_hash": tx_hash},
-                )
-                return
+        with perf_timer() as elapsed:
+            async with lock:
+                if not self._dedup.claim(leader, tx_hash):
+                    self.stats.deduped += 1
+                    logger.info(
+                        "trade_deduped",
+                        extra={"leader": leader, "tx_hash": tx_hash},
+                    )
+                    return
 
-            condition_id = str(trade.get("condition_id") or "")
-            checked_accounts: set[uuid.UUID] = set()
-            for spec in self._follows:
-                if spec.leader_address.lower() != leader:
-                    continue
-                # SYSTEM_LOW_BALANCE: probe each funding account at most
-                # once per detected trade (edge-triggered inside the
-                # helper — emits once on the downward crossing, never
-                # once-per-poll).  No-op unless a balance probe is wired.
-                if spec.account_id not in checked_accounts:
-                    checked_accounts.add(spec.account_id)
-                    await self._check_low_balance(spec.account_id)
-                await self._process_for_follow(spec, trade, condition_id, tx_hash)
+                condition_id = str(trade.get("condition_id") or "")
+                await self._process_follows(
+                    trade, leader, tx_hash, condition_id
+                )
+
+        # Best-effort copy-trade latency observability — wrapped so a
+        # timing/log failure can NEVER propagate into the trade outcome.
+        self._log_copy_latency(trade, leader, tx_hash, elapsed[0])
+
+    async def _process_follows(
+        self,
+        trade: DetectedTrade,
+        leader: str,
+        tx_hash: str,
+        condition_id: str,
+    ) -> None:
+        """Fan one detected trade out to every matching follow spec.
+
+        Extracted verbatim from :meth:`process_detected` so the
+        copy-latency timer can wrap exactly the detection→decision/
+        placement-or-skip path without altering any control flow.
+        """
+        checked_accounts: set[uuid.UUID] = set()
+        for spec in self._follows:
+            if spec.leader_address.lower() != leader:
+                continue
+            # SYSTEM_LOW_BALANCE: probe each funding account at most
+            # once per detected trade (edge-triggered inside the
+            # helper — emits once on the downward crossing, never
+            # once-per-poll).  No-op unless a balance probe is wired.
+            if spec.account_id not in checked_accounts:
+                checked_accounts.add(spec.account_id)
+                await self._check_low_balance(spec.account_id)
+            await self._process_for_follow(spec, trade, condition_id, tx_hash)
+
+    def _log_copy_latency(
+        self,
+        trade: DetectedTrade,
+        leader: str,
+        tx_hash: str,
+        copy_latency_ms: float,
+    ) -> None:
+        """Emit the per-trade copy-latency structured log line.
+
+        PRD §7.1 (copy-trade latency < 5 s) + PRD §2.3 (compare against
+        the on-chain timestamp).  STRICTLY best-effort: the whole body is
+        wrapped so a clock / arithmetic / logging failure can never
+        propagate into the trade outcome.  No event is emitted (the
+        shared ``EventType`` enum is frozen) — this is a LOG field only.
+        """
+        try:
+            if copy_latency_ms < 0:
+                # Sentinel from a misbehaving monotonic clock — skip the
+                # line entirely rather than log a bogus negative latency.
+                return
+            lag_ms = detect_lag_ms(trade.get("timestamp"))
+            extra: dict[str, Any] = {
+                "leader": leader,
+                "tx_hash": tx_hash,
+                "copy_latency_ms": round(copy_latency_ms, 3),
+                "copy_latency_target_ms": COPY_LATENCY_TARGET_MS,
+            }
+            if lag_ms is not None:
+                extra["detect_lag_ms"] = round(lag_ms, 3)
+            logger.info("copy_trade_processed", extra=extra)
+            # Aggregate accumulators for ``run_once_complete`` (best-effort;
+            # never read by the exit-code contract).
+            self.stats.copy_latency_ms_total += copy_latency_ms
+            self.stats.copy_latency_samples += 1
+            if copy_latency_ms > self.stats.copy_latency_ms_max:
+                self.stats.copy_latency_ms_max = copy_latency_ms
+        except Exception as exc:  # noqa: BLE001 - observability is best-effort
+            # A timing/log failure must NEVER affect the trade outcome.
+            logger.debug(
+                "copy_latency_log_failed_continuing",
+                extra={"error": str(exc)},
+            )
 
     async def _process_for_follow(
         self,
@@ -815,6 +901,20 @@ class TraderCore:
         # P1-5: end-of-cycle heartbeat — refreshes the timestamp + final
         # per-pass counters so ``trader status`` reflects the latest poll.
         await self._write_heartbeat(phase="cycle_complete")
+        # Aggregate copy-trade latency (PRD §7.1) — best-effort, computed
+        # so a divide / attribute slip can never break the pass summary.
+        try:
+            _samples = self.stats.copy_latency_samples
+            _avg_ms = (
+                round(self.stats.copy_latency_ms_total / _samples, 3)
+                if _samples > 0
+                else None
+            )
+            _max_ms = (
+                round(self.stats.copy_latency_ms_max, 3) if _samples > 0 else None
+            )
+        except Exception:  # noqa: BLE001 - observability is best-effort
+            _samples, _avg_ms, _max_ms = 0, None, None
         logger.info(
             "run_once_complete",
             extra={
@@ -824,6 +924,10 @@ class TraderCore:
                 "skipped": self.stats.skipped,
                 "placed": self.stats.placed,
                 "live_enabled": is_live_enabled(),
+                "copy_latency_samples": _samples,
+                "copy_latency_ms_avg": _avg_ms,
+                "copy_latency_ms_max": _max_ms,
+                "copy_latency_target_ms": COPY_LATENCY_TARGET_MS,
             },
         )
         return self.stats
