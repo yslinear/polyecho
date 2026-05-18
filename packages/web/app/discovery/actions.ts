@@ -53,12 +53,31 @@ const LEADER_STATUSES: ReadonlySet<string> = new Set<LeaderStatus>([
 ]);
 
 /**
+ * rev-web R16 HIGH: `wallet` is persisted into `backtest_jobs.leader_addresses`
+ * and a Server Action is a public RPC. Validate it is a non-empty, bounded
+ * `0x`-prefixed 40-hex-char EVM address shape BEFORE the insert (the client
+ * island only ever sends a discovered candidate address; an arbitrary /
+ * unbounded string must never reach the DB).
+ */
+const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
+/**
  * quickBacktest — one-click 90-day Balanced backtest for a single leader.
  * Returns the new job id; the caller toasts + navigates to /backtest/<id>.
  */
 export async function quickBacktest(
   wallet: string
 ): Promise<{ id: string }> {
+  // R16 HIGH: reject non-string / empty / over-long / non-address shapes
+  // with a clear zh-TW error before any DB write.
+  const w = (wallet ?? "").trim();
+  if (w.length === 0) {
+    throw new Error("缺少領單者錢包位址");
+  }
+  if (w.length > 64 || !EVM_ADDRESS_RE.test(w)) {
+    throw new Error(`領單者錢包位址格式錯誤：${w.slice(0, 64)}`);
+  }
+
   const end = new Date();
   const start = new Date(end);
   start.setUTCDate(start.getUTCDate() - QUICK_BACKTEST_WINDOW_DAYS);
@@ -76,7 +95,7 @@ export async function quickBacktest(
   const [inserted] = await db
     .insert(backtestJobs)
     .values({
-      leader_addresses: [wallet],
+      leader_addresses: [w],
       template_params: templateParams,
       start_date: isoDate(start),
       end_date: isoDate(end),

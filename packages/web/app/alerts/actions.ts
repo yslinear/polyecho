@@ -232,6 +232,110 @@ const PENDING_TTL_SECONDS = 300;
  */
 const MIN_CONFIRM_AGE_SECONDS = 5;
 
+/**
+ * rev-web R16 IMP: FIXED uniform "already resolved" message. Returned for
+ * ANY non-`awaiting_confirm` status (confirmed / rejected / expired / …) so
+ * the response cannot be used as a per-status oracle to enumerate UUIDs.
+ * Mirrors the Python `ALREADY_RESOLVED` uniform behaviour.
+ */
+const ALREADY_RESOLVED_MESSAGE =
+  "此操作目前無法處理（可能已確認、已取消或已逾時）。";
+
+/**
+ * rev-web R16 HIGH: shared danger-gate for the operator two-factor flow.
+ *
+ * Both `confirmPendingAction` AND `rejectPendingAction` MUST run the SAME
+ * operator-passphrase-proven gate before mutating an `awaiting_confirm` row.
+ * Previously `rejectPendingAction` had NO gate, so anyone reaching the
+ * unauthenticated localhost Server Action with a valid UUID could cancel a
+ * legitimate operator confirmation WITHOUT the danger passphrase — defeating
+ * the 2-factor danger flow. The gates, in order (all FAIL CLOSED):
+ *
+ *  (a) row must exist, be `awaiting_confirm`, and not past `expires_at`;
+ *  (b) SERVER-SIDE min-age (`now - created_at >= 5s`) against the DB
+ *      `created_at` (we do NOT trust any client countdown);
+ *  (c) `settings.danger_passphrase_hash` must be provisioned (else reject —
+ *      NEVER auto-provision);
+ *  (d) constant-time verify the submitted passphrase against that FROZEN
+ *      canonical stored string.
+ *
+ * Returns `{ ok: true }` only when ALL gates pass; the caller then performs
+ * its specific status transition (`confirmed` / `rejected`). The legitimate
+ * operator path is unchanged (it already supplied the passphrase).
+ */
+async function dangerGate(
+  id: string,
+  passphrase: string
+): Promise<ConfirmPendingResult> {
+  const pid = (id ?? "").trim();
+  const pass = passphrase ?? "";
+  if (!pid) return { ok: false, message: "缺少操作識別碼。" };
+  if (pass.length < 1) return { ok: false, message: "請輸入確認通行碼。" };
+
+  // (a) load the row.
+  const [row] = await db
+    .select({
+      id: pendingActions.id,
+      status: pendingActions.status,
+      expires_at: pendingActions.expires_at,
+      created_at: pendingActions.created_at,
+    })
+    .from(pendingActions)
+    .where(eq(pendingActions.id, pid))
+    .limit(1);
+
+  if (!row) return { ok: false, message: "找不到此操作，可能已逾時清除。" };
+  if (row.status !== "awaiting_confirm") {
+    // R16 IMP: uniform message — no per-status oracle.
+    return { ok: false, message: ALREADY_RESOLVED_MESSAGE };
+  }
+  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
+    return { ok: false, message: "此操作已逾時，請重新建立。" };
+  }
+
+  // (b) SERVER-SIDE minimum-age gate — authoritative against created_at, NOT
+  // the client countdown. A missing/unparseable created_at fails closed.
+  const createdMs = row.created_at
+    ? new Date(row.created_at).getTime()
+    : Number.NaN;
+  if (!Number.isFinite(createdMs)) {
+    return { ok: false, message: "此操作建立時間異常，請重新建立。" };
+  }
+  const ageMs = Date.now() - createdMs;
+  if (ageMs < MIN_CONFIRM_AGE_SECONDS * 1000) {
+    const waitS = Math.ceil((MIN_CONFIRM_AGE_SECONDS * 1000 - ageMs) / 1000);
+    return {
+      ok: false,
+      message: `為避免誤觸，請於建立後至少 ${MIN_CONFIRM_AGE_SECONDS} 秒再操作（尚需 ${waitS} 秒）。`,
+    };
+  }
+
+  // (c) read the operator-provisioned danger passphrase hash. FAIL CLOSED if
+  // it has not been provisioned — never auto-provision / derive it here.
+  const [hashRow] = await db
+    .select({ value: settings.value })
+    .from(settings)
+    .where(eq(settings.key, DANGER_PASSPHRASE_HASH_KEY))
+    .limit(1);
+  const storedHash = coerceStringSetting(hashRow?.value).trim();
+  if (!storedHash) {
+    return {
+      ok: false,
+      message:
+        "危險操作密碼尚未設定，請先用 CLI `polyecho account set-danger-passphrase` 佈建後再試。",
+    };
+  }
+
+  // (d) constant-time verify against the FROZEN canonical stored string.
+  const valid = await verifyPassphrase(pass, storedHash);
+  if (!valid) {
+    // Do NOT consume the row — let the TTL expire it.
+    return { ok: false, message: "通行碼錯誤。請重試（操作仍待確認）。" };
+  }
+
+  return { ok: true, message: "" };
+}
+
 export interface CreatePendingResult {
   ok: boolean;
   message: string;
@@ -307,76 +411,11 @@ export async function confirmPendingAction(
   id: string,
   passphrase: string
 ): Promise<ConfirmPendingResult> {
-  const pid = (id ?? "").trim();
-  const pass = passphrase ?? "";
-  if (!pid) return { ok: false, message: "缺少操作識別碼。" };
-  if (pass.length < 1) return { ok: false, message: "請輸入確認通行碼。" };
+  // Gates (a)-(d) — shared with rejectPendingAction (R16 HIGH).
+  const gate = await dangerGate(id, passphrase);
+  if (!gate.ok) return gate;
 
-  // (a) load the row.
-  const [row] = await db
-    .select({
-      id: pendingActions.id,
-      status: pendingActions.status,
-      expires_at: pendingActions.expires_at,
-      created_at: pendingActions.created_at,
-    })
-    .from(pendingActions)
-    .where(eq(pendingActions.id, pid))
-    .limit(1);
-
-  if (!row) return { ok: false, message: "找不到此操作，可能已逾時清除。" };
-  if (row.status !== "awaiting_confirm") {
-    return {
-      ok: false,
-      message: `此操作已是「${row.status}」狀態，無法重複確認。`,
-    };
-  }
-  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
-    return { ok: false, message: "此操作已逾時，請重新建立。" };
-  }
-
-  // (b) SERVER-SIDE minimum-age gate — authoritative against created_at, NOT
-  // the client countdown. A missing/unparseable created_at fails closed.
-  const createdMs = row.created_at
-    ? new Date(row.created_at).getTime()
-    : Number.NaN;
-  if (!Number.isFinite(createdMs)) {
-    return { ok: false, message: "此操作建立時間異常，請重新建立。" };
-  }
-  const ageMs = Date.now() - createdMs;
-  if (ageMs < MIN_CONFIRM_AGE_SECONDS * 1000) {
-    const waitS = Math.ceil(
-      (MIN_CONFIRM_AGE_SECONDS * 1000 - ageMs) / 1000
-    );
-    return {
-      ok: false,
-      message: `為避免誤觸，請於建立後至少 ${MIN_CONFIRM_AGE_SECONDS} 秒再確認（尚需 ${waitS} 秒）。`,
-    };
-  }
-
-  // (c) read the operator-provisioned danger passphrase hash. FAIL CLOSED if
-  // it has not been provisioned — never auto-provision / derive it here.
-  const [hashRow] = await db
-    .select({ value: settings.value })
-    .from(settings)
-    .where(eq(settings.key, DANGER_PASSPHRASE_HASH_KEY))
-    .limit(1);
-  const storedHash = coerceStringSetting(hashRow?.value).trim();
-  if (!storedHash) {
-    return {
-      ok: false,
-      message:
-        "危險操作密碼尚未設定，請先用 CLI `polyecho account set-danger-passphrase` 佈建後再試。",
-    };
-  }
-
-  // (d) constant-time verify against the FROZEN canonical stored string.
-  const valid = await verifyPassphrase(pass, storedHash);
-  if (!valid) {
-    // Do NOT consume the row — let the TTL expire it.
-    return { ok: false, message: "通行碼錯誤。請重試（操作仍待確認）。" };
-  }
-
+  const pid = id.trim();
   // (e) success — flip to confirmed. We NEVER write the passphrase hash.
   await db
     .update(pendingActions)
@@ -394,12 +433,26 @@ export async function confirmPendingAction(
   };
 }
 
-/** rejectPendingAction — operator cancels before confirming (safe write). */
+/**
+ * rejectPendingAction — operator cancels a pending danger operation.
+ *
+ * rev-web R16 HIGH: this is NO LONGER an ungated "safe write". Cancelling a
+ * legitimate operator confirmation is itself a danger-flow action (it
+ * defeats a confirmed/awaiting 2-factor operation), so it now requires the
+ * SAME operator danger-passphrase proof as confirm — verified against the
+ * pre-provisioned `settings.danger_passphrase_hash`, fail-closed if unset,
+ * with the server-side 5s min-age gate. Behaviour for the legitimate
+ * operator (who has the passphrase) is unchanged: they can still cancel.
+ */
 export async function rejectPendingAction(
-  id: string
+  id: string,
+  passphrase: string
 ): Promise<ConfirmPendingResult> {
-  const pid = (id ?? "").trim();
-  if (!pid) return { ok: false, message: "缺少操作識別碼。" };
+  // Gates (a)-(d) — identical to confirmPendingAction (R16 HIGH).
+  const gate = await dangerGate(id, passphrase);
+  if (!gate.ok) return gate;
+
+  const pid = id.trim();
   await db
     .update(pendingActions)
     .set({ status: "rejected" })

@@ -14,14 +14,22 @@
  *     GETs are same-origin reads; gating them would break the dashboard.
  *   - Mutating methods (POST/PUT/PATCH/DELETE — Server Action invocations
  *     are POSTs):
- *       * If an `Origin` header is present it MUST exactly equal one of the
- *         allowed local origins: `http://localhost:<port>` or
- *         `http://127.0.0.1:<port>`, where <port> = POLYECHO_WEB_PORT
- *         (default 3000). Anything else (including `null`, a remote origin,
- *         or https) -> 403.
- *       * If there is NO `Origin` header, fall back to the `Host` header: it
- *         must be `localhost:<port>` / `127.0.0.1:<port>` (or the bare host
- *         when the port is the default). A missing/foreign Host -> 403.
+ *       * If an `Origin` header is PRESENT (rev-web R17: present means the
+ *         header exists at all — INCLUDING an explicit empty string `""`,
+ *         which `req.headers.get` returns as `""` not `null`) it MUST
+ *         exactly equal one of the allowed local origins:
+ *         `http://localhost:<port>` or `http://127.0.0.1:<port>`, where
+ *         <port> = POLYECHO_WEB_PORT (default 3000). Anything else
+ *         (including `""`, `null`, a remote origin, or https) -> 403.
+ *         An empty-string Origin must NOT fall through to the weaker Host
+ *         path — a forged/stripped Origin is exactly the bypass we block.
+ *       * ONLY when there is truly NO `Origin` header at all (`get` returns
+ *         `null`) do we fall back to the `Host` header: it must be exactly
+ *         `localhost:<port>` / `127.0.0.1:<port>`. A missing/foreign Host
+ *         -> 403. (rev-web R17: the bare-host `localhost`/`127.0.0.1`
+ *         no-port entries were removed — port 3000 is NOT an HTTP default,
+ *         so a real proxy would not strip it; allowing the bare host only
+ *         widened the no-Origin surface.)
  *
  * Same-origin browser fetches always send `Origin: <self>` for POST, so the
  * legitimate dashboard keeps working; a cross-site POST carries the
@@ -55,18 +63,21 @@ function allowedOrigins(port: string): Set<string> {
   ]);
 }
 
-/** The exact set of allowed Host header values for this port. */
+/**
+ * The exact set of allowed Host header values for this port.
+ *
+ * rev-web R17: the bare-host (`localhost` / `127.0.0.1` WITHOUT a port)
+ * entries were removed. They were justified as "a proxy may strip the
+ * default-ish port", but port 3000 is NOT an HTTP/HTTPS default (80/443) —
+ * a correct reverse proxy never strips an explicit non-default port from
+ * the forwarded Host. Keeping them only widened the no-Origin attack
+ * surface (a local listener spoofing a bare `Host: localhost`).
+ */
 function allowedHosts(port: string): Set<string> {
-  const hosts = new Set([
+  return new Set([
     `localhost:${port}`,
     `127.0.0.1:${port}`,
   ]);
-  if (port === "3000") {
-    // A proxy may strip the default-ish port; accept the bare host too.
-    hosts.add("localhost");
-    hosts.add("127.0.0.1");
-  }
-  return hosts;
 }
 
 function forbidden(reason: string): NextResponse {
@@ -83,17 +94,24 @@ export function middleware(req: NextRequest): NextResponse {
   if (!MUTATING.has(method)) return NextResponse.next();
 
   const port = webPort();
+  // rev-web R17 HIGH: `Headers.get` returns `null` ONLY when the header is
+  // truly absent; an explicit `Origin:` (empty value) yields `""`, NOT
+  // `null`. So `origin !== null` is the correct "header is PRESENT" test.
+  // A present-but-empty Origin must be treated as a non-matching Origin
+  // (-> 403) and MUST NOT fall through to the weaker Host path.
   const origin = req.headers.get("origin");
 
-  if (origin !== null && origin !== "") {
-    // An Origin header is present: it MUST be an exact allowed local origin.
+  if (origin !== null) {
+    // An Origin header is present (possibly `""`): it MUST exactly equal an
+    // allowed local origin. `""` is not in the allow-list -> 403.
     if (!allowedOrigins(port).has(origin)) {
       return forbidden("Origin 不在允許清單");
     }
     return NextResponse.next();
   }
 
-  // No Origin header: fall back to Host (must be a local dashboard host).
+  // ONLY a truly ABSENT Origin reaches here: fall back to Host (must be an
+  // exact local dashboard host:port — no bare-host entries any more).
   const host = req.headers.get("host");
   if (!host || !allowedHosts(port).has(host.toLowerCase())) {
     return forbidden("缺少 Origin 且 Host 不是本機儀表板");

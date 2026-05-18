@@ -39,28 +39,94 @@ export interface BacktestFormValues {
 /** Postgres DATE shape — the SQL the column accepts. */
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+/**
+ * rev-web R16 HIGH: server-side scenario allowlist. The client form's zod is
+ * NOT a server-side guard (a Server Action is a public RPC), and the
+ * `scenario` value drives the slippage/delay overrides + is persisted into
+ * `template_params`. Reject anything outside the known set BEFORE the insert.
+ */
+const KNOWN_SCENARIOS: ReadonlySet<string> = new Set<
+  BacktestFormValues["scenario"]
+>(["optimistic", "neutral", "pessimistic", "triple"]);
+
+/** A finite, strictly-positive number (rejects NaN/Infinity/0/negatives). */
+function isPositiveFinite(n: unknown): n is number {
+  return typeof n === "number" && Number.isFinite(n) && n > 0;
+}
+
+/** A finite, non-negative number (allows 0, rejects NaN/Infinity/negatives). */
+function isNonNegativeFinite(n: unknown): n is number {
+  return typeof n === "number" && Number.isFinite(n) && n >= 0;
+}
+
 export async function createBacktestJob(
   values: BacktestFormValues
 ): Promise<{ id: string }> {
-  // rev-web I-3: the module comment claims a "lightweight manual parse" but
-  // none existed — the form's zod is client-side only and a Server Action is
-  // a public RPC. Validate the load-bearing fields server-side and reject
-  // (clear zh-TW error) BEFORE the insert. Behaviour for valid inputs is
-  // unchanged; only the rejection paths are new.
+  // rev-web I-3 / R16 HIGH: the module comment claims a "lightweight manual
+  // parse" but the original had only a few checks — the form's zod is
+  // client-side only and a Server Action is a public RPC. Validate ALL
+  // load-bearing fields server-side and reject (clear zh-TW error) BEFORE
+  // the insert. Behaviour for valid inputs is unchanged; only the rejection
+  // paths are new.
   if (!ISO_DATE_RE.test(values.start_date)) {
     throw new Error(`起始日期格式錯誤（須為 YYYY-MM-DD）：${values.start_date}`);
   }
   if (!ISO_DATE_RE.test(values.end_date)) {
     throw new Error(`結束日期格式錯誤（須為 YYYY-MM-DD）：${values.end_date}`);
   }
-  if (!(values.initial_capital_usd > 0)) {
+  // R16 HIGH: start_date must be strictly before end_date. Lexicographic
+  // comparison is correct for the YYYY-MM-DD shape already validated above.
+  if (!(values.start_date < values.end_date)) {
+    throw new Error("起始日期必須早於結束日期");
+  }
+  // R16 HIGH: scenario ∈ the known allowlist (drives slippage/delay + is
+  // persisted into template_params).
+  if (!KNOWN_SCENARIOS.has(values.scenario)) {
+    throw new Error(`未知的情境（scenario）：${String(values.scenario)}`);
+  }
+  if (!isPositiveFinite(values.initial_capital_usd)) {
     throw new Error("初始資金必須大於 0");
   }
-  if (!(values.slippage_bps >= 0)) {
+  // R16 HIGH: at least ONE of copy_ratio / fixed_size_usd must be a positive
+  // finite number, and if either IS provided it must be positive finite
+  // (reject negative/zero/NaN/Infinity).
+  const hasCopyRatio = values.copy_ratio != null;
+  const hasFixedSize = values.fixed_size_usd != null;
+  if (!hasCopyRatio && !hasFixedSize) {
+    throw new Error("請至少提供 copy_ratio 或 fixed_size_usd 其中一項");
+  }
+  if (hasCopyRatio && !isPositiveFinite(values.copy_ratio)) {
+    throw new Error("copy_ratio 必須為大於 0 的有效數值");
+  }
+  if (hasFixedSize && !isPositiveFinite(values.fixed_size_usd)) {
+    throw new Error("fixed_size_usd 必須為大於 0 的有效數值");
+  }
+  // R16 HIGH: the risk-limit fields must be positive finite (a zero/negative
+  // position cap / loss limit would silently disable the guard rails).
+  if (!isPositiveFinite(values.max_position_usd)) {
+    throw new Error("max_position_usd 必須為大於 0 的有效數值");
+  }
+  if (!isPositiveFinite(values.min_trade_size_usd)) {
+    throw new Error("min_trade_size_usd 必須為大於 0 的有效數值");
+  }
+  if (!isPositiveFinite(values.daily_loss_limit_usd)) {
+    throw new Error("daily_loss_limit_usd 必須為大於 0 的有效數值");
+  }
+  if (!isNonNegativeFinite(values.slippage_bps)) {
     throw new Error("滑價（slippage_bps）不可為負數");
   }
-  if (values.execution_delay_seconds < 0) {
+  if (!isNonNegativeFinite(values.execution_delay_seconds)) {
     throw new Error("執行延遲（execution_delay_seconds）不可為負數");
+  }
+  // R16 HIGH: category_whitelist must be an array of reasonable non-empty
+  // bounded strings (it is persisted verbatim into template_params jsonb).
+  if (!Array.isArray(values.category_whitelist)) {
+    throw new Error("category_whitelist 必須為字串陣列");
+  }
+  for (const c of values.category_whitelist) {
+    if (typeof c !== "string" || c.trim().length === 0 || c.length > 64) {
+      throw new Error("category_whitelist 含有無效的分類字串");
+    }
   }
 
   // Resolve scenario into concrete slippage/delay overrides

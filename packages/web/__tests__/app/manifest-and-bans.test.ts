@@ -110,10 +110,18 @@ describe("DESIGN.md absolute bans — new Phase-5 Wave-2 files", () => {
 });
 
 describe("lib/alerts display helpers", () => {
-  it("humanises known event types and passes through unknowns", () => {
+  it("humanises known event types and caps unknown fallbacks (R18 C2)", () => {
     expect(eventTypeLabel("stop_loss")).toBe("停損觸發");
     expect(eventTypeLabel("candidate_high_score")).toBe("新發現高分候選");
-    expect(eventTypeLabel("totally_new")).toBe("totally_new");
+    // rev-web R18 C2: an unknown value is NOT echoed verbatim — it gets a
+    // generic prefix and (for huge values) a hard length cap so a rogue DB
+    // string cannot blow out the /alerts layout (view-DoS guard).
+    expect(eventTypeLabel("totally_new")).toBe("未知類型：totally_new");
+    const huge = "x".repeat(5000);
+    const out = eventTypeLabel(huge);
+    expect(out.startsWith("未知類型：")).toBe(true);
+    // 40-char body cap + the "未知類型：" prefix + the "…" ellipsis.
+    expect(out.length).toBeLessThanOrEqual("未知類型：".length + 40 + 1);
   });
 
   it("maps severity to a calm badge variant + label", () => {

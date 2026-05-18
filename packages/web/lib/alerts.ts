@@ -24,8 +24,24 @@ const EVENT_LABELS: Record<string, string> = {
   pending_dangerous_action: "待確認的危險操作",
 };
 
+/**
+ * rev-web R18 C2: cap an UNKNOWN fallback string. These labels render
+ * inline in the /alerts table; React already escapes the text (no XSS), but
+ * a rogue/huge DB `event_type`/`action_type` string would blow out the
+ * layout (a view-DoS). Unknown values get a generic prefix + a hard length
+ * cap so a pathological row degrades gracefully instead of breaking the UI.
+ */
+const FALLBACK_MAX = 40;
+
+function cappedFallback(raw: string): string {
+  const s = typeof raw === "string" ? raw : String(raw ?? "");
+  return s.length > FALLBACK_MAX
+    ? `未知類型：${s.slice(0, FALLBACK_MAX)}…`
+    : `未知類型：${s}`;
+}
+
 export function eventTypeLabel(eventType: string): string {
-  return EVENT_LABELS[eventType] ?? eventType;
+  return EVENT_LABELS[eventType] ?? cappedFallback(eventType);
 }
 
 const PENDING_ACTION_LABELS: Record<string, string> = {
@@ -34,7 +50,7 @@ const PENDING_ACTION_LABELS: Record<string, string> = {
 };
 
 export function pendingActionLabel(actionType: string): string {
-  return PENDING_ACTION_LABELS[actionType] ?? actionType;
+  return PENDING_ACTION_LABELS[actionType] ?? cappedFallback(actionType);
 }
 
 /** Severity badge variant + 繁中 label. Calm by default; critical is loud. */

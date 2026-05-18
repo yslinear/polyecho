@@ -57,7 +57,9 @@ beforeAll(() => {
     registration: { showNotification: vi.fn() },
     location: { origin: "http://localhost:3000" },
   };
-  const ctx = vm.createContext({ self, atob, console });
+  // The SW resolves a relative push target to an ABSOLUTE URL (R18 I1) via
+  // the global `URL` — provide it to the vm sandbox like the real SW global.
+  const ctx = vm.createContext({ self, atob, console, URL });
   vm.runInContext(code, ctx);
   handlers = (self.__swTestHandlers as SwHandlers);
 });
@@ -143,16 +145,36 @@ describe("handleNotificationClick", () => {
       "http://localhost:3000"
     );
     expect(close).toHaveBeenCalled();
-    expect(openWindow).toHaveBeenCalledWith("/alerts");
+    // rev-web R18 I1: the target is resolved to an ABSOLUTE URL against the
+    // worker origin (a relative path silently fails client.navigate on
+    // Chrome). openWindow is given the same unambiguous absolute form.
+    expect(openWindow).toHaveBeenCalledWith("http://localhost:3000/alerts");
   });
 
-  it("opens the payload url when provided and no client matches", async () => {
+  it("opens the payload url (resolved absolute) when provided and no client matches", async () => {
     const openWindow = vi.fn().mockResolvedValue("opened");
     await handlers.handleNotificationClick(
       { close: vi.fn(), data: { url: "/positions" } },
       { matchAll: vi.fn().mockResolvedValue([]), openWindow },
       "http://localhost:3000"
     );
-    expect(openWindow).toHaveBeenCalledWith("/positions");
+    expect(openWindow).toHaveBeenCalledWith("http://localhost:3000/positions");
+  });
+
+  it("navigates an existing client to the ABSOLUTE target (R18 I1)", async () => {
+    const focus = vi.fn().mockResolvedValue("focused");
+    const navigate = vi.fn().mockResolvedValue(undefined);
+    const client = { url: "http://localhost:3000/", focus, navigate };
+    await handlers.handleNotificationClick(
+      { close: vi.fn(), data: { url: "/positions" } },
+      {
+        matchAll: vi.fn().mockResolvedValue([client]),
+        openWindow: vi.fn(),
+      },
+      "http://localhost:3000"
+    );
+    // Chrome requires an absolute URL — assert we passed the resolved href.
+    expect(navigate).toHaveBeenCalledWith("http://localhost:3000/positions");
+    expect(focus).toHaveBeenCalled();
   });
 });

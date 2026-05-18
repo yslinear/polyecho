@@ -84,6 +84,25 @@ describe("middleware — Origin allow-list", () => {
     expect(res.status).toBe(403);
   });
 
+  // ---- rev-web R17 HIGH regressions -------------------------------------
+
+  it("BLOCKS a POST whose Origin header is PRESENT but empty (no Host fallthrough)", () => {
+    // An explicit empty `Origin:` must NOT bypass the strict Origin check by
+    // falling through to the weaker Host path — even with a perfectly valid
+    // local Host. Header present (even "") => must exactly match an origin.
+    const res = middleware(
+      req("POST", { origin: "", host: "localhost:3000" })
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("BLOCKS a POST with NO Origin and a bare Host (no port) on default 3000", () => {
+    // Port 3000 is not an HTTP default; a real proxy would not strip it, so
+    // the bare-host allow entries were removed. Bare `localhost` -> 403.
+    expect(middleware(req("POST", { host: "localhost" })).status).toBe(403);
+    expect(middleware(req("POST", { host: "127.0.0.1" })).status).toBe(403);
+  });
+
   it("honours POLYECHO_WEB_PORT for the allowed origin", () => {
     process.env.POLYECHO_WEB_PORT = "4321";
     const ok = middleware(

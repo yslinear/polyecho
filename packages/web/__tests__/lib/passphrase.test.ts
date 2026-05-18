@@ -112,6 +112,33 @@ describe("hashPassphrase / verifyPassphrase", () => {
     expect(await verifyPassphrase(pw, belowFloor)).toBe(false);
   });
 
+  it("REJECTS a non-canonical float-format iterations field (R17 MEDIUM)", async () => {
+    // `parseInt("100000.9", 10)` silently yields 100000 and would PASS the
+    // floor — but the FROZEN contract's <iterations> is a decimal integer.
+    // Python `int("100000.9")` raises, so verify must fail here too. Build
+    // material that hashes correctly at 100000 iters, then corrupt ONLY the
+    // iterations field to a float-format string.
+    const salt = randomBytes(16);
+    const pw = "float iters";
+    const dk = pbkdf2Sync(
+      Buffer.from(pw, "utf8"),
+      salt,
+      100_000,
+      32,
+      "sha256"
+    );
+    const b64 = `${salt.toString("base64")}$${dk.toString("base64")}`;
+    // Even the CORRECT passphrase must be rejected — the field is not the
+    // canonical decimal-integer shape.
+    expect(await verifyPassphrase(pw, `pbkdf2$100000.9$${b64}`)).toBe(false);
+    expect(await verifyPassphrase(pw, `pbkdf2$100000.0$${b64}`)).toBe(false);
+    expect(await verifyPassphrase(pw, `pbkdf2$ 100000$${b64}`)).toBe(false);
+    expect(await verifyPassphrase(pw, `pbkdf2$+100000$${b64}`)).toBe(false);
+    expect(await verifyPassphrase(pw, `pbkdf2$1e5$${b64}`)).toBe(false);
+    // The exact canonical decimal-integer form still verifies.
+    expect(await verifyPassphrase(pw, `pbkdf2$100000$${b64}`)).toBe(true);
+  });
+
   it("never throws and returns false on malformed/empty stored values", async () => {
     expect(await verifyPassphrase("x", null)).toBe(false);
     expect(await verifyPassphrase("x", "")).toBe(false);

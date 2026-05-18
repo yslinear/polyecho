@@ -62,7 +62,25 @@ async function handleNotificationClick(notification, clientsApi, originUrl) {
     notification.close();
   }
   const data = (notification && notification.data) || {};
-  const target = typeof data.url === "string" && data.url ? data.url : "/alerts";
+  const rawTarget =
+    typeof data.url === "string" && data.url ? data.url : "/alerts";
+
+  // rev-web R18 I1: `client.navigate()` SILENTLY fails on Chrome when given
+  // a RELATIVE path — it requires an ABSOLUTE URL. Resolve `rawTarget`
+  // against the worker's own origin so navigation actually happens. We
+  // resolve relative to `originUrl` (== self.location.origin) and, if the
+  // result is somehow cross-origin (defensive — data.url is our own push
+  // payload), fall back to the safe in-app default.
+  let absoluteTarget;
+  try {
+    const u = new URL(rawTarget, originUrl);
+    absoluteTarget =
+      originUrl && u.origin === originUrl
+        ? u.href
+        : new URL("/alerts", originUrl).href;
+  } catch (_e) {
+    absoluteTarget = originUrl ? new URL("/alerts", originUrl).href : "/alerts";
+  }
 
   const all = await clientsApi.matchAll({
     type: "window",
@@ -72,8 +90,10 @@ async function handleNotificationClick(notification, clientsApi, originUrl) {
     // Same-origin tab already open: focus it (don't spawn duplicates).
     if (client.url && client.url.startsWith(originUrl) && "focus" in client) {
       try {
-        if ("navigate" in client && client.url !== originUrl + target) {
-          await client.navigate(target).catch(() => {});
+        // Compare against the resolved ABSOLUTE target (client.url is also
+        // absolute) so we only navigate when actually changing location.
+        if ("navigate" in client && client.url !== absoluteTarget) {
+          await client.navigate(absoluteTarget).catch(() => {});
         }
       } catch (_e) {
         /* navigate is best-effort */
@@ -82,7 +102,9 @@ async function handleNotificationClick(notification, clientsApi, originUrl) {
     }
   }
   if (clientsApi.openWindow) {
-    return clientsApi.openWindow(target);
+    // openWindow accepts a relative URL fine, but the absolute form is
+    // unambiguous and consistent with the navigate() path above.
+    return clientsApi.openWindow(absoluteTarget);
   }
   return undefined;
 }

@@ -121,6 +121,16 @@ export async function verifyPassphrase(
   if (!Number.isFinite(iterations) || !Number.isInteger(iterations)) {
     return false;
   }
+  // rev-web R17 MEDIUM: `parseInt("100000.9", 10)` silently yields 100000 and
+  // would PASS the floor check, accepting a non-canonical stored string. The
+  // FROZEN contract's <iterations> field is a DECIMAL INTEGER with no sign /
+  // leading zeros / fraction / whitespace. Require the parsed value to
+  // round-trip EXACTLY back to the raw field; anything else (e.g. "100000.9",
+  // "1e5", " 100000", "+100000", "0xF4240") is rejected. This keeps
+  // byte-for-byte parity with the Python `int(parts[1])` canonical contract
+  // (Python `int("100000.9")` raises -> verify fails) while Node's lenient
+  // parseInt does not.
+  if (String(iterations) !== parts[1]) return false;
   // FROZEN iteration-floor rejection: reject any string whose embedded
   // iteration count is below the MIN_KDF_ITERATIONS security floor.
   if (iterations < MIN_KDF_ITERATIONS) return false;
