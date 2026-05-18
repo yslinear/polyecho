@@ -71,15 +71,23 @@ class _LruSet:
 
     capacity: int = 4096
     _data: OrderedDict[str, None] = field(default_factory=OrderedDict)
+    #: P1-13: the key evicted by the most recent :meth:`add` (``None`` if
+    #: none), so :class:`TradeDeduplicator` can prune the matching per-tx
+    #: lock in lock-step and keep ``_locks`` bounded.
+    _evicted: str | None = None
 
     def add(self, key: str) -> bool:
         """Add *key*; return ``True`` if it was new, ``False`` if a dup."""
+        self._evicted = None
         if key in self._data:
             self._data.move_to_end(key)
             return False
         self._data[key] = None
         if len(self._data) > self.capacity:
-            self._data.popitem(last=False)
+            # P1-13: surface the evicted key so the owning
+            # TradeDeduplicator can evict its per-tx lock in lock-step
+            # (bounded — same capacity, no unbounded ``_locks`` growth).
+            self._evicted = self._data.popitem(last=False)[0]
         return True
 
     def __contains__(self, key: object) -> bool:
@@ -111,8 +119,22 @@ class TradeDeduplicator:
         return lock
 
     def claim(self, leader_address: str, tx_hash: str) -> bool:
-        """Claim a ``(leader, tx)`` once; ``True`` ⇒ first, ``False`` ⇒ dup."""
-        return self._seen.add(self.key(leader_address, tx_hash))
+        """Claim a ``(leader, tx)`` once; ``True`` ⇒ first, ``False`` ⇒ dup.
+
+        P1-13: the per-tx :class:`asyncio.Lock` dict used to grow
+        unboundedly (``_seen`` is LRU-capped but ``_locks`` was never
+        pruned — a memory leak in the long-running loop).  When the LRU
+        evicts a key we evict its lock in lock-step so ``_locks`` stays
+        bounded by the same capacity as ``_seen``.  The lock is only
+        dropped *after* the dedup decision, and a key already past its LRU
+        window is, by definition, no longer being raced — so this never
+        drops a lock a concurrent ``process_detected`` still holds.
+        """
+        is_new = self._seen.add(self.key(leader_address, tx_hash))
+        evicted = self._seen._evicted
+        if evicted is not None:
+            self._locks.pop(evicted, None)
+        return is_new
 
     def seen(self, leader_address: str, tx_hash: str) -> bool:
         return self.key(leader_address, tx_hash) in self._seen

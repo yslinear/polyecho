@@ -250,17 +250,29 @@ class PendingActionExecutor:
                     )
                 continue
 
-            self._seen.add(row.id)  # claim BEFORE any await (idempotent)
+            # P1-6: do NOT claim the row in ``_seen`` before the awaited
+            # execution.  Previously a row whose ``_execute_row`` raised was
+            # added to ``_seen`` first and then abandoned for the whole
+            # process lifetime (no retry, no DB marker, no idempotency
+            # round-trip).  We now execute + finalise FIRST and only mark
+            # the row seen on success; on any exception the row is left
+            # un-seen so the very next poll retries it.  Idempotency is
+            # still guaranteed by the durable ``params`` processed marker
+            # (``row.processed`` short-circuits a re-poll once ``_finalise``
+            # persisted it) and the in-proc ``_seen`` set added below — and
+            # the P0 fail-closed expired / not-provisioned guards above
+            # already claimed-and-skipped their rows, untouched here.
             try:
                 results = await self._execute_row(row)
-            except Exception as exc:  # noqa: BLE001 - isolate per-row failure
+            except Exception as exc:  # noqa: BLE001 - isolate, leave for retry
                 logger.warning(
-                    "pending_action_execute_failed",
+                    "pending_action_execute_failed_will_retry",
                     extra={"action_id": row.id, "error": str(exc)},
                 )
-                continue
+                continue  # NOT added to _seen ⇒ retried next poll
 
             await self._finalise(row)
+            self._seen.add(row.id)  # success ⇒ claim (idempotent w/ marker)
             out.append((row.id, results))
         return out
 

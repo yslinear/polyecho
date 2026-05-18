@@ -62,26 +62,53 @@ class Reconciler:
         cursors = await self._cursor_reader()
         backfilled = 0
         for leader, cursor in cursors.items():
-            records = await self._ds.get_user_activity(
-                leader, start=cursor, activity_type="TRADE"
-            )
-            newest = cursor
-            for rec in records:
-                ts: datetime = getattr(rec, "timestamp", datetime.now(tz=UTC))
-                # Strictly-after the cursor (the cursor row itself was seen).
-                if cursor is not None and ts <= cursor:
-                    continue
-                detected = _activity_to_detected(rec, leader=leader, source="reconcile")
-                if detected is None:
-                    continue
-                await self._enqueue(detected)
-                backfilled += 1
-                if newest is None or ts > newest:
-                    newest = ts
-            if newest is not None and newest != cursor:
-                await self._cursor_writer(leader, newest)
-                logger.info(
-                    "reconcile_cursor_advanced",
-                    extra={"leader": leader, "last_seen_ts": newest.isoformat()},
+            # P1-4: isolate each leader.  A datasource error (or any
+            # exception) for ONE leader must neither abort the whole pass
+            # nor advance any cursor past unprocessed trades — we log it,
+            # leave that leader's cursor exactly where it was (so the
+            # missed window is retried next tick — restart-safe), and
+            # continue with the other leaders.
+            try:
+                backfilled += await self._reconcile_leader(leader, cursor)
+            except Exception as exc:  # noqa: BLE001 - per-leader isolation
+                logger.warning(
+                    "reconcile_leader_failed_continuing",
+                    extra={"leader": leader, "error": str(exc)},
                 )
+                continue
+        return backfilled
+
+    async def _reconcile_leader(
+        self, leader: str, cursor: datetime | None
+    ) -> int:
+        """Backfill one leader; advance its cursor ONLY on full success.
+
+        The cursor is written strictly after every in-window record was
+        successfully enqueued, so a failure mid-leader leaves the cursor
+        unmoved and the window is safely retried next tick (idempotent —
+        the queue/executor dedup on ``(leader, tx_hash)``).
+        """
+        records = await self._ds.get_user_activity(
+            leader, start=cursor, activity_type="TRADE"
+        )
+        newest = cursor
+        backfilled = 0
+        for rec in records:
+            ts: datetime = getattr(rec, "timestamp", datetime.now(tz=UTC))
+            # Strictly-after the cursor (the cursor row itself was seen).
+            if cursor is not None and ts <= cursor:
+                continue
+            detected = _activity_to_detected(rec, leader=leader, source="reconcile")
+            if detected is None:
+                continue
+            await self._enqueue(detected)
+            backfilled += 1
+            if newest is None or ts > newest:
+                newest = ts
+        if newest is not None and newest != cursor:
+            await self._cursor_writer(leader, newest)
+            logger.info(
+                "reconcile_cursor_advanced",
+                extra={"leader": leader, "last_seen_ts": newest.isoformat()},
+            )
         return backfilled

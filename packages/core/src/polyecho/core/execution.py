@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -178,12 +178,26 @@ class OrderExecutor:
     def ledger(self) -> FifoLedger:
         return self._ledger
 
-    async def execute(self, evaluated: EvaluatedCopy) -> ExecutionResult:
+    async def execute(
+        self,
+        evaluated: EvaluatedCopy,
+        *,
+        size_override: Decimal | None = None,
+    ) -> ExecutionResult:
         """Execute (or dry-run-log) a risk-PASSED COPY decision.
 
         The default (live lock OFF) path computes everything, logs the
         intended order with ``SkipReason.LIVE_LOCKED`` and returns
         ``placed=False`` **without** building a client or calling any SDK.
+
+        ``size_override`` is the risk-gate's ``adjusted_size`` (P1-1): when
+        the :class:`~polyecho.core.risk.LayeredRiskGate` normalised/clamped
+        the trade, the engine MUST place the gate-approved size, not the
+        original (too-large) ``decision.size``.  When ``None`` the
+        decision's own size is used unchanged.  The returned
+        :class:`ExecutionResult` carries a ``decision`` rebuilt with the
+        effective size so every downstream consumer (FIFO lot, trade
+        record, push payload) sees the size that was actually placed.
         """
         decision = evaluated.decision
         if decision.outcome is not DecisionOutcome.COPY:
@@ -194,6 +208,9 @@ class OrderExecutor:
                 detail="non-COPY decision — nothing to execute",
             )
 
+        # P1-1: the placed notional MUST equal the gate-approved size.
+        if size_override is not None and size_override != decision.size:
+            decision = replace(decision, size=size_override)
         size = decision.size or _ZERO
         price = decision.price or _ZERO
         outcome_name = str(

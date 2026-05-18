@@ -86,11 +86,46 @@ class RiskContext:
 OrderbookFetcher = Callable[[str], Awaitable[dict[str, Any]]]
 
 
-def _best(levels: list[dict[str, Any]], *, side: str) -> tuple[Decimal, Decimal] | None:
-    """Best (price, size) — highest bid or lowest ask."""
+class _MalformedBook(Exception):
+    """Raised when an orderbook row is missing/again-shaped (fail-CLOSED).
+
+    A real Polymarket book row that lacks ``price``/``size`` or carries an
+    un-coercible value is *data unavailable*, NOT "no book" — letting the
+    underlying ``KeyError``/``InvalidOperation`` escape ``check`` would
+    raise OUTSIDE the gate's try/except and fail **OPEN**.  We raise this
+    sentinel instead and the gate maps it to
+    :attr:`SkipReason.DATA_UNAVAILABLE` (P1-2, brief §4 fail-closed).
+    """
+
+
+def _level(row: Any) -> tuple[Decimal, Decimal]:
+    """Coerce one book row to ``(price, size)`` or raise :class:`_MalformedBook`.
+
+    Tolerates dict rows (``{"price","size"}``) and ``[price, size]``
+    pair-shaped rows; any missing field / non-numeric value ⇒ fail-CLOSED.
+    """
+    try:
+        if isinstance(row, dict):
+            price_raw = row["price"]
+            size_raw = row["size"]
+        else:  # list/tuple-shaped level: [price, size, ...]
+            price_raw = row[0]
+            size_raw = row[1]
+        return Decimal(str(price_raw)), Decimal(str(size_raw))
+    except Exception as exc:  # noqa: BLE001 - any shape error ⇒ fail-closed
+        raise _MalformedBook(f"malformed orderbook row {row!r}: {exc}") from exc
+
+
+def _best(levels: list[Any], *, side: str) -> tuple[Decimal, Decimal] | None:
+    """Best (price, size) — highest bid or lowest ask.
+
+    Raises :class:`_MalformedBook` on any malformed row (fail-CLOSED) so
+    a real again-shaped Polymarket book is rejected, never silently
+    treated as "no book".
+    """
     if not levels:
         return None
-    parsed = [(Decimal(str(x["price"])), Decimal(str(x["size"]))) for x in levels]
+    parsed = [_level(x) for x in levels]
     if side == "bid":
         p, s = max(parsed, key=lambda t: t[0])
     else:
@@ -98,8 +133,8 @@ def _best(levels: list[dict[str, Any]], *, side: str) -> tuple[Decimal, Decimal]
     return p, s
 
 
-def _depth(levels: list[dict[str, Any]]) -> Decimal:
-    return sum((Decimal(str(x["size"])) for x in levels), _ZERO)
+def _depth(levels: list[Any]) -> Decimal:
+    return sum((_level(x)[1] for x in levels), _ZERO)
 
 
 class LayeredRiskGate:
@@ -210,10 +245,37 @@ class LayeredRiskGate:
 
         best_ask: tuple[Decimal, Decimal] | None = None
         if book is not None:
-            bids = list(book.get("bids", []))
-            asks = list(book.get("asks", []))
-            best_bid = _best(bids, side="bid")
-            best_ask = _best(asks, side="ask")
+            # P1-2: parsing a real malformed/again-shaped book row used to
+            # raise OUTSIDE this gate's try/except (fail-OPEN).  We now
+            # contain ANY shape error here and convert it to a fail-CLOSED
+            # DATA_UNAVAILABLE reject, exactly like the fetch failures above
+            # (brief §4 — distinguish "unavailable" from "no book").
+            try:
+                bids_raw = book.get("bids", [])
+                asks_raw = book.get("asks", [])
+                if not isinstance(bids_raw, (list, tuple)) or not isinstance(
+                    asks_raw, (list, tuple)
+                ):
+                    raise _MalformedBook(
+                        f"orderbook bids/asks not list-shaped: "
+                        f"{type(bids_raw).__name__}/{type(asks_raw).__name__}"
+                    )
+                bids = list(bids_raw)
+                asks = list(asks_raw)
+                best_bid = _best(bids, side="bid")
+                best_ask = _best(asks, side="ask")
+                buy_depth = _depth(asks) if tpl.min_depth > _ZERO else _ZERO
+                sell_depth = _depth(bids) if tpl.min_depth > _ZERO else _ZERO
+            except _MalformedBook as exc:
+                logger.warning(
+                    "orderbook_malformed",
+                    extra={"token_id": decision.token_id, "error": str(exc)},
+                )
+                return RiskResult(
+                    passed=False,
+                    skip_reason=SkipReason.DATA_UNAVAILABLE,
+                    detail=f"orderbook malformed: {exc}",
+                )
 
             # 6. spread ---------------------------------------------------
             if best_bid is not None and best_ask is not None:
@@ -226,13 +288,16 @@ class LayeredRiskGate:
                     )
 
             # 7. depth ----------------------------------------------------
-            relevant = asks if decision.side is TradeSide.BUY else bids
-            if tpl.min_depth > _ZERO and _depth(relevant) < tpl.min_depth:
-                return RiskResult(
-                    passed=False,
-                    skip_reason=SkipReason.ORDERBOOK_DEPTH,
-                    detail=f"depth {_depth(relevant)} < min {tpl.min_depth}",
+            if tpl.min_depth > _ZERO:
+                relevant_depth = (
+                    buy_depth if decision.side is TradeSide.BUY else sell_depth
                 )
+                if relevant_depth < tpl.min_depth:
+                    return RiskResult(
+                        passed=False,
+                        skip_reason=SkipReason.ORDERBOOK_DEPTH,
+                        detail=f"depth {relevant_depth} < min {tpl.min_depth}",
+                    )
 
         # 8. position-value cap ------------------------------------------
         notional = size * price

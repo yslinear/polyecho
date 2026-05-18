@@ -750,3 +750,498 @@ async def test_main_once_exits_zero() -> None:
 
     rc = await main(["--once"])
     assert rc == 0
+
+
+# ===========================================================================
+# Wave B-core P1 remediation — focused regression tests (one block per fix)
+# ===========================================================================
+
+
+# --- P1-1: the risk-adjusted size MUST reach the placed order --------------
+
+
+@pytest.mark.asyncio
+async def test_p1_1_adjusted_size_reaches_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A normalize/clamp ⇒ the EXECUTED size == gate-approved adjusted_size,
+    NOT the original (too-large) decision.size — verified on the LIVE path.
+    """
+    from polyecho.shared.config import get_settings
+
+    monkeypatch.setenv("POLYECHO_LIVE_TRADING", "true")
+    get_settings.cache_clear()
+    try:
+        placed: dict[str, float] = {}
+
+        class _Client:
+            async def place_order(self, **kw: Any) -> dict[str, Any]:
+                placed.update(kw)
+                return {"status": "matched"}
+
+        async def _factory(_e: EvaluatedCopy) -> Any:
+            return _Client()
+
+        execu = OrderExecutor(client_factory=_factory)
+        # decision asks for 100 shares; gate approved only 10.
+        ev = _eval(_copy_decision(size=Decimal("100"), price=Decimal("0.5")))
+        res = await execu.execute(ev, size_override=Decimal("10.000000"))
+
+        assert res.placed is True
+        assert res.decision.size == Decimal("10.000000")  # rebuilt decision
+        assert placed["size"] == 10.0  # the SDK got the clamped size
+        assert placed["size"] != 100.0
+    finally:
+        monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_p1_1_no_override_uses_decision_size() -> None:
+    """No adjustment ⇒ decision size unchanged (no behavioural drift)."""
+    ev = _eval(_copy_decision(size=Decimal("7"), side=TradeSide.BUY))
+    res = await OrderExecutor().execute(ev, size_override=None)
+    assert res.decision.size == Decimal("7")
+    assert res.skip_reason is SkipReason.LIVE_LOCKED  # live-lock intact
+
+
+# --- P1-2: malformed orderbook ⇒ DATA_UNAVAILABLE (fail-CLOSED) ------------
+
+
+@pytest.mark.asyncio
+async def test_p1_2_malformed_book_row_fails_closed_not_raises() -> None:
+    """A real again-shaped book row ⇒ DATA_UNAVAILABLE reject, NOT an
+    unhandled exception escaping the gate (which would be fail-OPEN).
+    """
+
+    async def book_missing_size(_tid: str) -> dict[str, object]:
+        return {"bids": [{"price": 0.49}], "asks": [{"price": 0.51, "size": 5}]}
+
+    gate = LayeredRiskGate(
+        context_for=lambda e: _ctx(_tpl()), orderbook_for=book_missing_size
+    )
+    res = await gate.check(_eval(_copy_decision()))
+    assert res.passed is False
+    assert res.skip_reason is SkipReason.DATA_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_p1_2_non_numeric_and_nonlist_book_fail_closed() -> None:
+    async def book_garbage_price(_tid: str) -> dict[str, object]:
+        return {
+            "bids": [{"price": "n/a", "size": 5}],
+            "asks": [{"price": 0.51, "size": 5}],
+        }
+
+    g1 = LayeredRiskGate(
+        context_for=lambda e: _ctx(_tpl()), orderbook_for=book_garbage_price
+    )
+    r1 = await g1.check(_eval(_copy_decision()))
+    assert r1.skip_reason is SkipReason.DATA_UNAVAILABLE
+
+    async def book_not_list(_tid: str) -> dict[str, object]:
+        return {"bids": "oops", "asks": []}
+
+    g2 = LayeredRiskGate(
+        context_for=lambda e: _ctx(_tpl()), orderbook_for=book_not_list
+    )
+    r2 = await g2.check(_eval(_copy_decision()))
+    assert r2.skip_reason is SkipReason.DATA_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_p1_2_well_formed_book_still_passes() -> None:
+    """Regression guard: a valid book is unaffected by the new guard."""
+
+    async def good_book(_tid: str) -> dict[str, object]:
+        return {
+            "bids": [{"price": 0.49, "size": 500}],
+            "asks": [{"price": 0.50, "size": 500}],
+        }
+
+    gate = LayeredRiskGate(
+        context_for=lambda e: _ctx(_tpl(min_depth=Decimal("100"))),
+        orderbook_for=good_book,
+    )
+    res = await gate.check(_eval(_copy_decision(price=Decimal("0.5"))))
+    assert res.passed is True
+
+
+# --- P1-3: dry-run does NOT mutate the shared ledger; live does -----------
+
+
+@pytest.mark.asyncio
+async def test_p1_3_dry_run_does_not_pollute_ledger() -> None:
+    core = TraderCore(follows=[_follow()])
+    await core.process_detected(_trade(side="BUY", price=0.5, size=100.0))
+    assert core.stats.copied == 1
+    assert core.stats.placed == 0  # dry-run
+    # No phantom BuyLot ⇒ open_position_count stays 0 (no phantom exposure).
+    assert (
+        core._executor.ledger.open_lots(
+            ACCT, "0xcond_fed_june_2026", "Yes"
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_p1_3_live_path_still_records_buy_lot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live path's FIFO accounting is unchanged (real fill ⇒ a lot)."""
+    from polyecho.shared.config import get_settings
+
+    monkeypatch.setenv("POLYECHO_LIVE_TRADING", "true")
+    get_settings.cache_clear()
+    try:
+
+        class _Client:
+            async def place_order(self, **kw: Any) -> dict[str, Any]:
+                return {"status": "matched"}
+
+        async def _factory(_e: EvaluatedCopy) -> Any:
+            return _Client()
+
+        core = TraderCore(follows=[_follow()])
+        core._executor = OrderExecutor(
+            client_factory=_factory, ledger=core._ledger
+        )
+        await core.process_detected(_trade(side="BUY", price=0.5, size=100.0))
+        assert core.stats.placed == 1
+        lots = core._ledger.open_lots(ACCT, "0xcond_fed_june_2026", "Yes")
+        assert len(lots) == 1  # real fill ⇒ ledger correct on the live path
+    finally:
+        monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
+        get_settings.cache_clear()
+
+
+# --- P1-4: cursor_writer persists + per-leader error isolation ------------
+
+
+@pytest.mark.asyncio
+async def test_p1_4_cursor_writer_persists_and_is_restart_safe() -> None:
+    persisted: list[tuple[str, datetime]] = []
+
+    async def _writer(leader: str, ts: datetime) -> None:
+        persisted.append((leader, ts))
+
+    old = datetime(2026, 1, 1, tzinfo=UTC)
+    new = datetime(2026, 2, 1, tzinfo=UTC)
+    spec = FollowSpec(
+        account_id=ACCT,
+        leader_address=LEADER,
+        template=_tpl(),
+        binding=BINDING,
+        last_seen_ts=old,
+    )
+    core = TraderCore(
+        follows=[spec],
+        datasource=_OneTradeDS(  # type: ignore[arg-type]
+            [ActivityRecord(LEADER, "TRADE", "c", "BUY", 5.0, 0.5, 2.5, new)]
+        ),
+        cursor_writer=_writer,
+    )
+    n = await core._reconcile_once()
+    assert n >= 1
+    assert persisted and persisted[0][0] == LEADER
+    assert persisted[0][1] == new
+    # Restart-safe: the in-proc store advanced ⇒ a 2nd pass re-reads `new`.
+    assert core._cursor_store[LEADER.lower()] == new
+
+
+@pytest.mark.asyncio
+async def test_p1_4_reconcile_isolates_per_leader_failure() -> None:
+    from polyecho.core.reconcile import Reconciler
+
+    L1 = "0xleadera00000000000000000000000000000000a"
+    L2 = "0xleaderb00000000000000000000000000000000b"
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    good = datetime(2026, 3, 1, tzinfo=UTC)
+
+    class _SplitDS:
+        async def get_user_activity(
+            self, wallet: str, *, start: datetime | None = None, **kw: Any
+        ) -> list[ActivityRecord]:
+            if wallet == L1:
+                raise RuntimeError("datasource down for L1")
+            return [ActivityRecord(L2, "TRADE", "c", "BUY", 5.0, 0.5, 2.5, good)]
+
+    enq: list[DetectedTrade] = []
+    written: dict[str, datetime] = {}
+
+    async def _read() -> dict[str, datetime | None]:
+        return {L1: base, L2: base}
+
+    async def _write(leader: str, ts: datetime) -> None:
+        written[leader] = ts
+
+    async def _enq(t: DetectedTrade) -> None:
+        enq.append(t)
+
+    rec = Reconciler(
+        cursor_reader=_read,
+        cursor_writer=_write,
+        enqueue=_enq,
+        datasource=_SplitDS(),  # type: ignore[arg-type]
+    )
+    n = await rec.reconcile_once()
+    # L1 failed but L2 still backfilled + advanced; L1 cursor NOT moved.
+    assert n == 1
+    assert L1 not in written  # failed leader's cursor stays put (retry next)
+    assert written.get(L2) == good
+
+
+# --- P1-5: heartbeat row written on cycle --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_p1_5_heartbeat_written_on_cycle() -> None:
+    beats: list[dict[str, Any]] = []
+
+    async def _hb(info: dict[str, Any]) -> None:
+        beats.append(info)
+
+    core = TraderCore(follows=[_follow()], heartbeat_writer=_hb)
+    await core.run_once()
+    # At least the start + complete heartbeat of one cycle.
+    assert len(beats) >= 2
+    assert {b["phase"] for b in beats} >= {"cycle_start", "cycle_complete"}
+    assert core.last_heartbeat is not None
+    assert "ts" in core.last_heartbeat
+    assert core.last_heartbeat["detected"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_p1_5_heartbeat_write_failure_never_crashes_loop() -> None:
+    async def _bad_hb(_info: dict[str, Any]) -> None:
+        raise RuntimeError("settings table unreachable")
+
+    core = TraderCore(follows=[_follow()], heartbeat_writer=_bad_hb)
+    stats = await core.run_once()  # must NOT raise
+    assert stats.detected >= 0
+    assert core.last_heartbeat is not None  # in-proc mirror still set
+
+
+# --- P1-6: a failed pending row is RETRIED (not permanently abandoned) ----
+
+
+def _pending_row(**kw: Any) -> Any:
+    from polyecho.core.pending import PendingActionRow
+    from polyecho.shared.pending_actions import (
+        PendingActionStatus,
+        PendingActionType,
+    )
+
+    base: dict[str, Any] = dict(
+        id="act-1",
+        action_type=PendingActionType.MANUAL_SELL,
+        status=str(PendingActionStatus.CONFIRMED),
+        params={"account_id": str(ACCT), "token_id": "t", "size": "5"},
+    )
+    base.update(kw)
+    return PendingActionRow(**base)
+
+
+@pytest.mark.asyncio
+async def test_p1_6_failed_row_retried_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import polyecho.core.pending as pending_mod
+    from polyecho.core.pending import PendingActionExecutor
+
+    monkeypatch.setattr(
+        pending_mod, "is_danger_passphrase_provisioned", _true
+    )
+    row = _pending_row()
+    marked: list[str] = []
+
+    async def _rows() -> list[Any]:
+        return [row]
+
+    async def _positions(_a: uuid.UUID) -> list[Any]:
+        return []
+
+    async def _mark(action_id: str, _params: dict[str, Any]) -> None:
+        marked.append(action_id)
+
+    calls = {"n": 0}
+
+    class _FlakyExecutor(OrderExecutor):
+        async def execute(
+            self,
+            evaluated: EvaluatedCopy,
+            *,
+            size_override: Decimal | None = None,
+        ) -> Any:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient venue error")
+            return await super().execute(
+                evaluated, size_override=size_override
+            )
+
+    ex = PendingActionExecutor(
+        rows_source=_rows,
+        positions_for=_positions,
+        mark_processed=_mark,
+        executor=_FlakyExecutor(),
+    )
+    # 1st poll: execution raises ⇒ row left UN-seen, NOT marked.
+    out1 = await ex.poll_once()
+    assert out1 == []
+    assert marked == []
+    assert row.id not in ex._seen
+    # 2nd poll (same row, web hasn't re-confirmed): retried and succeeds.
+    out2 = await ex.poll_once()
+    assert len(out2) == 1
+    assert marked == [row.id]
+    assert row.id in ex._seen
+
+
+@pytest.mark.asyncio
+async def test_p1_6_p0_guards_still_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P0 expired / not-provisioned refusals are untouched by P1-6."""
+    import polyecho.core.pending as pending_mod
+    from polyecho.core.pending import PendingActionExecutor
+
+    async def _positions(_a: uuid.UUID) -> list[Any]:
+        return []
+
+    async def _mark(_id: str, _p: dict[str, Any]) -> None:
+        raise AssertionError("a refused row must NOT be marked processed")
+
+    # (a) danger passphrase NOT provisioned ⇒ refuse, claim, no execute.
+    monkeypatch.setattr(
+        pending_mod, "is_danger_passphrase_provisioned", _false
+    )
+    row = _pending_row()
+
+    async def _rows() -> list[Any]:
+        return [row]
+
+    ex = PendingActionExecutor(
+        rows_source=_rows, positions_for=_positions, mark_processed=_mark
+    )
+    assert await ex.poll_once() == []
+    assert row.id in ex._seen  # P0 refusal still claims (no loop-spam)
+
+    # (b) expired confirmed row ⇒ refused even with passphrase provisioned.
+    monkeypatch.setattr(
+        pending_mod, "is_danger_passphrase_provisioned", _true
+    )
+    expired = _pending_row(
+        id="act-exp",
+        expires_at=datetime(2000, 1, 1, tzinfo=UTC),
+    )
+
+    async def _rows2() -> list[Any]:
+        return [expired]
+
+    ex2 = PendingActionExecutor(
+        rows_source=_rows2, positions_for=_positions, mark_processed=_mark
+    )
+    assert await ex2.poll_once() == []
+    assert expired.id in ex2._seen
+
+
+# --- P1-12: --once non-zero on a degenerate pass -------------------------
+
+
+@pytest.mark.asyncio
+async def test_p1_12_no_follows_is_idle_exit_zero() -> None:
+    core = TraderCore(follows=[])
+    await core.run_once()
+    assert core.degenerate_once_pass() is None  # idle ⇒ exit 0
+
+
+@pytest.mark.asyncio
+async def test_p1_12_follows_but_zero_detected_is_degenerate() -> None:
+    # A leader that is NOT in the bundled fixtures ⇒ 0 detections.
+    ghost = "0xghostleader000000000000000000000000000099"
+    spec = FollowSpec(
+        account_id=ACCT,
+        leader_address=ghost,
+        template=_tpl(),
+        binding=WalletBinding(
+            signature_type=0, funder=ghost, wallet_mode="eoa", derived=False
+        ),
+    )
+    core = TraderCore(follows=[spec])
+    await core.run_once()
+    assert core.stats.detected == 0
+    assert core.degenerate_once_pass() is not None  # ⇒ --once exits non-zero
+
+
+@pytest.mark.asyncio
+async def test_p1_12_detected_all_skipped_is_healthy() -> None:
+    """Detected + all-skipped (default LIVE_LOCKED) is HEALTHY (exit 0)."""
+    core = TraderCore(follows=[_follow()])
+    await core.run_once()
+    assert core.stats.detected > 0
+    assert core.stats.placed == 0  # all dry-run skips
+    assert core.degenerate_once_pass() is None  # skips are NOT failure
+
+
+@pytest.mark.asyncio
+async def test_p1_12_main_once_degenerate_returns_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import polyecho.core.__main__ as main_mod
+
+    ghost = "0xghostleader000000000000000000000000000099"
+
+    def _ghost_follows() -> list[FollowSpec]:
+        return [
+            FollowSpec(
+                account_id=ACCT,
+                leader_address=ghost,
+                template=_tpl(),
+                binding=WalletBinding(
+                    signature_type=0,
+                    funder=ghost,
+                    wallet_mode="eoa",
+                    derived=False,
+                ),
+            )
+        ]
+
+    monkeypatch.setattr(main_mod, "_demo_follows", _ghost_follows)
+    rc = await main_mod.main(["--once"])
+    assert rc == 2  # degenerate ⇒ documented non-zero exit
+
+
+# --- P1-13: TradeDeduplicator._locks is bounded (no memory leak) ----------
+
+
+def test_p1_13_locks_dict_bounded_to_capacity() -> None:
+    d = TradeDeduplicator(capacity=8)
+    for i in range(200):
+        leader = f"0xleader{i:034d}"
+        lock = d.lock_for(leader, "0xtx")
+        assert lock is not None
+        d.claim(leader, "0xtx")
+    # _seen is LRU-capped at 8; _locks must be evicted in lock-step.
+    assert len(d._locks) <= 8
+    assert len(d._seen._data) <= 8
+
+
+def test_p1_13_live_lock_for_active_key_survives() -> None:
+    """A still-in-window key keeps its lock (no premature eviction)."""
+    d = TradeDeduplicator(capacity=4)
+    lk = d.lock_for(LEADER, "0xkeep")
+    d.claim(LEADER, "0xkeep")
+    # Push 3 more (still within capacity 4) — keep must remain.
+    for i in range(3):
+        d.claim(f"0xother{i:034d}", "0xtx")
+    assert d._locks.get(d.key(LEADER, "0xkeep")) is lk
+
+
+async def _true() -> bool:
+    return True
+
+
+async def _false() -> bool:
+    return False

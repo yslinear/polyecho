@@ -30,7 +30,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -117,6 +117,16 @@ class FollowSpec:
 SkipRecorder = Callable[[EvaluatedCopy, SkipReason, str], Awaitable[None]]
 TradeRecorder = Callable[[EvaluatedCopy, dict[str, Any]], Awaitable[None]]
 EventEmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
+#: P1-4 ``async (leader_address, last_seen_ts) -> None`` — persist the
+#: per-leader reconcile cursor (the live wiring writes
+#: ``follow_relations.last_seen_ts``; default keeps an in-proc store so
+#: ``--once`` / tests stay DB-free yet still observe cursor advancement).
+CursorWriter = Callable[[str, datetime], Awaitable[None]]
+#: P1-5 ``async (info: dict) -> None`` — write the ``trader_heartbeat``
+#: settings row (timestamp + last-poll info).  Best-effort; the live
+#: wiring upserts the ``settings`` table, default is an in-proc mirror so
+#: ``polyecho trader status`` liveness is measurable without a DB in tests.
+HeartbeatWriter = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 @dataclass
@@ -128,6 +138,7 @@ class _Stats:
     copied: int = 0
     skipped: int = 0
     placed: int = 0
+    errors: int = 0
     skip_reasons: dict[str, int] = field(default_factory=dict)
 
 
@@ -159,6 +170,8 @@ class TraderCore:
         redeem_candidate_source: Callable[[], Awaitable[list[RedeemCandidate]]] | None = None,
         pending_action_executor: PendingActionExecutor | None = None,
         balance_for: BalanceFetcher | None = None,
+        cursor_writer: CursorWriter | None = None,
+        heartbeat_writer: HeartbeatWriter | None = None,
     ) -> None:
         self._settings = get_settings()
         self._ds: DataSource = datasource if datasource is not None else get_datasource()
@@ -184,6 +197,32 @@ class TraderCore:
         self._follow_index = {
             (str(f.account_id), f.leader_address.lower()): f for f in self._follows
         }
+
+        # P1-4: per-leader reconcile cursor.  Seeded from the FollowSpec
+        # snapshots so a restart resumes from the persisted ``last_seen_ts``
+        # (restart-safe).  The injected ``cursor_writer`` persists each
+        # advance to ``follow_relations.last_seen_ts`` in the live wiring;
+        # the default keeps this in-proc store so ``--once`` / tests stay
+        # DB-free yet still observe and verify cursor advancement.
+        self._cursor_writer = cursor_writer
+        self._cursor_store: dict[str, datetime | None] = {}
+        for f in self._follows:
+            lk = f.leader_address.lower()
+            if f.last_seen_ts is not None and (
+                lk not in self._cursor_store
+                or self._cursor_store[lk] is None
+                or f.last_seen_ts > self._cursor_store[lk]  # type: ignore[operator]
+            ):
+                self._cursor_store[lk] = f.last_seen_ts
+            else:
+                self._cursor_store.setdefault(lk, f.last_seen_ts)
+
+        # P1-5: trader liveness.  The supervised loop + startup write a
+        # ``trader_heartbeat`` row (timestamp + last-poll info) so
+        # ``polyecho trader status`` / the Dashboard can show UP/DOWN.
+        # Best-effort: a write failure is logged, never crashes the loop.
+        self._heartbeat_writer = heartbeat_writer
+        self.last_heartbeat: dict[str, Any] | None = None
 
         self._evaluator = TraderCopyEvaluator(
             template_for=self._template_for,
@@ -643,11 +682,19 @@ class TraderCore:
 
         self.stats.copied += 1
 
-        # Execution — live-locked by default (places nothing unless live).
-        result = await self._executor.execute(evaluated)
+        # P1-1: the risk gate may have normalised/clamped the size; the
+        # placed order MUST be the gate-approved size, never the original
+        # (potentially too-large) decision.size.  We pass adjusted_size
+        # through as an explicit override so OrderExecutor places exactly
+        # what the gate approved, and reuse result.decision below so the
+        # FIFO lot / trade record / push payload all reflect that size.
+        result = await self._executor.execute(
+            evaluated, size_override=risk.adjusted_size
+        )
 
+        decision = result.decision
         side = decision.side
-        size = risk.adjusted_size if risk.adjusted_size is not None else decision.size
+        size = decision.size
         price = decision.price or Decimal(0)
         outcome_name = str(trade.get("outcome") or decision.token_id or condition_id)
 
@@ -708,19 +755,14 @@ class TraderCore:
                 sell_match=result.sell_match,
             )
         else:
-            # Default dry-run: still record the FIFO BUY lot so PnL/limits
-            # accounting is correct, log the LIVE_LOCKED intent as a skip.
-            if side is TradeSide.BUY:
-                self._ledger.add_buy(
-                    BuyLot(
-                        trade_id=tx_hash,
-                        account_id=spec.account_id,
-                        condition_id=condition_id,
-                        outcome=outcome_name,
-                        size=size or Decimal(0),
-                        price=price,
-                    )
-                )
+            # P1-3: a dry-run order is NOT a real fill — it must NOT mutate
+            # the shared FifoLedger.  Adding a phantom BuyLot here inflated
+            # ``open_position_count`` / portfolio-exposure counters (the
+            # gate reads ``self._ledger.open_lots``) and risked FIFO-
+            # matching a real SELL against a phantom BUY after a live flip.
+            # Only the live ``result.placed`` branch above (a real fill)
+            # touches the ledger; PnL/limits accounting stays correct for
+            # the live path.  We just log the LIVE_LOCKED intent as a skip.
             await self._record_skip(
                 evaluated,
                 result.skip_reason or SkipReason.LIVE_LOCKED,
@@ -739,6 +781,9 @@ class TraderCore:
         Returns the per-run :class:`_Stats`.  Places nothing (live lock).
         """
         await self._emit_bot_restart_once()
+        # P1-5: startup/cycle heartbeat — write at the START of the pass so
+        # liveness is observable even if the pass later errors.
+        await self._write_heartbeat(phase="cycle_start")
         leaders = sorted({f.leader_address.lower() for f in self._follows})
         ws = UserChannelListener(leaders, self._queue, datasource=self._ds, live=False)
         chain = ChainCrossCheckListener(
@@ -755,12 +800,21 @@ class TraderCore:
             trade = self._queue.get_nowait()
             try:
                 await self.process_detected(trade)
+            except Exception as exc:  # noqa: BLE001 - count, never abort pass
+                self.stats.errors += 1
+                logger.warning(
+                    "process_detected_failed_continuing",
+                    extra={"error": str(exc)},
+                )
             finally:
                 self._queue.task_done()
 
         await self._reconcile_once()
         await self._redeem_once()
         await self._pending_actions_once()
+        # P1-5: end-of-cycle heartbeat — refreshes the timestamp + final
+        # per-pass counters so ``trader status`` reflects the latest poll.
+        await self._write_heartbeat(phase="cycle_complete")
         logger.info(
             "run_once_complete",
             extra={
@@ -774,12 +828,72 @@ class TraderCore:
         )
         return self.stats
 
+    def degenerate_once_pass(self) -> str | None:
+        """P1-12: classify a completed ``run_once`` for the exit code.
+
+        Exit-code contract (consumed by ``python -m polyecho.core --once``):
+
+        * **No follows configured** ⇒ a legitimately empty/idle pass.
+          Return ``None`` (exit 0) — there is nothing to detect, this is
+          a valid steady state, NOT a broken pipeline.
+        * **Follows exist but nothing was detected** ⇒ degenerate.  A
+          configured follow producing zero detections across BOTH
+          detection paths + reconcile means the pipeline is wholly
+          broken (datasource/fixture/wiring) — return a reason string so
+          ``--once`` exits non-zero and CI smoke fails loudly.
+        * **Every detected trade errored** (``errors >= detected`` and
+          ``detected > 0``) ⇒ degenerate (the pass produced only
+          exceptions) — return a reason string (non-zero).
+
+        Any other shape — including a pass that detected trades and only
+        produced *skips* (e.g. all LIVE_LOCKED in the default dry-run, or
+        legitimate risk rejects) — is a HEALTHY pass: return ``None``
+        (exit 0).  Skips are the expected default-off outcome and must
+        NOT be treated as failure.
+        """
+        if not self._follows:
+            return None  # nothing configured ⇒ valid idle pass (exit 0)
+        if self.stats.detected == 0:
+            return (
+                f"degenerate: {len(self._follows)} follow(s) configured but "
+                f"0 trades detected (pipeline appears broken)"
+            )
+        if self.stats.errors > 0 and self.stats.errors >= self.stats.detected:
+            return (
+                f"degenerate: all {self.stats.detected} detected trade(s) "
+                f"errored ({self.stats.errors} errors)"
+            )
+        return None
+
     async def _reconcile_once(self) -> int:
         async def _read() -> dict[str, datetime | None]:
-            return {f.leader_address.lower(): f.last_seen_ts for f in self._follows}
+            # P1-4: resume from the live in-proc cursor store (seeded from
+            # the persisted FollowSpec snapshots), NOT a static re-read of
+            # the original snapshot — so a second pass advances correctly.
+            return {
+                f.leader_address.lower(): self._cursor_store.get(
+                    f.leader_address.lower(), f.last_seen_ts
+                )
+                for f in self._follows
+            }
 
-        async def _write(_leader: str, _ts: datetime) -> None:
-            return None
+        async def _write(leader: str, ts: datetime) -> None:
+            # P1-4: a REAL cursor writer (was a no-op ⇒ never restart-safe).
+            # Always advance the in-proc store so the next reconcile pass
+            # resumes correctly even DB-free, then best-effort-persist to
+            # ``follow_relations.last_seen_ts`` via the injected writer.  A
+            # persistence failure is logged, never aborts the pass (the
+            # in-proc store still moved so we don't reprocess; the next
+            # tick re-attempts the durable write).
+            self._cursor_store[leader.lower()] = ts
+            if self._cursor_writer is not None:
+                try:
+                    await self._cursor_writer(leader, ts)
+                except Exception as exc:  # noqa: BLE001 - best-effort persist
+                    logger.warning(
+                        "reconcile_cursor_persist_failed_continuing",
+                        extra={"leader": leader, "error": str(exc)},
+                    )
 
         async def _enqueue(t: DetectedTrade) -> None:
             await self._queue.put(t)
@@ -816,6 +930,41 @@ class TraderCore:
         for o in outcomes:
             self.events.append(("redeem_intent", {"condition_id": o.spec.condition_id}))
         return len(outcomes)
+
+    async def _write_heartbeat(self, *, phase: str) -> None:
+        """P1-5: write the ``trader_heartbeat`` liveness row (best-effort).
+
+        Records a UTC timestamp + last-poll info so ``polyecho trader
+        status`` and the Dashboard (PRD §7.4/§2.3) can show UP/DOWN and
+        when the engine last polled.  Always updates the in-proc mirror
+        (so liveness is measurable DB-free in tests); the injected
+        ``heartbeat_writer`` upserts the ``settings`` row in the live
+        wiring.  A write failure is logged and swallowed — the heartbeat
+        must NEVER crash or stall the trading loop.
+        """
+        info: dict[str, Any] = {
+            "ts": datetime.now(tz=UTC).isoformat(),
+            "phase": phase,
+            "datasource": self._settings.datasource,
+            "live_trading": is_live_enabled(),
+            "detected": self.stats.detected,
+            "copied": self.stats.copied,
+            "skipped": self.stats.skipped,
+            "placed": self.stats.placed,
+            "followed_leaders": sorted(
+                {f.leader_address.lower() for f in self._follows}
+            ),
+        }
+        self.last_heartbeat = info
+        logger.info("trader_heartbeat", extra=info)
+        if self._heartbeat_writer is not None:
+            try:
+                await self._heartbeat_writer(info)
+            except Exception as exc:  # noqa: BLE001 - best-effort liveness
+                logger.warning(
+                    "trader_heartbeat_write_failed_continuing",
+                    extra={"phase": phase, "error": str(exc)},
+                )
 
     async def _emit_bot_restart_once(self) -> None:
         """Emit SYSTEM_BOT_RESTART exactly once per process start (INFO)."""
