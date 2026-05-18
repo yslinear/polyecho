@@ -25,8 +25,10 @@ CREATE TABLE IF NOT EXISTS accounts (
   -- when not derivable from signature_type. resolve_wallet() fails closed
   -- on unknown.
   wallet_mode          TEXT,
-  -- AES-256-GCM encrypted; held only by trader-core process
-  encrypted_private_key TEXT,
+  -- AES-256-GCM ciphertext (raw bytes); held only by trader-core process.
+  -- BYTEA (not TEXT) so the binary ciphertext is stored losslessly and
+  -- matches the SQLAlchemy LargeBinary ORM column + Drizzle bytea().
+  encrypted_private_key BYTEA,
   -- pending_key_import | ready | disabled
   status               TEXT        NOT NULL DEFAULT 'pending_key_import',
   created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -166,12 +168,12 @@ CREATE TABLE IF NOT EXISTS backtest_jobs (
   template_params          JSONB,
   start_date               DATE        NOT NULL,
   end_date                 DATE        NOT NULL,
-  initial_capital_usd      NUMERIC(14,2),
-  slippage_bps             INTEGER     DEFAULT 150,
-  execution_delay_seconds  INTEGER     DEFAULT 30,
+  initial_capital_usd      NUMERIC(14,2) NOT NULL,
+  slippage_bps             INTEGER     NOT NULL DEFAULT 150,
+  execution_delay_seconds  INTEGER     NOT NULL DEFAULT 30,
   -- queued | running | completed | failed
   status                   TEXT        NOT NULL DEFAULT 'pending',
-  progress                 NUMERIC(5,2) DEFAULT 0,
+  progress                 NUMERIC(5,2) NOT NULL DEFAULT 0,
   result                   JSONB,
   created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
 );

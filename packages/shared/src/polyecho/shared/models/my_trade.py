@@ -27,22 +27,22 @@ class MyTrade(Base):
     id: Mapped[int] = mapped_column(
         BigInteger, Identity(always=True), primary_key=True
     )
+    # SQL/Drizzle: plain ``REFERENCES accounts(id)`` (no ON DELETE).
     account_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="CASCADE"),
+        ForeignKey("accounts.id"),
         nullable=False,
     )
-    leader_address: Mapped[str] = mapped_column(Text, nullable=False)
-    copy_of_trade_id: Mapped[int | None] = mapped_column(
-        BigInteger,
-        ForeignKey("leader_trades.id", ondelete="SET NULL"),
-        nullable=True,
-    )
+    # SQL/Drizzle: leader_address/market_id/side/size/price are NULLable
+    # and ``copy_of_trade_id`` is a plain TEXT column (NOT a BigInteger FK
+    # to leader_trades.id) — align the ORM to the migration (SQL = truth).
+    leader_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    copy_of_trade_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    market_id: Mapped[str] = mapped_column(Text, nullable=False)
-    side: Mapped[str] = mapped_column(Text, nullable=False)   # BUY | SELL
-    size: Mapped[float] = mapped_column(Numeric(20, 6), nullable=False)
-    price: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False)
+    market_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    side: Mapped[str | None] = mapped_column(Text, nullable=True)   # BUY | SELL
+    size: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
+    price: Mapped[float | None] = mapped_column(Numeric(10, 6), nullable=True)
 
     # pending | filled | rejected | partial
     fill_status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")

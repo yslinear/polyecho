@@ -28,10 +28,12 @@ class CopyTemplate(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # SQL/Drizzle do NOT declare ``name`` UNIQUE — drop the ORM-only unique
+    # so Base.metadata matches the migration (3-way alignment, SQL = truth).
+    name: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # Sizing (mutually exclusive)
-    copy_ratio: Mapped[float | None] = mapped_column(Numeric(10, 6), nullable=True)
+    # Sizing (mutually exclusive). NUMERIC(8,5) in all 3 sources.
+    copy_ratio: Mapped[float | None] = mapped_column(Numeric(8, 5), nullable=True)
     fixed_size_usd: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
 
     # Risk limits
@@ -40,13 +42,16 @@ class CopyTemplate(Base):
     max_concurrent_positions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     daily_loss_limit_usd: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
 
-    # Market filters
-    category_whitelist: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, default=list
+    # Market filters. SQL/Drizzle declare these NULLable (no NOT NULL) and
+    # the booleans default false / true respectively (SQL = source of
+    # truth — fixes the prior ORM ``exclude_short_markets default=True``
+    # inversion and the NOT NULL the migration never had).
+    category_whitelist: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text), nullable=True, default=list
     )
-    exclude_short_markets: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True
+    exclude_short_markets: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True, default=False
     )
-    use_fok_orders: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True
+    use_fok_orders: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True, default=True
     )

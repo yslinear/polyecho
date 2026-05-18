@@ -30,8 +30,10 @@ class PushSubscription(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     endpoint: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
-    p256dh_key: Mapped[str | None] = mapped_column(Text, nullable=True)
-    auth_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # SQL/Drizzle: p256dh_key / auth_key are NOT NULL (browser always
+    # supplies both with a PushSubscription) — align the ORM.
+    p256dh_key: Mapped[str] = mapped_column(Text, nullable=False)
+    auth_key: Mapped[str] = mapped_column(Text, nullable=False)
     device_label: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(

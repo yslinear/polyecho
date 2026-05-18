@@ -37,13 +37,18 @@ class Account(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     eoa_address: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     funder_address: Mapped[str | None] = mapped_column(Text, nullable=True)
-    signature_type: Mapped[int] = mapped_column(Integer, nullable=False)
+    # NULLable in SQL/Drizzle (legacy rows / wallet_mode-derived). Align ORM.
+    signature_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Practical wallet identity (brief §6/§9): eoa | magic | safe |
     # poly_1271. The proxy/funder address is the on-chain identity; this
     # column makes the mode explicit when it is not derivable from
     # signature_type alone. Nullable for legacy rows — resolve_wallet()
     # falls back to mapping signature_type and fails closed on unknown.
     wallet_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # AES-256-GCM ciphertext is raw bytes; the ORM/CLI write & read it as
+    # BYTEA (``bytes(row.encrypted_private_key)``). SQL/Drizzle are aligned
+    # to BYTEA below (the ORM is authoritative for this column's storage
+    # form; aligning the migration to TEXT would corrupt binary ciphertext).
     encrypted_private_key: Mapped[bytes | None] = mapped_column(
         LargeBinary, nullable=True
     )

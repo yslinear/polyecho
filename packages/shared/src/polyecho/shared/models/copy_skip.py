@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, Identity, Text, func
+from sqlalchemy import BigInteger, DateTime, Identity, Index, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,6 +26,12 @@ class CopySkip(Base):
     """
 
     __tablename__ = "copy_skips"
+    # NAMED index in SQL/Drizzle (idx_copy_skips_created_at). The prior
+    # ORM ``created_at … index=True`` emitted an unmanaged
+    # ix_copy_skips_created_at — replace with the migration's named index.
+    __table_args__ = (
+        Index("idx_copy_skips_created_at", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(
         BigInteger, Identity(always=True), primary_key=True
@@ -38,5 +44,5 @@ class CopySkip(Base):
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )

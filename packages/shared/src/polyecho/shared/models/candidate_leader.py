@@ -29,12 +29,15 @@ class CandidateLeader(Base):
     wallet_address: Mapped[str] = mapped_column(Text, primary_key=True)
     display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Discovery provenance
-    sources: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, default=list
+    # Discovery provenance.
+    # SQL/Drizzle declare these arrays NULLable (no NOT NULL); the Python
+    # ``default=list`` still gives new rows ``[]`` without forcing a DB-level
+    # NOT NULL the migration does not have (3-way alignment, SQL = truth).
+    sources: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text), nullable=True, default=list
     )
-    first_discovered_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+    first_discovered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     last_active_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -52,17 +55,18 @@ class CandidateLeader(Base):
     # Default backtest params snapshot
     backtest_default: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
-    # Scoring (0–100 each)
-    profit_score: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
-    replicability_score: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
-    total_score: Mapped[float | None] = mapped_column(Numeric(7, 4), nullable=True)
+    # Scoring (0–100 each) — NUMERIC(6,2) in all 3 sources (SQL = truth).
+    profit_score: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
+    replicability_score: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
+    total_score: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
 
-    # Qualitative tagging
-    risk_flags: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, default=list
+    # Qualitative tagging — NULLable in SQL/Drizzle; ``default=list`` keeps
+    # the Python-side ergonomics without a DB NOT NULL the migration omits.
+    risk_flags: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text), nullable=True, default=list
     )
-    specialization: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, default=list
+    specialization: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text), nullable=True, default=list
     )
 
     # User review status

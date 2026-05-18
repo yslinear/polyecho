@@ -41,6 +41,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import BigInteger, LargeBinary
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
@@ -160,9 +161,11 @@ class TestColumns:
 
     def test_candidate_leader_array_and_jsonb_types(self) -> None:
         cols = CandidateLeader.__table__.columns
+        # 0000_init.sql declares these arrays NULLable (no NOT NULL); the
+        # ORM is aligned to the migration (SQL = source of truth).
         for arr in ("sources", "risk_flags", "specialization"):
             assert isinstance(cols[arr].type, ARRAY), arr
-            assert cols[arr].nullable is False
+            assert cols[arr].nullable is True
         for js in ("stats_7d", "stats_30d", "stats_90d", "frequency_stats"):
             assert isinstance(cols[js].type, JSONB), js
             assert cols[js].nullable is True
@@ -170,10 +173,11 @@ class TestColumns:
     def test_copy_template_array_and_bool_defaults(self) -> None:
         cols = CopyTemplate.__table__.columns
         assert isinstance(cols["category_whitelist"].type, ARRAY)
-        assert cols["name"].unique is True
-        # Booleans default True per PRD §5.6.
-        assert cols["exclude_short_markets"].nullable is False
-        assert cols["use_fok_orders"].nullable is False
+        # SQL/Drizzle do NOT mark name UNIQUE and the booleans/arrays are
+        # NULLable there (no NOT NULL) — ORM aligned to the migration.
+        assert cols["name"].unique is not True
+        assert cols["exclude_short_markets"].nullable is True
+        assert cols["use_fok_orders"].nullable is True
 
     def test_backtest_job_arrays_and_jsonb(self) -> None:
         cols = BacktestJob.__table__.columns
@@ -211,19 +215,23 @@ class TestForeignKeys:
     def test_follow_relation_fks(self) -> None:
         acc = self._fk(FollowRelation, "account_id")
         tmpl = self._fk(FollowRelation, "template_id")
+        # 0000_init.sql uses plain ``REFERENCES`` (no ON DELETE). The ORM
+        # is aligned to the migration (SQL = source of truth), so ondelete
+        # is None (Postgres default NO ACTION) — not CASCADE/RESTRICT.
         assert acc.column.table.name == "accounts"
-        assert acc.ondelete == "CASCADE"
+        assert acc.ondelete is None
         assert tmpl.column.table.name == "copy_templates"
-        assert tmpl.ondelete == "RESTRICT"
+        assert tmpl.ondelete is None
 
-    def test_my_trade_fks(self) -> None:
+    def test_my_trade_account_fk_and_copy_of_trade_id(self) -> None:
         acc = self._fk(MyTrade, "account_id")
-        copy = self._fk(MyTrade, "copy_of_trade_id")
         assert acc.column.table.name == "accounts"
-        assert acc.ondelete == "CASCADE"
-        assert copy.column.table.name == "leader_trades"
-        assert copy.ondelete == "SET NULL"
-        assert MyTrade.__table__.columns["copy_of_trade_id"].nullable is True
+        assert acc.ondelete is None
+        # SQL/Drizzle: ``copy_of_trade_id`` is a plain NULLable TEXT column
+        # (NOT a BigInteger FK to leader_trades.id). ORM aligned to SQL.
+        col = MyTrade.__table__.columns["copy_of_trade_id"]
+        assert list(col.foreign_keys) == []
+        assert col.nullable is True
 
 
 # ---------------------------------------------------------------------------
@@ -516,7 +524,9 @@ class TestPgListenDsn:
         import polyecho.shared.db as dbmod
 
         class _S:
-            db_url = "postgresql+asyncpg://x:y@host:1/zz"
+            # db_url is a SecretStr on Settings; _asyncpg_dsn() unwraps it
+            # via .get_secret_value() — the fake must mirror that contract.
+            db_url = SecretStr("postgresql+asyncpg://x:y@host:1/zz")
 
         monkeypatch.setattr(dbmod, "get_settings", lambda: _S())
         assert dbmod._asyncpg_dsn() == "postgresql://x:y@host:1/zz"
@@ -585,7 +595,9 @@ async def _ret(value: Any) -> Any:
 
 
 class _Settings:
-    db_url = "postgresql+asyncpg://u@h/db"
+    # Mirrors Settings.db_url (SecretStr); _asyncpg_dsn unwraps via
+    # .get_secret_value().
+    db_url = SecretStr("postgresql+asyncpg://u@h/db")
 
 
 class TestPgListenLoop:

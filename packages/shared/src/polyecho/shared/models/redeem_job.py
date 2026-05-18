@@ -9,6 +9,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Text,
     UniqueConstraint,
@@ -35,6 +36,9 @@ class RedeemJob(Base):
     """
 
     __tablename__ = "redeem_jobs"
+    # SQL/Drizzle: plain ``REFERENCES`` + NAMED index idx_redeem_jobs_status.
+    # The prior ORM ``status … index=True`` emitted an unmanaged
+    # ix_redeem_jobs_status; replace with the migration's named index.
     __table_args__ = (
         UniqueConstraint(
             "account_id",
@@ -42,6 +46,7 @@ class RedeemJob(Base):
             "outcome_index",
             name="uq_redeem_jobs_account_condition_outcome",
         ),
+        Index("idx_redeem_jobs_status", "status"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -49,7 +54,7 @@ class RedeemJob(Base):
     )
     account_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="CASCADE"),
+        ForeignKey("accounts.id"),
         nullable=False,
     )
     condition_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -60,7 +65,7 @@ class RedeemJob(Base):
 
     # pending | submitted | confirmed | failed
     status: Mapped[str] = mapped_column(
-        Text, nullable=False, default="pending", index=True
+        Text, nullable=False, default="pending"
     )
     tx_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     detected_at: Mapped[datetime | None] = mapped_column(

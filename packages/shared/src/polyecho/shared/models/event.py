@@ -29,15 +29,20 @@ class Event(Base):
 
     __tablename__ = "events"
 
+    # 0000_init.sql defines ONLY a partial index
+    # idx_events_pushed_at_null ON events (pushed_at) WHERE pushed_at IS
+    # NULL. The prior ORM ``index=True`` on event_type/created_at emitted
+    # DUPLICATE ix_* indexes the migration does not have — removed so
+    # Base.metadata matches the SQL (source of truth).
     id: Mapped[int] = mapped_column(
         BigInteger, Identity(always=True), primary_key=True
     )
-    event_type: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
     severity: Mapped[str] = mapped_column(Text, nullable=False, default="info")
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     pushed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )

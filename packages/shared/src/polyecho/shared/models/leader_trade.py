@@ -34,21 +34,27 @@ class LeaderTrade(Base):
         ),
     )
 
+    # NULLability + column set aligned to 0000_init.sql (SQL = source of
+    # truth): market_id/side/size/price/timestamp are NULLable there, and
+    # the leader_address/timestamp indexes are SQL-managed
+    # (idx_leader_trades_leader_timestamp) — the ORM-level ``index=True``
+    # generated DUPLICATE ix_* indexes not in the migration, so they are
+    # removed. ``condition_id`` exists in SQL/Drizzle and was missing here.
     id: Mapped[int] = mapped_column(
         BigInteger, Identity(always=True), primary_key=True
     )
     trade_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
-    leader_address: Mapped[str] = mapped_column(Text, nullable=False, index=True)
-    market_id: Mapped[str] = mapped_column(Text, nullable=False)
+    leader_address: Mapped[str] = mapped_column(Text, nullable=False)
+    market_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     condition_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Cross-source dedup key (brief §3); nullable until the fill is
     # attributed to an on-chain tx (some WS events arrive pre-settlement).
     tx_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    side: Mapped[str] = mapped_column(Text, nullable=False)  # BUY | SELL
-    size: Mapped[float] = mapped_column(Numeric(20, 6), nullable=False)
-    price: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False)
-    timestamp: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
+    side: Mapped[str | None] = mapped_column(Text, nullable=True)  # BUY | SELL
+    size: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
+    price: Mapped[float | None] = mapped_column(Numeric(10, 6), nullable=True)
+    timestamp: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     raw: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

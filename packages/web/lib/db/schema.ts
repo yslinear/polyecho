@@ -13,11 +13,24 @@ import {
   jsonb,
   numeric,
   bigserial,
+  customType,
   timestamp,
   primaryKey,
   unique,
   index,
 } from "drizzle-orm/pg-core";
+
+/**
+ * Postgres `BYTEA` column (drizzle-orm 0.45.x has no first-class `bytea`
+ * helper). Stores raw binary — used only by `accounts.encrypted_private_key`
+ * (AES-256-GCM ciphertext). Mirrors the SQLAlchemy `LargeBinary` ORM column
+ * and the `BYTEA` type in `infra/migrations/0000_init.sql` (3-way aligned).
+ */
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+});
 
 // ---------------------------------------------------------------------------
 // accounts — your own Polymarket accounts (PRD §5.1)
@@ -31,8 +44,8 @@ export const accounts = pgTable("accounts", {
   signature_type: integer("signature_type"),
   /** eoa | magic | safe | poly_1271 — practical wallet identity (brief §6/§9) */
   wallet_mode: text("wallet_mode"),
-  /** AES-256-GCM encrypted; held only by trader-core process */
-  encrypted_private_key: text("encrypted_private_key"),
+  /** AES-256-GCM ciphertext (raw bytes); held only by trader-core process */
+  encrypted_private_key: bytea("encrypted_private_key"),
   /** pending_key_import | ready | disabled */
   status: text("status").notNull().default("pending_key_import"),
   created_at: timestamp("created_at", { withTimezone: true })
@@ -218,12 +231,16 @@ export const backtestJobs = pgTable("backtest_jobs", {
   initial_capital_usd: numeric("initial_capital_usd", {
     precision: 14,
     scale: 2,
-  }),
-  slippage_bps: integer("slippage_bps").default(150),
-  execution_delay_seconds: integer("execution_delay_seconds").default(30),
+  }).notNull(),
+  slippage_bps: integer("slippage_bps").notNull().default(150),
+  execution_delay_seconds: integer("execution_delay_seconds")
+    .notNull()
+    .default(30),
   /** queued | running | completed | failed */
   status: text("status").notNull().default("pending"),
-  progress: numeric("progress", { precision: 5, scale: 2 }).default("0"),
+  progress: numeric("progress", { precision: 5, scale: 2 })
+    .notNull()
+    .default("0"),
   result: jsonb("result"),
   created_at: timestamp("created_at", { withTimezone: true })
     .notNull()
