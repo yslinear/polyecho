@@ -41,15 +41,39 @@ _VALID_SERVICES = [
 ]
 
 
+def _docker_compose_plugin_available() -> bool:
+    """True iff the ``docker compose`` *plugin* actually works.
+
+    R15 #3: ``docker`` being on PATH does NOT imply the Compose V2 plugin
+    is installed — a host can have the docker CLI without it. Returning
+    ``["docker", "compose"]`` blindly then surfaces a confusing
+    "docker: 'compose' is not a docker command" later instead of the
+    clean fallback / "no compose CLI" message. Probe it explicitly with a
+    cheap, side-effect-free ``docker compose version`` (no shell, fixed
+    argv, ``check=False`` — we inspect the return code ourselves).
+    """
+    try:
+        completed = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["docker", "compose", "version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return completed.returncode == 0
+
+
 def _compose_base_cmd() -> list[str] | None:
     """Resolve the compose invocation: ``docker compose`` or fallback.
 
     Returns the argv prefix (e.g. ``["docker", "compose"]``) or ``None``
-    when no compose CLI is available on PATH.
+    when no working compose CLI is available on PATH.
     """
-    if shutil.which("docker") is not None:
+    if shutil.which("docker") is not None and _docker_compose_plugin_available():
         return ["docker", "compose"]
-    # Legacy standalone binary (older operator hosts).
+    # Legacy standalone binary (older operator hosts, or docker present
+    # but the Compose V2 plugin missing).
     if shutil.which("docker-compose") is not None:
         return ["docker-compose"]
     return None

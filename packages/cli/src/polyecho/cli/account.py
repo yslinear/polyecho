@@ -97,7 +97,11 @@ def set_danger_passphrase_cmd() -> None:
         _console.print(f"[red]設定失敗：[/red] {exc}")
         raise typer.Exit(code=1) from exc
     finally:
-        passphrase = ""  # noqa: F841 - drop plaintext reference promptly
+        # NOTE: this only rebinds the name — it does NOT scrub the secret
+        # from memory. CPython `str` is immutable; the original passphrase
+        # bytes stay resident until GC and are not zeroed. Best-effort
+        # reference drop only; do not rely on this for memory hygiene.
+        passphrase = ""  # noqa: F841
 
     _console.print(
         Panel(
@@ -280,7 +284,15 @@ def import_key(
         raise typer.Exit(code=1) from exc
 
     eoa_lower = wallets[0]
-    assert eoa_lower is not None  # type 0 is always exact (never None)
+    # Runtime guard — NOT `assert` (stripped under python -O /
+    # PYTHONOPTIMIZE; a None here would silently persist a bogus
+    # eoa_address). Type 0 is always exact, so None means a broken
+    # derive_wallets contract → fail loudly.
+    if eoa_lower is None:
+        raise RuntimeError(
+            "derive_wallets returned None for the type-0 (EOA) slot — "
+            "this should be impossible; refusing to import."
+        )
 
     # P0-5: consume the verified derive_wallets contract.
     #   type 0/1 → verified derived funder (exact / brief §9 CREATE2).
@@ -343,7 +355,12 @@ def import_key(
     try:
         encrypted = encrypt_private_key(private_key.strip(), passphrase)
     finally:
-        # Best-effort: drop the plaintext references promptly.
+        # NOTE: rebinding these names does NOT scrub the secrets from
+        # memory. CPython `str` is immutable — the original private-key
+        # and passphrase bytes remain resident until GC and are never
+        # zeroed. This is a best-effort reference drop ONLY; Python
+        # cannot reliably zero a str, so do not treat this as a
+        # memory-hygiene guarantee.
         private_key = ""  # noqa: F841
         passphrase = ""  # noqa: F841
 

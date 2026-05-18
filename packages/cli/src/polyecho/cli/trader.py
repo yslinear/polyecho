@@ -440,8 +440,23 @@ def resume(
     leader_addr: str = typer.Argument(
         ..., help="Leader wallet address (0x…) to resume."
     ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the live-mode confirmation (also via "
+        "POLYECHO_TRADER_RESUME_YES=1). Required when LIVE-TRADING is "
+        "UNLOCKED and stdin is not a TTY.",
+    ),
 ) -> None:
-    """Resume copy-trading for one leader (safe-write)."""
+    """Resume copy-trading for one leader (safe-write).
+
+    R15 #5: when the host live lock (:func:`is_live_enabled`) is ON,
+    per-leader resume is gated the SAME as ``resume-all`` — otherwise an
+    operator could bypass the live gate by resuming leaders one at a time.
+    ``pause`` / ``pause-all`` remain ungated (pausing is always safe).
+    """
+    _confirm_live_or_die(yes, f"resume follow relations for {leader_addr}")
     try:
         n = _set_leader_status(leader_addr, "active")
     except Exception as exc:  # noqa: BLE001
@@ -667,7 +682,16 @@ def enable_live(
         )
         raise typer.Exit(code=1) from exc
     finally:
-        passphrase = ""  # noqa: F841 - drop the secret promptly
+        # NOTE: this only rebinds the name — it does NOT scrub the secret
+        # from memory. CPython `str` is immutable; the original passphrase
+        # bytes remain resident until GC and are never zeroed. Best-effort
+        # reference drop ONLY — not a memory-hygiene guarantee.
+        passphrase = ""  # noqa: F841
+
+    # Capture the ACK timestamp ONCE so the stored audit value and the
+    # printed confirmation panel are byte-identical (R15 #2: two separate
+    # _now() calls produced divergent timestamps in the row vs the panel).
+    ack_ts = _now().isoformat()
 
     async def _write_ack() -> None:
         async with session_scope() as session:
@@ -676,7 +700,7 @@ def enable_live(
                     select(Setting).where(Setting.key == _LIVE_ACK_KEY)
                 )
             ).scalar_one_or_none()
-            ack_value = {"by": acct_name, "at": _now().isoformat()}
+            ack_value = {"by": acct_name, "at": ack_ts}
             if existing is None:
                 session.add(Setting(key=_LIVE_ACK_KEY, value=ack_value))
             else:
@@ -691,7 +715,7 @@ def enable_live(
     _console.print(
         Panel(
             f"[bold green]ACK recorded[/bold green] by [bold]{acct_name}"
-            f"[/bold] at {_now().isoformat()}.\n\n"
+            f"[/bold] at {ack_ts}.\n\n"
             "[bold yellow]This is an AUDIT ACK ONLY — money has NOT been "
             "unlocked.[/bold yellow]\n"
             "To actually allow live orders you MUST set the host env var "

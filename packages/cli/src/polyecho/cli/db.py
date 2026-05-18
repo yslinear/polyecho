@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -190,7 +191,14 @@ def migrate(
         raw = await engine.raw_connection()
         try:
             asyncpg_conn = raw.driver_connection
-            assert asyncpg_conn is not None  # an open raw conn always has one
+            # Runtime guard — NOT `assert` (stripped under python -O /
+            # PYTHONOPTIMIZE, which would let a None slip through to an
+            # opaque AttributeError instead of this clear failure).
+            if asyncpg_conn is None:
+                raise RuntimeError(
+                    "raw asyncpg connection unexpectedly has no "
+                    "driver_connection (cannot apply migration)"
+                )
             await asyncpg_conn.execute(sql)
         finally:
             raw.close()
@@ -289,22 +297,44 @@ def backup(
     # `pg_dump <dsn> | gzip > artifact` (context7-verified canonical form),
     # implemented as a stream so pg_dump's stdout is compressed in-process
     # (a gzip.GzipFile has no OS fd to hand a child process directly).
+    #
+    # Deadlock-safe (R14 #3): we consume stdout in-process while pg_dump
+    # runs.  If stderr were a PIPE that nobody drains, pg_dump would block
+    # once the OS stderr pipe buffer fills (a large/verbose dump) → the
+    # `copyfileobj` reader and the child deadlock forever (context7 /
+    # CPython subprocess docs: "wait() can deadlock ... use communicate()").
+    # We canNOT call communicate() here because stdout is already being
+    # streamed to gzip out-of-band.  Instead stderr is redirected to a
+    # real OS-fd temp file (a SpooledTemporaryFile with a generous
+    # rollover) — that fd has no fixed pipe-buffer ceiling, so pg_dump
+    # never blocks on it; we read it back only on failure.
     try:
-        with gzip.open(artifact, "wb") as gz:
+        with (
+            gzip.open(artifact, "wb") as gz,
+            tempfile.SpooledTemporaryFile(
+                max_size=1 << 20, mode="w+b"
+            ) as errfile,
+        ):
             proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
                 ["pg_dump", "--dbname", dsn, "--no-owner", "--no-privileges"],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=errfile,
             )
-            assert proc.stdout is not None
-            shutil.copyfileobj(proc.stdout, gz)
-            _, stderr = proc.communicate()
-        if proc.returncode != 0:
+            if proc.stdout is None:  # never None with stdout=PIPE
+                proc.kill()
+                proc.wait()
+                raise RuntimeError("pg_dump stdout pipe was not created")
+            with proc.stdout:
+                shutil.copyfileobj(proc.stdout, gz)
+            returncode = proc.wait()
+            errfile.seek(0)
+            stderr = errfile.read()
+        if returncode != 0:
             artifact.unlink(missing_ok=True)
             err = (stderr or b"").decode("utf-8", "replace").strip()
             _console.print(
                 f"[red]Backup failed (pg_dump):[/red] "
-                f"{err or f'exit {proc.returncode}'}"
+                f"{err or f'exit {returncode}'}"
             )
             raise typer.Exit(code=1)
     except OSError as exc:

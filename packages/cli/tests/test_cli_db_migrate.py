@@ -119,6 +119,32 @@ class TestDbMigrateExecution:
         assert result.exit_code != 0
         assert "Migration failed" in result.output
 
+    def test_none_driver_connection_raises_runtime_error_not_assert(
+        self,
+    ) -> None:
+        """R14 #4: the None-driver_connection guard must be an explicit
+        RuntimeError, NOT `assert` (assert is stripped under
+        python -O / PYTHONOPTIMIZE — a None would then slip through to an
+        opaque AttributeError). We simulate a raw conn whose
+        driver_connection is None and assert a clean non-zero exit with
+        the explicit guard message."""
+        raw = MagicMock()
+        raw.driver_connection = None
+        raw.close = MagicMock()
+        engine = MagicMock()
+        engine.raw_connection = AsyncMock(return_value=raw)
+        engine.dispose = AsyncMock()
+
+        with patch("polyecho.shared.db.get_engine", return_value=engine):
+            result = runner.invoke(app, ["db", "migrate", "--yes"])
+
+        assert result.exit_code != 0
+        assert "Migration failed" in result.output
+        # The explicit Runtimeable message (proves it is not a bare
+        # AssertionError nor a None.execute AttributeError).
+        assert "driver_connection" in result.output
+        raw.close.assert_called_once()
+
     def test_dry_run_executes_nothing_and_redacts(self) -> None:
         """--dry-run prints the redacted target + sql path, runs no SQL."""
         executed: list[str] = []
@@ -168,13 +194,31 @@ class TestDbMigrateExecution:
 
 
 def _fake_popen(stdout: bytes = b"-- dump --\n", rc: int = 0) -> MagicMock:
-    """A Popen double whose .stdout streams *stdout* once then EOF."""
+    """A Popen double whose .stdout streams *stdout* once then EOF.
+
+    R14 #3: the production code is now deadlock-safe — it streams stdout
+    to gzip then calls ``proc.wait()`` (stderr goes to a real-fd temp
+    file, never an undrained PIPE). So ``wait()`` must return the real
+    exit code, NOT a truthy MagicMock. ``communicate`` is deliberately a
+    tripwire: if production ever reverts to ``communicate()`` while
+    streaming stdout (the deadlock pattern) this raises instead of
+    silently passing.
+    """
     import io
 
     proc = MagicMock()
     proc.stdout = io.BytesIO(stdout)
     proc.returncode = rc
-    proc.communicate = MagicMock(return_value=(b"", b""))
+    proc.wait = MagicMock(return_value=rc)
+
+    def _no_communicate(*_a: object, **_k: object) -> tuple[bytes, bytes]:
+        raise AssertionError(
+            "db backup must NOT call proc.communicate() while it is "
+            "streaming stdout to gzip — that is the R14 #3 deadlock "
+            "pattern (stderr PIPE fills, child blocks forever)."
+        )
+
+    proc.communicate = MagicMock(side_effect=_no_communicate)
     return proc
 
 
@@ -246,6 +290,42 @@ class TestDbBackup:
         assert "Backup failed" in result.output
         # Failed dump must not leave a partial artifact behind.
         assert list(tmp_path.glob("polyecho-*.sql.gz")) == []
+
+    def test_backup_is_deadlock_safe_no_undrained_stderr_pipe(
+        self, tmp_path: Path
+    ) -> None:
+        """R14 #3 regression: backup must NOT use the deadlock pattern
+        (consume stdout, then communicate() with an undrained stderr
+        PIPE). Assert: communicate() is never called, and stderr is NOT
+        subprocess.PIPE (it must be a real fd / file object so pg_dump
+        can never block on a full stderr pipe buffer)."""
+        import subprocess as _sp
+
+        fp = _fake_popen()
+        with (
+            patch(
+                "polyecho.cli.db.shutil.which", return_value="/usr/bin/pg_dump"
+            ),
+            patch(
+                "polyecho.cli.db.subprocess.Popen", return_value=fp
+            ) as popen_mock,
+        ):
+            result = runner.invoke(
+                app, ["db", "backup", "--out", str(tmp_path)]
+            )
+        assert result.exit_code == 0, result.output
+        # The deadlock-prone communicate() path was never taken.
+        fp.communicate.assert_not_called()
+        # proc.wait() (deadlock-safe: stdout already drained in-process)
+        # is the join used instead.
+        fp.wait.assert_called_once()
+        # stderr is NOT an undrained PIPE — passing subprocess.PIPE while
+        # the parent only reads stdout is the exact deadlock condition.
+        _, kwargs = popen_mock.call_args
+        assert kwargs.get("stderr") is not _sp.PIPE
+        assert kwargs.get("stdout") is _sp.PIPE  # stdout IS streamed
+        # The gzip artifact was still produced (behaviour preserved).
+        assert len(list(tmp_path.glob("polyecho-*.sql.gz"))) == 1
 
     def test_gpg_recipient_encrypts(self, tmp_path: Path) -> None:
         """--gpg-recipient adds a gpg --encrypt step producing a .gpg."""

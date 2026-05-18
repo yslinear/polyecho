@@ -12,6 +12,7 @@ Design
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,6 +29,25 @@ def _ok_proc() -> MagicMock:
     return p
 
 
+def _compose_run_router(
+    *, plugin_ok: bool = True, logs_rc: int = 0
+) -> Callable[..., MagicMock]:
+    """A ``subprocess.run`` side_effect that distinguishes the cheap
+    ``docker compose version`` *probe* (R15 #3) from the real
+    ``docker compose logs`` call so tests can assert each independently.
+    """
+
+    def _run(argv: list[str], *_a: object, **_k: object) -> MagicMock:
+        p = MagicMock()
+        if argv[:3] == ["docker", "compose", "version"]:
+            p.returncode = 0 if plugin_ok else 1
+        else:
+            p.returncode = logs_rc
+        return p
+
+    return _run
+
+
 class TestLogsShow:
     def test_invokes_docker_compose_logs_with_tail(self) -> None:
         with (
@@ -39,7 +59,7 @@ class TestLogsShow:
             ),
             patch(
                 "polyecho.cli.logs.subprocess.run",
-                return_value=_ok_proc(),
+                side_effect=_compose_run_router(),
             ) as run_mock,
         ):
             result = runner.invoke(
@@ -48,13 +68,20 @@ class TestLogsShow:
                 env={"COLUMNS": "200"},
             )
         assert result.exit_code == 0, result.output
-        run_mock.assert_called_once()
-        argv = run_mock.call_args[0][0]
+        # Two run() calls now: the plugin probe + the real logs call.
+        argv = run_mock.call_args[0][0]  # last call = the logs invocation
         assert argv[:2] == ["docker", "compose"]
         assert "logs" in argv
         assert "--tail" in argv and "50" in argv
         assert argv[-1] == "trader-core"
         assert "--follow" not in argv
+        # The probe ran exactly once before the logs call.
+        probe_calls = [
+            c
+            for c in run_mock.call_args_list
+            if c[0][0][:3] == ["docker", "compose", "version"]
+        ]
+        assert len(probe_calls) == 1
 
     def test_follow_flag_added(self) -> None:
         with (
@@ -66,7 +93,7 @@ class TestLogsShow:
             ),
             patch(
                 "polyecho.cli.logs.subprocess.run",
-                return_value=_ok_proc(),
+                side_effect=_compose_run_router(),
             ) as run_mock,
         ):
             result = runner.invoke(
@@ -119,8 +146,6 @@ class TestLogsShow:
         assert "No compose CLI found" in result.output
 
     def test_compose_nonzero_exit_propagates(self) -> None:
-        bad = MagicMock()
-        bad.returncode = 1
         with (
             patch(
                 "polyecho.cli.logs.shutil.which",
@@ -128,13 +153,96 @@ class TestLogsShow:
                 if b == "docker"
                 else None,
             ),
-            patch("polyecho.cli.logs.subprocess.run", return_value=bad),
+            patch(
+                "polyecho.cli.logs.subprocess.run",
+                # plugin probe OK, but the real `logs` call exits 1.
+                side_effect=_compose_run_router(plugin_ok=True, logs_rc=1),
+            ),
         ):
             result = runner.invoke(
                 app, ["logs", "show", "discovery-worker"], env={"COLUMNS": "200"}
             )
         assert result.exit_code != 0
         assert "exited 1" in result.output
+
+    def test_docker_present_but_compose_plugin_missing_falls_back(
+        self,
+    ) -> None:
+        """R15 #3: docker on PATH but the Compose V2 plugin absent ⇒ do
+        NOT blindly return ['docker','compose'] (that yields a confusing
+        'compose is not a docker command' later). The probe fails, so we
+        fall back to the legacy docker-compose binary."""
+        with (
+            patch(
+                "polyecho.cli.logs.shutil.which",
+                # BOTH docker and the legacy binary are present.
+                side_effect=lambda b: f"/usr/bin/{b}",
+            ),
+            patch(
+                "polyecho.cli.logs.subprocess.run",
+                side_effect=_compose_run_router(plugin_ok=False),
+            ) as run_mock,
+        ):
+            result = runner.invoke(
+                app, ["logs", "show", "trader-core"], env={"COLUMNS": "200"}
+            )
+        assert result.exit_code == 0, result.output
+        # The probe ran (and reported the plugin missing)…
+        assert any(
+            c[0][0][:3] == ["docker", "compose", "version"]
+            for c in run_mock.call_args_list
+        )
+        # …so the actual logs call used the legacy standalone binary.
+        logs_call = run_mock.call_args[0][0]
+        assert logs_call[0] == "docker-compose"
+        assert logs_call[:2] != ["docker", "compose"]
+
+    def test_docker_present_plugin_missing_and_no_legacy_errors_clean(
+        self,
+    ) -> None:
+        """docker present, plugin missing, NO docker-compose ⇒ the clean
+        'No compose CLI found' message + non-zero (not a confusing
+        runtime docker error)."""
+        with (
+            patch(
+                "polyecho.cli.logs.shutil.which",
+                side_effect=lambda b: "/usr/bin/docker"
+                if b == "docker"
+                else None,
+            ),
+            patch(
+                "polyecho.cli.logs.subprocess.run",
+                side_effect=_compose_run_router(plugin_ok=False),
+            ),
+        ):
+            result = runner.invoke(
+                app, ["logs", "show", "trader-core"], env={"COLUMNS": "200"}
+            )
+        assert result.exit_code != 0
+        assert "No compose CLI found" in result.output
+
+    def test_probe_oserror_treated_as_plugin_unavailable(self) -> None:
+        """If the probe itself raises OSError (docker shim broken), treat
+        the plugin as unavailable and fall back cleanly — never crash."""
+        def _raise(argv: list[str], *_a: object, **_k: object) -> MagicMock:
+            if argv[:3] == ["docker", "compose", "version"]:
+                raise OSError("exec format error")
+            p = MagicMock()
+            p.returncode = 0
+            return p
+
+        with (
+            patch(
+                "polyecho.cli.logs.shutil.which",
+                side_effect=lambda b: f"/usr/bin/{b}",
+            ),
+            patch("polyecho.cli.logs.subprocess.run", side_effect=_raise),
+        ):
+            result = runner.invoke(
+                app, ["logs", "show", "trader-core"], env={"COLUMNS": "200"}
+            )
+        assert result.exit_code == 0, result.output
+        # Fell back to the legacy binary rather than crashing.
 
 
 @pytest.mark.parametrize(

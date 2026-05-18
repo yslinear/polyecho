@@ -26,8 +26,15 @@ from polyecho.cli._stub import NOT_IMPLEMENTED_EXIT_CODE, not_implemented
 
 runner = CliRunner()
 
-_CLI_SRC = pathlib.Path(
-    "packages/cli/src/polyecho/cli"
+# Resolve via __file__ (NOT cwd-relative): a cwd-relative path silently
+# pytest.skip()s the regression guard when pytest runs from the package
+# dir, making this invisible (R15 #6). __file__ = .../packages/cli/tests/
+# this_file → cli src is ../src/polyecho/cli.
+_CLI_SRC = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "src"
+    / "polyecho"
+    / "cli"
 )
 
 
@@ -48,8 +55,13 @@ def test_no_src_command_is_still_a_silent_stub() -> None:
     """After Wave C-cli, NO command module (other than the helper module
     that defines it) should call ``not_implemented`` — every stub now has a
     real implementation."""
-    if not _CLI_SRC.is_dir():
-        pytest.skip("run from repo root; cli src path not resolvable")
+    # Hard assert (NOT skip): _CLI_SRC is __file__-anchored so it MUST
+    # resolve regardless of cwd; a miss is a real regression, not a
+    # reason to silently skip the guard.
+    assert _CLI_SRC.is_dir(), (
+        f"cli src not found at __file__-anchored path {_CLI_SRC} — "
+        "the regression guard must never be skippable"
+    )
     offenders: list[str] = []
     for py in _CLI_SRC.glob("*.py"):
         if py.name == "_stub.py":

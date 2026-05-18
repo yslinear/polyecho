@@ -334,6 +334,59 @@ class TestAccountImport:
         # Even on failure the key must not leak.
         assert _PRIVATE_KEY not in result.output
 
+    def test_none_eoa_slot_raises_runtime_error_not_assert(self) -> None:
+        """R14 #5: the type-0/eoa_lower guard must be an explicit
+        RuntimeError, NOT `assert` — `assert` is stripped under
+        python -O / PYTHONOPTIMIZE, which would let a None eoa_address be
+        persisted. We patch derive_wallets so slot 0 is None and assert a
+        clean non-zero exit naming derive_wallets (not a bare
+        AssertionError, and crucially the DB write is never reached so no
+        bogus row is persisted)."""
+        scope = _make_session_scope(scalar_result=None)
+        with (
+            # derive_wallets is imported lazily inside import_key, so
+            # patch it at its definition module (not on polyecho.cli.account).
+            patch(
+                "polyecho.shared.accounts.derive_wallets",
+                return_value={0: None, 1: None, 2: None, 3: None},
+            ),
+            patch("polyecho.shared.db.session_scope", scope),
+        ):
+            result = runner.invoke(
+                app,
+                ["account", "import", _EOA, "-t", "0"],
+                input=f"{_PASSPHRASE}\n{_PASSPHRASE}\n{_PRIVATE_KEY}\n",
+            )
+        assert result.exit_code != 0
+        # CRITICAL: it must be a RuntimeError (explicit runtime guard),
+        # NOT an AssertionError (which `assert` would raise and which is
+        # stripped entirely under python -O / PYTHONOPTIMIZE).
+        assert isinstance(result.exception, RuntimeError)
+        assert not isinstance(result.exception, AssertionError)
+        assert "derive_wallets" in str(result.exception)
+        # The guard fired BEFORE any DB access — no fabricated row.
+        assert "session" not in scope._captured
+        assert _PRIVATE_KEY not in result.output
+
+    def test_scrub_comments_are_honest_no_false_security_claim(self) -> None:
+        """R15 #2/#4: the passphrase/private_key `finally` blocks rebind
+        an immutable CPython str — they do NOT scrub memory. The comment
+        must NOT claim a security property it cannot deliver; it must
+        explicitly say Python cannot reliably zero a str (best-effort
+        reference drop only)."""
+        import inspect
+
+        import polyecho.cli.account as acct
+
+        src = inspect.getsource(acct)
+        # The honest disclaimer is present…
+        assert "does NOT scrub" in src
+        assert "best-effort" in src.lower()
+        assert "cannot reliably zero a str" in src
+        # …and the OLD misleading phrasings are gone.
+        assert "drop plaintext reference promptly" not in src
+        assert "Best-effort: drop the plaintext references promptly." not in src
+
     def test_passphrase_is_not_a_bindable_option(self) -> None:
         """P3 hardening: the passphrase MUST NOT be a Typer Option (no
         ``--passphrase``) so it can never land in argv / shell history /
