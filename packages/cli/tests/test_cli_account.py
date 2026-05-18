@@ -98,17 +98,21 @@ def _account_row(**over: Any) -> MagicMock:
 # detect
 # ---------------------------------------------------------------------------
 class _SwingDS:
-    """DataSource-shaped fake (composition) mapping the type-2 candidate
-    onto the SWING archetype fixtures so detection has data to rank."""
+    """DataSource-shaped fake (composition) mapping the type-1 candidate
+    onto the SWING archetype fixtures so detection has data to rank.
 
-    def __init__(self, type2_addr: str) -> None:
-        self._t2 = type2_addr
+    P0-5: ``derive_wallets`` no longer fabricates type-2/3 addresses (they
+    are ``None``), so the only non-EOA derivable candidate is type-1
+    (verified CREATE2 Magic proxy).  We map that onto SWING fixtures."""
+
+    def __init__(self, type1_addr: str) -> None:
+        self._t1 = type1_addr
         self._fx = FixtureDataSource()
 
     async def get_positions(
         self, wallet: str, *, size_threshold: float = 1.0
     ) -> list[PositionRecord]:
-        tgt = SWING if wallet.lower() == self._t2 else wallet
+        tgt = SWING if wallet.lower() == self._t1 else wallet
         return await self._fx.get_positions(tgt, size_threshold=size_threshold)
 
     async def get_user_activity(
@@ -120,7 +124,7 @@ class _SwingDS:
         activity_type: str | None = "TRADE",
         limit: int | None = None,
     ) -> list[ActivityRecord]:
-        tgt = SWING if wallet.lower() == self._t2 else wallet
+        tgt = SWING if wallet.lower() == self._t1 else wallet
         return await self._fx.get_user_activity(
             tgt, start=start, end=end, activity_type=activity_type, limit=limit
         )
@@ -128,8 +132,15 @@ class _SwingDS:
 
 class TestAccountDetect:
     def test_detect_renders_table_and_recommendation(self) -> None:
+        # P0-5: derive_wallets returns {0: eoa, 1: magic_proxy, 2: None,
+        # 3: None}.  type-2/3 have NO trustworthy offline derivation, so
+        # the only derivable non-EOA candidate is type-1 (verified CREATE2).
+        # The fixture maps SWING onto type-1, so type-1 must be recommended.
         w = derive_wallets(_EOA)
-        ds = _SwingDS(w[2])
+        assert w[2] is None and w[3] is None  # contract: no fabricated addrs
+        t1 = w[1]
+        assert t1 is not None  # type-1 is the verified CREATE2 candidate
+        ds = _SwingDS(t1)
         with patch("polyecho.shared.datasource.get_datasource", return_value=ds):
             result = runner.invoke(
                 app, ["account", "detect", _EOA], env={"COLUMNS": "200"}
@@ -137,12 +148,16 @@ class TestAccountDetect:
 
         assert result.exit_code == 0, result.output
         out = result.output
-        # All four candidate types shown.
+        # All four candidate types still shown (the result describes 0..3).
         for name in ("EOA", "POLY_PROXY", "POLY_GNOSIS_SAFE", "POLY_1271"):
             assert name in out
         assert "Recommended" in out
-        assert "Type 2" in out
+        # type-1 (the only derivable non-EOA candidate, fed SWING data) wins.
+        assert "Type 1" in out
         assert _EOA_LOWER in out
+        # type-2/3 must render the safe zh-TW hint, NOT a fabricated address
+        # and NOT a crash.
+        assert "需顯式提供 funder" in out
 
     def test_detect_no_data_reports_none(self) -> None:
         ds = FixtureDataSource()  # nothing maps
@@ -161,16 +176,26 @@ class TestAccountDetect:
 # import
 # ---------------------------------------------------------------------------
 class TestAccountImport:
-    def test_import_encrypts_and_creates_row(self) -> None:
-        """import → new Account with status 'ready', funder from derivation,
-        and an encrypted_private_key blob that decrypts back to the key."""
+    def test_import_type2_with_explicit_funder_creates_row(self) -> None:
+        """P0-5: type-2 (POLY_GNOSIS_SAFE) has NO offline derivation
+        (derive_wallets[2] is None).  import MUST require an explicit,
+        operator-supplied --funder and persist EXACTLY that (lowercased) —
+        never a fabricated address.  Round-trips the encrypted key too."""
         from polyecho.shared.crypto import decrypt_private_key
+
+        assert derive_wallets(_EOA)[2] is None  # contract: no fabricated addr
+        explicit_funder = "0x" + "FE" * 20
 
         scope = _make_session_scope(scalar_result=None)  # no existing row
         with patch("polyecho.shared.db.session_scope", scope):
             result = runner.invoke(
                 app,
-                ["account", "import", _EOA, "--signature-type", "2", "--name", "alice"],
+                [
+                    "account", "import", _EOA,
+                    "--signature-type", "2",
+                    "--name", "alice",
+                    "--funder", explicit_funder,
+                ],
                 # passphrase (prompt+confirm) then private key (hidden prompt)
                 input=f"{_PASSPHRASE}\n{_PASSPHRASE}\n{_PRIVATE_KEY}\n",
             )
@@ -188,12 +213,57 @@ class TestAccountImport:
         assert added.eoa_address == _EOA_LOWER
         assert added.signature_type == 2
         assert added.status == "ready"
-        assert added.funder_address == derive_wallets(_EOA)[2]
+        # The persisted funder is EXACTLY the operator-supplied value
+        # (lowercased) — NOT a fabricated derivation.
+        assert added.funder_address == explicit_funder.lower()
         assert added.name == "alice"
         # Round-trip: the stored blob decrypts to the original key.
         blob = added.encrypted_private_key
         assert isinstance(blob, bytes)
         assert decrypt_private_key(blob, _PASSPHRASE) == _PRIVATE_KEY
+
+    def test_import_type2_without_funder_refuses(self) -> None:
+        """P0-5 core: type-2 with NO --funder must refuse loudly and
+        persist NOTHING (no fabricated address ever written)."""
+        scope = _make_session_scope(scalar_result=None)
+        with patch("polyecho.shared.db.session_scope", scope):
+            result = runner.invoke(
+                app,
+                ["account", "import", _EOA, "--signature-type", "2"],
+                input=f"{_PASSPHRASE}\n{_PASSPHRASE}\n{_PRIVATE_KEY}\n",
+            )
+        assert result.exit_code != 0
+        assert "需顯式提供" in result.output or "缺少 funder" in result.output
+        # Never reached the DB write — no fabricated row persisted.
+        assert "session" not in scope._captured
+
+    def test_import_type3_without_funder_refuses(self) -> None:
+        """P0-5: type-3 (POLY_1271) likewise has no derivation and must
+        fail-closed without an explicit --funder."""
+        assert derive_wallets(_EOA)[3] is None
+        scope = _make_session_scope(scalar_result=None)
+        with patch("polyecho.shared.db.session_scope", scope):
+            result = runner.invoke(
+                app,
+                ["account", "import", _EOA, "-t", "3"],
+                input=f"{_PASSPHRASE}\n{_PASSPHRASE}\n{_PRIVATE_KEY}\n",
+            )
+        assert result.exit_code != 0
+        assert "session" not in scope._captured
+
+    def test_import_type2_invalid_funder_rejected(self) -> None:
+        """An explicit but malformed --funder is rejected before any DB
+        access (no garbage address persisted)."""
+        scope = _make_session_scope(scalar_result=None)
+        with patch("polyecho.shared.db.session_scope", scope):
+            result = runner.invoke(
+                app,
+                ["account", "import", _EOA, "-t", "2", "--funder", "not-an-addr"],
+                input=f"{_PASSPHRASE}\n{_PASSPHRASE}\n{_PRIVATE_KEY}\n",
+            )
+        assert result.exit_code != 0
+        assert "有效的 EVM 位址" in result.output
+        assert "session" not in scope._captured
 
     def test_import_updates_existing_row_status_transition(self) -> None:
         """An existing pending row is upserted in place → status becomes
@@ -221,9 +291,11 @@ class TestAccountImport:
     def test_import_empty_private_key_aborts(self) -> None:
         scope = _make_session_scope(scalar_result=None)
         with patch("polyecho.shared.db.session_scope", scope):
+            # type-1 is offline-derivable (no --funder needed), so this
+            # exercises the empty-key guard, not the P0-5 funder refusal.
             result = runner.invoke(
                 app,
-                ["account", "import", _EOA],
+                ["account", "import", _EOA, "-t", "1"],
                 input=f"{_PASSPHRASE}\n{_PASSPHRASE}\n   \n",
             )
         assert result.exit_code != 0
@@ -249,9 +321,12 @@ class TestAccountImport:
             yield  # pragma: no cover
 
         with patch("polyecho.shared.db.session_scope", boom_scope):
+            # type-1 reaches the DB write (offline-derivable funder), so a
+            # session failure surfaces as "Import failed" — the path under
+            # test (unchanged by P0-5).
             result = runner.invoke(
                 app,
-                ["account", "import", _EOA],
+                ["account", "import", _EOA, "-t", "1"],
                 input=f"{_PASSPHRASE}\n{_PASSPHRASE}\n{_PRIVATE_KEY}\n",
             )
         assert result.exit_code != 0
@@ -360,3 +435,59 @@ class TestAccountBalance:
             result = runner.invoke(app, ["account", "balance", "alice"])
         assert result.exit_code == 0, result.output
         assert "unavailable" in result.output
+
+
+# ---------------------------------------------------------------------------
+# set-danger-passphrase  (P0-1 — operator provisioning)
+# ---------------------------------------------------------------------------
+class TestSetDangerPassphrase:
+    _PP = "operator danger secret"
+
+    def test_provisions_and_reports_true(self) -> None:
+        """The hidden+confirm prompt feeds set_danger_passphrase, then
+        is_danger_passphrase_provisioned() is shown true.  The plaintext
+        never appears in the output."""
+        set_mock = AsyncMock()
+        prov_mock = AsyncMock(return_value=True)
+        with (
+            patch(
+                "polyecho.shared.danger_passphrase.set_danger_passphrase",
+                new=set_mock,
+            ),
+            patch(
+                "polyecho.shared.danger_passphrase.is_danger_passphrase_provisioned",
+                new=prov_mock,
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                ["account", "set-danger-passphrase"],
+                input=f"{self._PP}\n{self._PP}\n",
+            )
+        assert result.exit_code == 0, result.output
+        set_mock.assert_awaited_once_with(self._PP)
+        assert "true" in result.output
+        # Plaintext secret must never be echoed.
+        assert self._PP not in result.output
+
+    def test_passphrase_not_a_cli_option(self) -> None:
+        """The passphrase must NOT be bindable as a CLI option (no
+        --passphrase) so it can never land in argv / shell history."""
+        result = runner.invoke(
+            app, ["account", "set-danger-passphrase", "--help"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "--passphrase" not in result.output
+
+    def test_empty_passphrase_aborts(self) -> None:
+        with patch(
+            "polyecho.shared.danger_passphrase.set_danger_passphrase",
+            new=AsyncMock(),
+        ) as set_mock:
+            result = runner.invoke(
+                app,
+                ["account", "set-danger-passphrase"],
+                input="   \n   \n",
+            )
+        assert result.exit_code != 0
+        set_mock.assert_not_awaited()
