@@ -3,12 +3,14 @@
  * All tables live in the default "public" schema of the "polyecho" Postgres DB.
  */
 
+import { sql } from "drizzle-orm";
 import {
   pgTable,
   uuid,
   text,
   date,
   integer,
+  bigint,
   boolean,
   jsonb,
   numeric,
@@ -18,6 +20,7 @@ import {
   primaryKey,
   unique,
   index,
+  check,
 } from "drizzle-orm/pg-core";
 
 /**
@@ -307,14 +310,24 @@ export const redeemJobs = pgTable(
       .references(() => accounts.id),
     condition_id: text("condition_id"),
     outcome_index: integer("outcome_index"),
-    /** 2**outcome_index bitmask passed to CTF.redeemPositions (brief §9) */
-    index_set: integer("index_set"),
+    /**
+     * 1 << outcome_index bitmask passed to CTF.redeemPositions (brief §9).
+     * bigint (not integer): 1 << outcome_index overflows INT4 for
+     * outcome_index >= 31 (NegRisk multi-outcome) → silent insert failure.
+     * `mode: "number"` — values stay well within JS safe-integer range.
+     */
+    index_set: bigint("index_set", { mode: "number" }),
     is_neg_risk: boolean("is_neg_risk"),
     /** pending | submitted | confirmed | failed */
     status: text("status").notNull().default("pending"),
     tx_hash: text("tx_hash"),
     detected_at: timestamp("detected_at", { withTimezone: true }),
     confirmed_at: timestamp("confirmed_at", { withTimezone: true }),
+    /**
+     * Bounded redeem retry counter (defence-in-depth vs infinite redeem
+     * retry). E-core wires the max_attempts cap; this column only stores it.
+     */
+    attempts: integer("attempts").notNull().default(0),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -324,6 +337,15 @@ export const redeemJobs = pgTable(
       t.account_id,
       t.condition_id,
       t.outcome_index
+    ),
+    /**
+     * 3-way mirror of the SQL/ORM ck_redeem_jobs_index_set: a wrong bitmask
+     * must not silently redeem the wrong outcome. NULL-tolerant for
+     * not-yet-resolved jobs. drizzle-orm 0.45.x supports check() for pg.
+     */
+    indexSetCk: check(
+      "ck_redeem_jobs_index_set",
+      sql`${t.index_set} IS NULL OR ${t.index_set} = (1::BIGINT << ${t.outcome_index})`
     ),
     statusIdx: index("idx_redeem_jobs_status").on(t.status),
   })

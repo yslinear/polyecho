@@ -228,18 +228,72 @@ CREATE TABLE IF NOT EXISTS redeem_jobs (
   account_id    UUID        NOT NULL REFERENCES accounts(id),
   condition_id  TEXT,
   outcome_index INTEGER,
-  -- 2**outcome_index bitmask passed to CTF.redeemPositions (brief §9).
-  index_set     INTEGER,
+  -- 1 << outcome_index bitmask passed to CTF.redeemPositions (brief §9).
+  -- BIGINT (not INTEGER): index_set = 1 << outcome_index overflows INT4 for
+  -- outcome_index >= 31 (NegRisk multi-outcome) → silent insert failure /
+  -- lost redeem job. INT8 covers the full Solidity-relevant range.
+  index_set     BIGINT,
   is_neg_risk   BOOLEAN,
   -- pending | submitted | confirmed | failed
   status        TEXT        NOT NULL DEFAULT 'pending',
   tx_hash       TEXT,
   detected_at   TIMESTAMPTZ,
   confirmed_at  TIMESTAMPTZ,
+  -- Bounded redeem retry counter (defence-in-depth vs infinite redeem
+  -- retry). E-core wires the max_attempts cap; this column only stores it.
+  attempts      INTEGER     NOT NULL DEFAULT 0,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT uq_redeem_jobs_account_condition_outcome
-    UNIQUE (account_id, condition_id, outcome_index)
+    UNIQUE (account_id, condition_id, outcome_index),
+  -- Defence-in-depth: a wrong bitmask must not silently redeem the wrong
+  -- outcome. index_set_for() already computes 1 << outcome_index in Python;
+  -- this CHECK enforces it at the DB. NULL-tolerant: a not-yet-resolved job
+  -- legitimately has NULL index_set/outcome_index.
+  CONSTRAINT ck_redeem_jobs_index_set
+    CHECK (index_set IS NULL OR index_set = (1::BIGINT << outcome_index))
 );
+
+-- Idempotent forward-fill for DBs created before index_set→BIGINT, the
+-- `attempts` column, and the index_set CHECK existed. CREATE TABLE IF NOT
+-- EXISTS above is a no-op on a warm DB, so these guarded statements bring an
+-- already-existing redeem_jobs up to the current shape. All are
+-- individually idempotent (IF NOT EXISTS / pg_constraint guard / type-noop).
+DO $$
+BEGIN
+  -- index_set INTEGER → BIGINT (no-op if already BIGINT; safe widening).
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'redeem_jobs'
+      AND column_name = 'index_set'
+      AND data_type = 'integer'
+  ) THEN
+    ALTER TABLE redeem_jobs ALTER COLUMN index_set TYPE BIGINT;
+  END IF;
+
+  -- attempts column add (NOT NULL DEFAULT 0 backfills existing rows).
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'redeem_jobs'
+      AND column_name = 'attempts'
+  ) THEN
+    ALTER TABLE redeem_jobs
+      ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+  END IF;
+
+  -- index_set CHECK add (guarded by pg_constraint so re-apply is a no-op).
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'ck_redeem_jobs_index_set'
+      AND conrelid = 'public.redeem_jobs'::regclass
+  ) THEN
+    ALTER TABLE redeem_jobs
+      ADD CONSTRAINT ck_redeem_jobs_index_set
+      CHECK (index_set IS NULL OR index_set = (1::BIGINT << outcome_index));
+  END IF;
+END
+$$;
 
 -- ---------------------------------------------------------------------------
 -- copy_skips — queryable skip/error log w/ reason taxonomy (brief §7)

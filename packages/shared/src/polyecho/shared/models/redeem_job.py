@@ -6,7 +6,9 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -14,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -46,6 +49,14 @@ class RedeemJob(Base):
             "outcome_index",
             name="uq_redeem_jobs_account_condition_outcome",
         ),
+        # 3-way mirror of the SQL ck_redeem_jobs_index_set: a wrong bitmask
+        # must not silently redeem the wrong outcome. NULL-tolerant for
+        # not-yet-resolved jobs. Defence-in-depth — index_set_for() already
+        # computes 1 << outcome_index in Python.
+        CheckConstraint(
+            "index_set IS NULL OR index_set = (1::BIGINT << outcome_index)",
+            name="ck_redeem_jobs_index_set",
+        ),
         Index("idx_redeem_jobs_status", "status"),
     )
 
@@ -59,8 +70,10 @@ class RedeemJob(Base):
     )
     condition_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     outcome_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # 2**outcome_index bitmask passed to CTF.redeemPositions (brief §9).
-    index_set: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 1 << outcome_index bitmask passed to CTF.redeemPositions (brief §9).
+    # BigInteger (not Integer): 1 << outcome_index overflows INT4 for
+    # outcome_index >= 31 (NegRisk multi-outcome) → silent insert failure.
+    index_set: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     is_neg_risk: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     # pending | submitted | confirmed | failed
@@ -73,6 +86,12 @@ class RedeemJob(Base):
     )
     confirmed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    # Bounded redeem retry counter. E-core wires the real max_attempts cap
+    # (currently _attempt_count is hardcoded to 1 → infinite redeem retry);
+    # this column only durably stores the count.
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
