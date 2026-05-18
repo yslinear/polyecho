@@ -90,7 +90,7 @@ export function AlertsList({ rows }: { rows: AlertEventRow[] }) {
       ) : (
         <div className="overflow-hidden rounded-lg border">
           <Table>
-            <TableHeader className="sticky top-0 z-10 bg-muted/60 backdrop-blur supports-[backdrop-filter]:bg-muted/60">
+            <TableHeader className="sticky top-0 z-10 bg-muted">
               <TableRow className="hover:bg-transparent">
                 <TableHead className="w-28">嚴重度</TableHead>
                 <TableHead>事件</TableHead>
@@ -114,7 +114,7 @@ export function AlertsList({ rows }: { rows: AlertEventRow[] }) {
                       {eventTypeLabel(r.event_type)}
                     </TableCell>
                     <TableCell className="max-w-prose text-sm text-muted-foreground">
-                      {summary || "—"}
+                      {summary || "未紀錄"}
                     </TableCell>
                     <TableCell className="text-right text-xs">
                       {r.pushed_at ? (
