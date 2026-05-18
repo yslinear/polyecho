@@ -1,0 +1,75 @@
+# Dependabot config — supply-chain freshness for the three ecosystems
+# actually present in this repo:
+#   1. uv workspace (PEP 621 / uv.lock) at the repo root  -> ecosystem: uv
+#   2. pnpm workspace (pnpm-lock.yaml) at the repo root    -> ecosystem: npm
+#   3. GitHub Actions pinned by commit SHA in .github/     -> ecosystem: github-actions
+#
+# GitHub Actions are SHA-pinned (see .github/workflows/*.yml). Dependabot
+# understands SHA-pinned actions and will open PRs bumping the SHA while
+# preserving the trailing `# vN` comment, so hardening + freshness coexist.
+version: 2
+
+updates:
+  # ── Python: uv workspace (uv.lock + pyproject across packages/*) ─────────────
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-patch:
+        # Batch non-major bumps into one PR to keep review/CI noise down;
+        # majors still come through as individual, reviewable PRs.
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "deps(py)"
+
+  # ── JS/TS: pnpm workspace (root pnpm-lock.yaml; @polyecho/web etc.) ──────────
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # vite is dev/test-only (transitive via @vitejs/plugin-react and
+      # @vitest/coverage-v8) and is deliberately pinned to ^5 via root
+      # package.json `pnpm.overrides` ("vite": "^5.4.20", "esbuild":
+      # "^0.25.0"). vite 6/7/8 break vitest 2.x (the controlled audit-fix
+      # rationale documented in package.json + remediation-plan Wave D,
+      # dependabot #2). Ignoring the vite major keeps the previously-stale
+      # dependabot vite-8 branch from perpetually reappearing. esbuild major
+      # is ignored for the same coupled reason (overridden in lockstep with
+      # vite). Revisit only when vitest is intentionally upgraded.
+      - dependency-name: "vite"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "esbuild"
+        update-types:
+          - "version-update:semver-major"
+    commit-message:
+      prefix: "deps(web)"
+
+  # ── GitHub Actions: keep SHA pins fresh (security patches) ──────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      actions-all:
+        # Action bumps are low-risk and SHA-pinned; batch them so the
+        # supply-chain refresh lands as one reviewable PR.
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "deps(ci)"
