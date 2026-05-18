@@ -141,8 +141,28 @@ _LARGE_POSITION_MIN_KNOWN_WALLETS = 10
 # Leaderboard slice size used as the cold-start seed pool (cheaper subset).
 _LARGE_POSITION_SEED_LEADERBOARD_LIMIT = 50
 
-# Per-wallet activity fetch cap for the scan (1 qualifying row is enough).
-_LARGE_POSITION_ACTIVITY_FETCH_LIMIT = 100
+# I4 fix — per-wallet activity fetch for the hourly large-position scan.
+#
+# The previous code passed ``limit=100`` with NO pagination.  The
+# Polymarket data-api ``GET /activity`` endpoint sorts by ``TIMESTAMP``
+# DESC by default (NOT by trade size — verified via the Polymarket
+# data-api reference: sortBy ∈ {TIMESTAMP, TOKENS, CASH}, default
+# TIMESTAMP), and the live ``DataSource`` mirrors that.  So a burst
+# trader who fired >100 trades in the window could have their single
+# *largest* fill pushed past row 100 and silently truncated out — the
+# wallet would then be missed entirely.
+#
+# Fix: the scan is ALREADY bounded by a 24 h trailing ``start`` window,
+# so we request ``limit=None`` (the frozen ``DataSource`` protocol
+# explicitly defines ``None`` as "all available within the window"; the
+# live impl paginates internally via ``offset`` up to the data-api's
+# 10 000-row hard cap).  Fetching the *whole* 24 h window means the
+# largest fill can no longer be truncated by an arbitrary page size.
+#
+# Genuine truncation is now only possible if a single wallet exceeds the
+# data-api's 10 000-row offset cap *within 24 h* — pathological, but we
+# WARN on it (never silently drop) so the gap is observable.
+_LARGE_POSITION_DATA_API_OFFSET_CAP = 10_000
 
 
 # ---------------------------------------------------------------------------
@@ -228,9 +248,21 @@ def _compute_stats(
     total_pnl = sum(pnl_series)
 
     # ── win_rate ──────────────────────────────────────────────────────────────
-    sells = [r for r in trades if r.side == "SELL"]
-    wins = [r for r in sells if (r.usdc_size or 0.0) > 0]
-    win_rate = len(wins) / len(sells) if sells else 0.0
+    # P1-9b: a SELL whose ``usdc_size is None`` is *missing data*, NOT a
+    # zero-value (losing) close.  The old code counted it via
+    # ``(r.usdc_size or 0.0) > 0`` → False → silently a LOSS, which
+    # systematically deflated win_rate (→ profit_score, 20 % weight).
+    # Only SELLs with a known notional are admissible to the win/lose
+    # denominator; ``usdc_size is None`` rows are excluded entirely.
+    priced_sell_usdc: list[float] = [
+        r.usdc_size
+        for r in trades
+        if r.side == "SELL" and r.usdc_size is not None
+    ]
+    wins = sum(1 for u in priced_sell_usdc if u > 0)
+    win_rate = (
+        wins / len(priced_sell_usdc) if priced_sell_usdc else 0.0
+    )
 
     # ── Sharpe (daily, assume rf=0) ───────────────────────────────────────────
     if len(pnl_series) >= 2:
@@ -306,16 +338,36 @@ async def _upsert_candidate(
 
     Uses raw INSERT … ON CONFLICT for PostgreSQL; falls back to SELECT + add
     for SQLite (tests with in-memory DB).
+
+    Concurrency (P1-9c)
+    -------------------
+    The prior-score read, the upward-crossing decision, the row write AND
+    the CANDIDATE_HIGH_SCORE emit are all performed inside ONE transaction
+    while holding a ``SELECT … FOR UPDATE`` row lock on the candidate.
+    Two concurrent runs for the same wallet therefore serialise: the
+    second blocks on the locked row until the first commits, then re-reads
+    ``prev_score`` (now ≥ threshold) and does NOT re-emit.  The event fires
+    exactly once per upward crossing.  (On SQLite ``FOR UPDATE`` is a
+    no-op, which is fine — tests don't exercise true row contention.)
     """
-    today = date_type.today()
+    # P1-9a: key score-history by the UTC calendar day, NOT the server's
+    # LOCAL date.  ``date.today()`` uses the process-local timezone, so a
+    # non-UTC container would write history under the wrong day while every
+    # other timestamp here uses ``datetime.now(tz=UTC)`` — a silent,
+    # production-corrupting drift.  Use the UTC date explicitly.
+    today = datetime.now(tz=UTC).date()
     user_status = "rejected" if "insider_suspect" in risk_flags else "new"
 
     async with session_scope() as session:
         # ── CandidateLeader upsert ────────────────────────────────────────────
+        # P1-9c: FOR UPDATE locks the candidate row for the life of this
+        # transaction so the read→decide→emit sequence below is atomic
+        # against a concurrent same-wallet run (Postgres).  On SQLite this
+        # silently degrades to a plain SELECT (acceptable for tests).
         result = await session.execute(
-            select(CandidateLeader).where(
-                CandidateLeader.wallet_address == wallet
-            )
+            select(CandidateLeader)
+            .where(CandidateLeader.wallet_address == wallet)
+            .with_for_update()
         )
         existing: CandidateLeader | None = result.scalar_one_or_none()
 
@@ -391,6 +443,26 @@ async def _upsert_candidate(
             hist.total_score = f_score
             hist.stats = stats_30d
 
+        # ── CANDIDATE_HIGH_SCORE emit — INSIDE the locked transaction ─────────
+        # P1-9c: emitting here (while the FOR UPDATE row lock is still
+        # held, BEFORE session_scope() commits) makes the
+        # read→decide→emit sequence atomic.  A concurrent same-wallet run
+        # is blocked on the row lock until this transaction commits; it
+        # then re-reads ``prev_score`` (now ≥ threshold) and the upward
+        # crossing is False, so the event fires EXACTLY ONCE per crossing.
+        # Once per UPWARD threshold crossing only, and never for an
+        # auto-rejected (insider-suspect) candidate.  ``_safe_emit_high_score``
+        # is best-effort: a NOTIFY hiccup is logged & swallowed and does
+        # NOT roll back the upsert (mirrors core's safe_emit discipline).
+        if crossed_high and user_status != "rejected":
+            await _safe_emit_high_score(
+                wallet=wallet,
+                display_name=display_name,
+                f_score=f_score,
+                p_score=p_score,
+                r_score=r_score,
+            )
+
     logger.info(
         "upserted candidate",
         extra={
@@ -404,17 +476,6 @@ async def _upsert_candidate(
             "user_status": user_status,
         },
     )
-
-    # CANDIDATE_HIGH_SCORE — once per UPWARD threshold crossing only, and
-    # never for an auto-rejected (insider-suspect) candidate.
-    if crossed_high and user_status != "rejected":
-        await _safe_emit_high_score(
-            wallet=wallet,
-            display_name=display_name,
-            f_score=f_score,
-            p_score=p_score,
-            r_score=r_score,
-        )
 
 
 async def _insert_drift_event(wallet: str, strategy_30d: str, strategy_7d: str) -> None:
@@ -698,11 +759,14 @@ class DiscoveryWorker:
 
         for wallet in wallet_pool:
             try:
+                # limit=None → fetch the FULL 24 h window (datasource
+                # paginates internally).  No arbitrary page cap can
+                # truncate the wallet's largest fill out of the scan.
                 activity = await self._ds.get_user_activity(
                     wallet,
                     start=window_start,
                     activity_type="TRADE",
-                    limit=_LARGE_POSITION_ACTIVITY_FETCH_LIMIT,
+                    limit=None,
                 )
             except Exception:
                 logger.warning(
@@ -710,6 +774,21 @@ class DiscoveryWorker:
                     extra={"wallet": wallet},
                 )
                 continue
+
+            # Truncation can now only happen at the data-api's hard
+            # 10 000-row offset cap (pathological in a 24 h window).  If
+            # we hit it, the largest fill *might* be beyond the cap — WARN
+            # rather than silently drop it (I4).
+            if len(activity) >= _LARGE_POSITION_DATA_API_OFFSET_CAP:
+                logger.warning(
+                    "large-position scan: activity hit data-api offset cap; "
+                    "largest fill may be truncated",
+                    extra={
+                        "wallet": wallet,
+                        "fetched": len(activity),
+                        "cap": _LARGE_POSITION_DATA_API_OFFSET_CAP,
+                    },
+                )
 
             if any(self._is_large_new_entry(rec) for rec in activity):
                 new_wallets.add(wallet)

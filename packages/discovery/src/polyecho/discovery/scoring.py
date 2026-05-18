@@ -156,7 +156,13 @@ def replicability_score(
 
     3. burstiness_factor (penalty)
        Highly bursty leaders are harder to copy because orders arrive in
-       rapid clusters. burstiness in [0, 1]; factor = 1 - burstiness.
+       rapid clusters.  ``burstiness`` here is the clipped coefficient of
+       variation of inter-trade gaps in ``[0, 1]`` (see
+       :func:`polyecho.discovery.frequency.compute_frequency_stats` — I7;
+       it is NOT the Goh-Barabási ``B ∈ [−1, 1]`` index).  The factor is
+       ``clip(1 − burstiness, 0, 1)``; the ``[0, 1]`` domain is exactly
+       what keeps this a well-defined penalty (a raw Goh-Barabási value
+       would push ``1 − B`` outside ``[0, 1]`` for regular traders).
 
     4. time_overlap
        Fraction of the leader's active UTC hours that overlap with the

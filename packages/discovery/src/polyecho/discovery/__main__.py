@@ -39,6 +39,21 @@ _DAILY_INTERVAL = timedelta(hours=24)
 _HOURLY_INTERVAL = timedelta(hours=1)
 _WEEKLY_INTERVAL = timedelta(days=7)
 
+# I1 fix — error backoff, DISTINCT from the normal cadence.
+#
+# Previously, ANY unhandled exception in a task (empty DB at startup,
+# network not ready, transient DB hiccup) caused the loop to sleep the
+# FULL ``interval`` (up to 7 days for the weekly task) before retrying —
+# discovery would go dark for a day after a single startup blip.
+#
+# Now a failed iteration sleeps a SHORT ``retry_sleep`` instead: start at
+# 60 s and double on each *consecutive* failure (capped at 1 h), so a
+# persistent outage still backs off politely without hammering, while a
+# transient blip recovers within a minute.  A SUCCESSFUL iteration resets
+# the backoff and resumes the normal long cadence.
+_RETRY_SLEEP_INITIAL = timedelta(seconds=60)
+_RETRY_SLEEP_MAX = timedelta(hours=1)
+
 
 async def _run_once(worker: DiscoveryWorker) -> None:
     """Execute one full daily + hourly pass."""
@@ -60,11 +75,28 @@ async def _scheduled_loop(worker: DiscoveryWorker) -> None:
         interval: timedelta,
         name: str,
     ) -> None:
+        # Consecutive-failure backoff (I1).  Reset to the initial value
+        # after every SUCCESSFUL iteration; doubled (capped) after each
+        # failure.  This is the sleep used ONLY on the error path — it is
+        # deliberately decoupled from the long normal ``interval``.
+        retry_sleep = _RETRY_SLEEP_INITIAL
         while True:
             try:
                 await coro_factory()
             except Exception:
-                logger.exception("%s task raised an unhandled exception", name)
+                logger.exception(
+                    "%s task raised an unhandled exception; retrying in %s",
+                    name,
+                    retry_sleep,
+                )
+                # Short, capped exponential backoff — NOT the full
+                # interval (would dark-out discovery for up to a day/week
+                # after a single startup blip).
+                await asyncio.sleep(retry_sleep.total_seconds())
+                retry_sleep = min(retry_sleep * 2, _RETRY_SLEEP_MAX)
+                continue
+            # Success → reset backoff and resume the normal long cadence.
+            retry_sleep = _RETRY_SLEEP_INITIAL
             logger.info("%s: sleeping %s until next run", name, interval)
             await asyncio.sleep(interval.total_seconds())
 

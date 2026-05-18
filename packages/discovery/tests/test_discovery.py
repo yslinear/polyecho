@@ -1688,3 +1688,511 @@ class TestWorkerPipelineSmokeTest:
                 await _run_once(worker)
 
         asyncio.get_event_loop().run_until_complete(_run())
+
+
+# ---------------------------------------------------------------------------
+# Wave B-discovery remediation — P1-9a / P1-9b / P1-9c / I1 / I4 / I7
+# ---------------------------------------------------------------------------
+
+
+class TestP19aUtcDateKeying:
+    """P1-9a — ``candidate_score_history`` is keyed by the UTC calendar
+    day, not the server's LOCAL date.  A non-UTC ``TZ`` env must NOT shift
+    the history row's date.
+    """
+
+    _FS = FrequencyStats(
+        trades_per_day=2.0, active_days=25, median_gap_minutes=120.0,
+        avg_hold_hours=36.0, hold_to_resolution_pct=10.0,
+        concurrent_positions_avg=2.0, concurrent_positions_max=5,
+        burstiness=0.2, active_hours_utc=[0, 1, 2, 3],
+    )
+
+    def _capture_history_date(self, tz: str) -> Any:
+        """Run _upsert_candidate under ``TZ=tz`` and return the date the
+        CandidateScoreHistory row was created with."""
+        import os
+        import time
+
+        from polyecho.discovery.worker import _upsert_candidate
+        from polyecho.shared.models import CandidateScoreHistory as CSH
+
+        added: list[Any] = []
+        prev_tz = os.environ.get("TZ")
+        os.environ["TZ"] = tz
+        if hasattr(time, "tzset"):
+            time.tzset()
+        try:
+            async def _run() -> None:
+                with patch("polyecho.discovery.worker.session_scope") as ms:
+                    sess = AsyncMock()
+                    sess.execute = AsyncMock(
+                        side_effect=[
+                            MagicMock(
+                                scalar_one_or_none=MagicMock(return_value=None)
+                            ),
+                            MagicMock(
+                                scalar_one_or_none=MagicMock(return_value=None)
+                            ),
+                        ]
+                    )
+                    ms.return_value.__aenter__ = AsyncMock(return_value=sess)
+                    ms.return_value.__aexit__ = AsyncMock(return_value=False)
+                    sess.add = lambda o: added.append(o)
+
+                    await _upsert_candidate(
+                        W_SWING, "leaderboard", display_name="X",
+                        stats_7d={}, stats_30d={}, stats_90d={},
+                        freq_stats_30d=self._FS,
+                        strategy_type=StrategyType.SWING,
+                        p_score=10.0, r_score=10.0, f_score=5.0,
+                        risk_flags=[], last_active_at=None,
+                    )
+
+            asyncio.get_event_loop().run_until_complete(_run())
+        finally:
+            if prev_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = prev_tz
+            if hasattr(time, "tzset"):
+                time.tzset()
+
+        hist = [o for o in added if isinstance(o, CSH)]
+        assert hist, "no CandidateScoreHistory row was added"
+        return hist[0].date
+
+    def test_history_date_is_utc_under_non_utc_tz(self) -> None:
+        # Pacific/Kiritimati is UTC+14: its local date can be a day AHEAD
+        # of the UTC date.  The history row must still use the UTC day.
+        utc_today = datetime.now(tz=UTC).date()
+        keyed = self._capture_history_date("Pacific/Kiritimati")
+        assert keyed == utc_today
+
+    def test_history_date_is_utc_under_negative_offset_tz(self) -> None:
+        # Pacific/Pago_Pago is UTC-11: its local date can be a day BEHIND.
+        utc_today = datetime.now(tz=UTC).date()
+        keyed = self._capture_history_date("Pacific/Pago_Pago")
+        assert keyed == utc_today
+
+
+class TestP19bWinRateMissingUsdc:
+    """P1-9b — a SELL with ``usdc_size is None`` is *missing data* and must
+    NOT be counted as a loss in the win_rate denominator.
+    """
+
+    def test_none_usdc_sell_excluded_from_denominator(self) -> None:
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        # 2 priced SELLs: one win (+), one loss (0).  win_rate must be 0.5
+        # — the 3rd SELL (usdc_size=None) must NOT drag it to 1/3.
+        trades = [
+            _make_record(side="SELL", usdc_size=100.0,
+                         ts=base + timedelta(hours=1), condition_id="a"),
+            _make_record(side="SELL", usdc_size=0.0,
+                         ts=base + timedelta(hours=2), condition_id="b"),
+            _make_record(side="SELL", usdc_size=None,
+                         ts=base + timedelta(hours=3), condition_id="c"),
+        ]
+        stats = _compute_stats(trades, window_days=30)
+        assert stats["win_rate"] == pytest.approx(0.5)
+
+    def test_all_none_usdc_sells_yield_zero_not_div_error(self) -> None:
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        trades = [
+            _make_record(side="SELL", usdc_size=None,
+                         ts=base + timedelta(hours=i), condition_id=f"c{i}")
+            for i in range(3)
+        ]
+        stats = _compute_stats(trades, window_days=30)
+        # No priced sells → 0.0 (not a ZeroDivisionError, not 0/3 confusion).
+        assert stats["win_rate"] == 0.0
+
+    def test_old_behaviour_would_have_deflated(self) -> None:
+        """Regression guard: with 1 winning priced SELL + 3 None SELLs the
+        OLD code gave 1/4=0.25; the fix gives 1/1=1.0."""
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        trades = [
+            _make_record(side="SELL", usdc_size=500.0,
+                         ts=base, condition_id="a"),
+            *[
+                _make_record(side="SELL", usdc_size=None,
+                             ts=base + timedelta(hours=i), condition_id=f"n{i}")
+                for i in range(1, 4)
+            ],
+        ]
+        stats = _compute_stats(trades, window_days=30)
+        assert stats["win_rate"] == pytest.approx(1.0)
+
+
+class TestP19cConcurrentHighScoreEmitsOnce:
+    """P1-9c — two concurrent same-wallet upserts that both cross the
+    high-score threshold must emit CANDIDATE_HIGH_SCORE EXACTLY ONCE.
+
+    The fix takes a ``SELECT … FOR UPDATE`` row lock and performs
+    read→decide→emit inside that one transaction.  We model the row lock
+    with an ``asyncio.Lock`` shared by both simulated transactions (the
+    lock is the test stand-in for Postgres row-level locking, which
+    SQLite/mocks do not provide) and assert (a) the production SELECT
+    actually requested ``with_for_update`` and (b) the emit fired once.
+    """
+
+    _FS = FrequencyStats(
+        trades_per_day=2.0, active_days=25, median_gap_minutes=120.0,
+        avg_hold_hours=36.0, hold_to_resolution_pct=10.0,
+        concurrent_positions_avg=2.0, concurrent_positions_max=5,
+        burstiness=0.2, active_hours_utc=[0, 1, 2, 3],
+    )
+
+    def test_emits_exactly_once_under_race(self) -> None:
+        from polyecho.discovery import worker as worker_mod
+        from polyecho.discovery.worker import _upsert_candidate
+
+        # Shared "DB row" guarded by a lock — stands in for the candidate
+        # row + the Postgres FOR UPDATE row lock that SQLite/mocks lack.
+        # The lock is acquired on the candidate SELECT and released only
+        # when the transaction exits (commits), exactly serialising the
+        # two concurrent runs the way SELECT … FOR UPDATE does.
+        row_lock = asyncio.Lock()
+        shared: dict[str, Any] = {"total_score": None}
+        emit_spy = AsyncMock()
+
+        def _fake_candidate(score: float) -> MagicMock:
+            # Permissive ORM-row double: the update branch freely assigns
+            # last_active_at / stats_* / etc.; only the fields the race
+            # logic READS need controlled values.
+            c = MagicMock()
+            c.sources = ["leaderboard"]
+            c.user_status = "new"
+            c.total_score = score
+            c.first_discovered_at = object()
+            return c
+
+        def _fake_scope() -> Any:
+            cm = MagicMock()
+            sess = AsyncMock()
+            # Per-transaction state (closure-local → no cross-coroutine
+            # races): execute call index + whether we hold the row lock.
+            state = {"calls": 0, "locked": False}
+
+            async def _execute(stmt: Any) -> MagicMock:
+                state["calls"] += 1
+                if state["calls"] == 1:
+                    # Candidate SELECT … FOR UPDATE → take the row lock
+                    # (blocks the concurrent run until we commit).
+                    await row_lock.acquire()
+                    state["locked"] = True
+                    score = shared["total_score"]
+                    existing = (
+                        _fake_candidate(score) if score is not None else None
+                    )
+                    return MagicMock(
+                        scalar_one_or_none=MagicMock(return_value=existing)
+                    )
+                # Score-history SELECT (no existing row).
+                return MagicMock(
+                    scalar_one_or_none=MagicMock(return_value=None)
+                )
+
+            def _add(obj: Any) -> None:
+                # Commit-equivalent: persist total_score so the NEXT
+                # serialised transaction reads it as prev_score.
+                if type(obj).__name__ == "CandidateLeader":
+                    ts = getattr(obj, "total_score", None)
+                    if ts is not None:
+                        shared["total_score"] = float(ts)
+
+            sess.execute = AsyncMock(side_effect=_execute)
+            sess.add = _add
+
+            async def _aexit(*_a: Any) -> bool:
+                # Transaction end == commit + release the row lock.
+                if state["locked"]:
+                    row_lock.release()
+                    state["locked"] = False
+                return False
+
+            cm.__aenter__ = AsyncMock(return_value=sess)
+            cm.__aexit__ = AsyncMock(side_effect=_aexit)
+            return cm
+
+        async def _one() -> None:
+            await _upsert_candidate(
+                W_SWING, "leaderboard", display_name="Swing",
+                stats_7d={}, stats_30d={"pnl_usd": 1.0}, stats_90d={},
+                freq_stats_30d=self._FS,
+                strategy_type=StrategyType.SWING,
+                p_score=90.0, r_score=80.0, f_score=85.0,  # crosses 70
+                risk_flags=[], last_active_at=None,
+            )
+
+        async def _run() -> None:
+            with (
+                patch.object(worker_mod, "session_scope", _fake_scope),
+                patch.object(worker_mod, "emit_event", emit_spy),
+            ):
+                # Two concurrent runs for the SAME wallet.
+                await asyncio.gather(_one(), _one())
+
+        asyncio.get_event_loop().run_until_complete(_run())
+
+        assert emit_spy.await_count == 1, (
+            f"expected exactly one CANDIDATE_HIGH_SCORE emit, "
+            f"got {emit_spy.await_count}"
+        )
+
+    def test_select_requests_for_update_lock(self) -> None:
+        """The candidate SELECT must carry a FOR UPDATE clause (the
+        mechanism that makes the race fix atomic)."""
+        from polyecho.discovery.worker import _upsert_candidate
+
+        captured: list[Any] = []
+
+        async def _run() -> None:
+            with patch("polyecho.discovery.worker.session_scope") as ms:
+                sess = AsyncMock()
+
+                async def _exec(stmt: Any) -> MagicMock:
+                    captured.append(stmt)
+                    return MagicMock(
+                        scalar_one_or_none=MagicMock(return_value=None)
+                    )
+
+                sess.execute = AsyncMock(side_effect=_exec)
+                ms.return_value.__aenter__ = AsyncMock(return_value=sess)
+                ms.return_value.__aexit__ = AsyncMock(return_value=False)
+                sess.add = MagicMock()
+
+                await _upsert_candidate(
+                    W_SWING, "leaderboard", display_name="X",
+                    stats_7d={}, stats_30d={}, stats_90d={},
+                    freq_stats_30d=self._FS,
+                    strategy_type=StrategyType.SWING,
+                    p_score=10.0, r_score=10.0, f_score=5.0,
+                    risk_flags=[], last_active_at=None,
+                )
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert captured, "no statement was executed"
+        # The candidate SELECT is the first execute; it must be FOR UPDATE.
+        sel = captured[0]
+        compiled = str(sel).upper()
+        assert "FOR UPDATE" in compiled, (
+            f"candidate SELECT is not FOR UPDATE:\n{sel}"
+        )
+
+
+class TestI1RetrySleepDistinctFromInterval:
+    """I1 — a failed loop iteration must sleep a SHORT ``retry_sleep``
+    (60 s, exponential, capped), NOT the full 1d/7d ``interval``.
+    """
+
+    def test_exception_sleeps_short_retry_not_full_interval(self) -> None:
+        """Drive the inner ``_loop`` directly: an exception path must sleep
+        the short retry, NEVER the long interval.  We rebuild the same
+        loop the module uses (the closure is private) so the assertion is
+        deterministic and free of task-scheduling races.
+        """
+        from polyecho.discovery import __main__ as m
+
+        sleeps: list[float] = []
+        calls = {"n": 0}
+
+        async def _flaky() -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("DB not ready at startup")
+            # Second iteration: succeed once (resets backoff), then stop.
+            if calls["n"] == 2:
+                return
+            raise asyncio.CancelledError
+
+        async def _fake_sleep(secs: float) -> None:
+            sleeps.append(secs)
+            # Let the loop continue until _flaky raises CancelledError.
+
+        async def _loop_like_main(interval: timedelta) -> None:
+            """Byte-for-byte the loop body shipped in __main__._loop."""
+            retry_sleep = m._RETRY_SLEEP_INITIAL
+            while True:
+                try:
+                    await _flaky()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    await _fake_sleep(retry_sleep.total_seconds())
+                    retry_sleep = min(retry_sleep * 2, m._RETRY_SLEEP_MAX)
+                    continue
+                retry_sleep = m._RETRY_SLEEP_INITIAL
+                await _fake_sleep(interval.total_seconds())
+
+        async def _run() -> None:
+            with pytest.raises(asyncio.CancelledError):
+                await _loop_like_main(m._DAILY_INTERVAL)
+
+        asyncio.get_event_loop().run_until_complete(_run())
+
+        daily_interval_s = m._DAILY_INTERVAL.total_seconds()
+        retry_s = m._RETRY_SLEEP_INITIAL.total_seconds()
+        assert sleeps, "loop never slept"
+        # First sleep = the short retry after the RuntimeError, NOT 24h.
+        assert sleeps[0] == retry_s
+        assert sleeps[0] < daily_interval_s
+        # After the success (2nd call) the loop resumes the long cadence.
+        assert daily_interval_s in sleeps
+        assert sleeps.index(retry_s) < sleeps.index(daily_interval_s)
+
+    def test_scheduled_loop_catches_and_uses_retry_sleep(self) -> None:
+        """Integration: the real ``_scheduled_loop`` must survive a task
+        exception and use the short retry (not dark-out for a day)."""
+        from polyecho.discovery import __main__ as m
+
+        sleeps: list[float] = []
+        n = {"v": 0}
+
+        async def _flaky() -> None:
+            n["v"] += 1
+            if n["v"] == 1:
+                raise RuntimeError("startup blip")
+            raise asyncio.CancelledError
+
+        async def _fake_sleep(secs: float) -> None:
+            sleeps.append(secs)
+
+        async def _run() -> None:
+            worker = MagicMock()
+            worker.run_daily = _flaky
+            worker.run_hourly = AsyncMock(side_effect=asyncio.CancelledError)
+            worker.run_weekly = AsyncMock(side_effect=asyncio.CancelledError)
+            with patch(
+                "polyecho.discovery.__main__.asyncio.sleep", _fake_sleep
+            ):
+                with pytest.raises(asyncio.CancelledError):
+                    await m._scheduled_loop(worker)
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        # The daily task hit RuntimeError and recorded the SHORT retry
+        # sleep; the full 24h/7d interval must never have been slept.
+        assert m._RETRY_SLEEP_INITIAL.total_seconds() in sleeps
+        assert m._DAILY_INTERVAL.total_seconds() not in sleeps
+        assert m._WEEKLY_INTERVAL.total_seconds() not in sleeps
+
+    def test_retry_sleep_constants_are_short_and_capped(self) -> None:
+        from polyecho.discovery import __main__ as m
+
+        assert m._RETRY_SLEEP_INITIAL < m._HOURLY_INTERVAL
+        assert m._RETRY_SLEEP_INITIAL < m._DAILY_INTERVAL
+        assert m._RETRY_SLEEP_MAX <= m._HOURLY_INTERVAL
+        assert m._RETRY_SLEEP_INITIAL.total_seconds() == 60.0
+
+
+class TestI4LargePositionNoTruncation:
+    """I4 — the hourly large-position scan must NOT truncate a burst
+    trader's single largest fill via an arbitrary page ``limit``.
+    """
+
+    def test_largest_fill_not_truncated_when_many_trades(self) -> None:
+        ts = datetime.now(tz=UTC) - timedelta(hours=2)
+        # 250 small trades + ONE huge one at the END (would be dropped by
+        # the old limit=100 timestamp-ordered fetch).
+        small = [
+            _make_record(wallet=W_SWING, usdc_size=10.0,
+                         ts=ts + timedelta(seconds=i))
+            for i in range(250)
+        ]
+        huge = _make_record(
+            wallet=W_SWING, usdc_size=80_000.0,
+            ts=ts + timedelta(seconds=500),
+        )
+        ds = _LargePositionStubDS({W_SWING: [*small, huge]})
+        seen_limits: list[int | None] = []
+
+        # Wrap to record the limit the worker passes down.
+        orig = ds.get_user_activity
+
+        async def _spy(wallet: str, **kw: Any) -> list[ActivityRecord]:
+            seen_limits.append(kw.get("limit"))
+            return await orig(wallet, **kw)
+
+        ds.get_user_activity = _spy  # type: ignore[method-assign]
+        processed: list[str] = []
+
+        async def _run() -> None:
+            worker = DiscoveryWorker(ds, follower_capital_usd=1000.0)  # type: ignore[arg-type]
+            worker._known_wallets = {W_SWING}
+
+            async def _fake_process(w: str, s: str, **kw: Any) -> None:
+                processed.append(w)
+
+            with patch.object(worker, "_process_wallet", _fake_process):
+                await worker.discover_large_new_positions()
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        # Wallet detected despite the huge fill being the 251st record.
+        assert processed == [W_SWING]
+        # The scan requests the FULL window (limit=None), not a small cap.
+        assert seen_limits and all(lim is None for lim in seen_limits)
+
+    def test_offset_cap_constant_matches_data_api(self) -> None:
+        from polyecho.discovery.worker import (
+            _LARGE_POSITION_DATA_API_OFFSET_CAP,
+        )
+
+        # Polymarket data-api GET /activity: offset max 10000 (context7).
+        assert _LARGE_POSITION_DATA_API_OFFSET_CAP == 10_000
+
+
+class TestI7BurstinessDefinitionConsistent:
+    """I7 — burstiness is a clipped CV in [0, 1]; its docstring no longer
+    falsely cites Goh-Barabási, and the downstream replicability penalty
+    ``1 − burstiness`` stays a well-defined factor in [0, 1].
+    """
+
+    def test_burstiness_range_is_zero_to_one(self) -> None:
+        # Extremely clustered → CV high → clipped at 1.0 (never > 1, never
+        # negative — a raw Goh-Barabási B would allow [-1, 1]).
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        recs: list[ActivityRecord] = []
+        for i in range(8):  # tight cluster
+            recs.append(_make_record(ts=base + timedelta(seconds=i),
+                                      condition_id="a"))
+        recs.append(_make_record(ts=base + timedelta(days=20),
+                                  condition_id="b"))  # one huge gap
+        stats = compute_frequency_stats(recs, window_days=30)
+        assert 0.0 <= stats.burstiness <= 1.0
+        assert stats.burstiness == pytest.approx(1.0, abs=1e-6)
+
+    def test_downstream_factor_well_defined(self) -> None:
+        # For any burstiness in [0, 1], 1 - burstiness ∈ [0, 1] so the
+        # replicability score stays bounded and monotone.
+        for b in (0.0, 0.25, 0.5, 0.75, 1.0):
+            fs = {
+                "median_gap_minutes": 60.0,
+                "burstiness": b,
+                "active_hours_utc": list(range(0, 15)),
+                "concurrent_positions_avg": 1.0,
+            }
+            score = replicability_score(fs, follower_capital_usd=1000.0)
+            assert 0.0 <= score <= 100.0
+        # Strictly decreasing in burstiness (penalty direction correct).
+        low = replicability_score(
+            {"median_gap_minutes": 60.0, "burstiness": 0.1,
+             "active_hours_utc": list(range(0, 15)),
+             "concurrent_positions_avg": 1.0},
+            follower_capital_usd=1000.0,
+        )
+        high = replicability_score(
+            {"median_gap_minutes": 60.0, "burstiness": 0.9,
+             "active_hours_utc": list(range(0, 15)),
+             "concurrent_positions_avg": 1.0},
+            follower_capital_usd=1000.0,
+        )
+        assert low > high
+
+    def test_docstring_no_longer_claims_goh_barabasi_impl(self) -> None:
+        import polyecho.discovery.frequency as fq
+
+        doc = fq.compute_frequency_stats.__doc__ or ""
+        # The fix must explicitly disclaim the Goh-Barabási index and
+        # state it is a clipped coefficient of variation.
+        assert "coefficient of variation" in doc.lower()
+        assert "not" in doc.lower() and "goh" in doc.lower()

@@ -127,9 +127,32 @@ def compute_frequency_stats(
         Sample at each event boundary.
 
     burstiness
-        Coefficient of variation of inter-trade gaps: CV = std / mean.
-        Clipped to [0, 1].  0 = perfectly uniform, 1 = highly clustered.
-        Reference: Goh & Barabási (2008) burstiness parameter.
+        Clipped **coefficient of variation** of the inter-trade gaps:
+        ``CV = std / mean``, then ``clip(CV, 0, 1)``.  0 = perfectly
+        uniform spacing, 1 = highly clustered.
+
+        I7 — definition vs. reference, resolved.
+        The Goh & Barabási (2008) burstiness parameter is
+        ``B = (σ − m) / (σ + m)`` with range ``[−1, 1]`` (regular → −1,
+        Poisson → 0, bursty → +1).  This function does NOT compute that;
+        it computes a clipped CV in ``[0, 1]``.  The previous docstring
+        cited Goh-Barabási, which was inaccurate.
+
+        Decision (per remediation plan, "keep CV but fix the comment +
+        downstream factor mapping so the model matches its stated
+        reference"): we KEEP the clipped CV because (a) it is already
+        consistent with the single downstream consumer —
+        :func:`polyecho.discovery.scoring.replicability_score` uses
+        ``burstiness_factor = clip(1 − burstiness, 0, 1)``, which is a
+        well-defined penalty precisely BECAUSE ``burstiness ∈ [0, 1]``
+        (a raw Goh-Barabási ``B ∈ [−1, 1]`` would make ``1 − B`` exceed
+        1 for regular traders and silently saturate); and (b) switching
+        the metric would shift every stored ``frequency_stats.burstiness``
+        and the replicability score for every existing candidate.  The
+        reference is therefore corrected (this is a dispersion CV, not the
+        Goh-Barabási index) rather than the implementation, leaving the
+        scoring model internally consistent with its now-accurate
+        documentation.
 
     active_hours_utc
         Sorted list of UTC hour integers (0–23) in which at least one trade
@@ -178,6 +201,11 @@ def compute_frequency_stats(
     median_gap_minutes = float(statistics.median(gaps_min)) if gaps_min else 0.0
 
     if len(gaps_s) >= 2:
+        # Clipped coefficient of variation of inter-trade gaps (NOT the
+        # Goh-Barabási B index — see compute_frequency_stats docstring,
+        # I7).  ddof=1 = sample std.  Range forced to [0, 1] so the
+        # downstream replicability ``1 − burstiness`` penalty stays a
+        # well-defined factor in [0, 1].
         arr = np.array(gaps_s, dtype=float)
         mean_g = float(np.mean(arr))
         std_g = float(np.std(arr, ddof=1))
