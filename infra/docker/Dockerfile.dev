@@ -7,19 +7,53 @@ ARG PYTHON_VERSION=3.12
 ARG NODE_VERSION=22
 ARG UV_VERSION=0.5
 
+# ── Stage 1: node toolchain ───────────────────────────────────────────────────
+# Use the SAME official `node:` image the working Dockerfile.web builds on. It
+# ships node + npm + corepack on /usr/local, guaranteed — unlike the NodeSource
+# apt route the old Dockerfile.dev used.
+FROM node:${NODE_VERSION}-bookworm-slim AS node
+
+# ── Stage 2: dev image (uv base + copied node toolchain) ──────────────────────
 FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-bookworm-slim
 
-# Install Node.js via NodeSource
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates gnupg git \
-    && curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+# ROOT CAUSE of the original `corepack: not found`: Dockerfile.dev installed
+# Node via NodeSource's `setup_${NODE_VERSION}.x` + `apt-get install nodejs`.
+# Debian bookworm ships its OWN `nodejs` package (v18, with npm/corepack split
+# into separate packages that `--no-install-recommends` never pulls). Without a
+# second `apt-get update` after the NodeSource source is added (and because
+# NodeSource publishes under the synthetic `nodistro` suite, defeating naive
+# apt-priority pins) apt resolved `nodejs` to Debian's v18 — an image with
+# `node` but NO `npm`/`corepack`, so `RUN corepack enable` died with exit 127.
+#
+# Fix: mirror the proven prod multi-stage pattern (Dockerfile.python/.cli/.web
+# all use `COPY --from`) and copy the official `node:` toolchain — which the
+# working Dockerfile.web already trusts — onto the pinned uv/Python base. This
+# is fully deterministic: no NodeSource, no apt pinning, no Debian-vs-vendor
+# package race. uv/Python stay pinned via the astral base, exactly as the prod
+# images. Nothing is installed on the host (everything lives in the image).
+COPY --from=node /usr/local/bin/node              /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules      /usr/local/lib/node_modules
 
-# Enable corepack so pnpm version is driven by package.json#packageManager
-RUN corepack enable
+# git is the only extra dev tool the old image added on top of the base.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    # Re-create the npm/npx/corepack shims the official node image provides.
+    && ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js       /usr/local/bin/npm \
+    && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js       /usr/local/bin/npx \
+    && ln -sf /usr/local/lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
+    # Build-time assertion: a broken toolchain copy fails LOUDLY (never cached).
+    && node --version && npm --version && corepack --version
+
+# Enable corepack so the pnpm version is driven by package.json#packageManager
+# (pnpm@10.10.0), exactly like the working Dockerfile.web. `corepack prepare
+# --activate` pre-fetches the pinned pnpm so the bind-mounted workspace works
+# offline without any host-side install.
+RUN corepack enable \
+    && corepack prepare pnpm@10.10.0 --activate \
+    && pnpm --version
 
 WORKDIR /workspace
 
-# No COPY — repo is bind-mounted at runtime
+# No COPY of repo — it is bind-mounted at runtime
 # No CMD — user decides (uv run pytest / pnpm dev / etc.)
