@@ -13,9 +13,9 @@
     "db:migrate": "pnpm --filter @polyecho/web db:migrate"
   },
   "pnpm": {
-    "comment": "Controlled audit fix: pin the dev/test-only vite+esbuild (transitive via @vitejs/plugin-react / @vitest/coverage-v8) to patched, vitest-2.x-compatible lines. NOT vite 8 (breaks vitest 2.x; dependabot #2). vite/esbuild never ship in the Next standalone image.",
+    "comment": "Controlled audit fix: pin the dev/test-only vite+esbuild (transitive via @vitejs/plugin-react / @vitest/coverage-v8) to patched lines. vite ^6 + esbuild ^0.25 clears the vite path-traversal advisory while staying on Vitest 3.x's supported matrix (Vitest 3 supports Vite 5 & 6; the Vite-6 floor is hard from Vitest 4). NOT vite 7/8 (outside Vitest 3 matrix). vite/esbuild never ship in the Next standalone image.",
     "overrides": {
-      "vite": "^5.4.20",
+      "vite": "^6.0.0",
       "esbuild": "^0.25.0",
       "postcss": "^8.4.49"
     }
