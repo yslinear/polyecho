@@ -30,9 +30,15 @@ x-python-defaults: &python-defaults
   environment:
     POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:polyecho@db:5432/polyecho}
     POLYECHO_DATASOURCE: ${POLYECHO_DATASOURCE:-fixture}
+  # Ordering: db healthy → migrate completed-successfully → apps.
+  # Every app service waits for the one-shot `migrate` job so a clean
+  # `docker compose up` on an EMPTY volume yields a fully-populated schema
+  # before any worker connects (root cause fix for "empty DB → crash").
   depends_on:
     db:
       condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
   restart: unless-stopped
 
 # ── Services ──────────────────────────────────────────────────────────────────
@@ -58,6 +64,38 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  # ── migrate (one-shot schema bootstrap) ──────────────────────────────────────
+  # Runs `polyecho db migrate` ONCE against a healthy DB, applies the
+  # idempotent infra/migrations/0000_init.sql, then exits 0. Every app
+  # service depends on this completing successfully, so the stack is
+  # self-sufficient: a fresh volume is populated before any worker starts.
+  # `restart: "no"` — a job, not a daemon. POLYECHO_DB_MIGRATE_YES=1 because
+  # the container has no TTY (the migrate confirmation gate).
+  migrate:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.cli
+    container_name: polyecho-migrate
+    command: ["db", "migrate"]
+    env_file:
+      - path: ../.env
+        required: false
+    # Dockerfile.cli ships /app/packages but NOT infra/. The migration SQL
+    # is mounted read-only at /app/infra so _migration_path()'s repo-root
+    # walk finds /app (which has both packages/ and infra/) — keeps the
+    # image build-context-only and the SQL the single source of truth on
+    # the host (no stale baked-in copy).
+    volumes:
+      - ./migrations:/app/infra/migrations:ro
+    environment:
+      POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:polyecho@db:5432/polyecho}
+      POLYECHO_DATASOURCE: ${POLYECHO_DATASOURCE:-fixture}
+      POLYECHO_DB_MIGRATE_YES: "1"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
 
   # ── trader-core ──────────────────────────────────────────────────────────────
   # Holds the private key. Opens NO ports (PRD §4.2 hard requirement).
@@ -116,9 +154,13 @@ services:
     # A real ../.env still overrides via ${VAR:-default}.
     environment:
       POLYECHO_DB_URL_DRIZZLE: ${POLYECHO_DB_URL_DRIZZLE:-postgresql://polyecho:polyecho@db:5432/polyecho}
+    # web is all DB-querying Server Components — it must not start until the
+    # schema exists, same ordering guarantee as the Python workers.
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     # Bind to localhost only — not exposed; remote access out of scope (PRD §5.9)
     ports:
