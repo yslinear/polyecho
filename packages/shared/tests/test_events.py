@@ -106,7 +106,11 @@ class _RecordingSession:
         return MagicMock()
 
 
-def test_emit_event_inserts_row_and_fires_notify_after_commit() -> None:
+def test_emit_event_caller_session_flush_only_no_commit_no_notify() -> None:
+    """R2 FIX: a CALLER-supplied session must NOT be committed by
+    ``emit_event`` (committing the caller's in-flight txn under them ends
+    their unit of work) and the NOTIFY must NOT be issued here — the caller
+    commits; the sender's durable backfill recovers the wake-up."""
     sess = _RecordingSession()
     push = PushPayload(title="Filled", body="copy fill", url="/positions/7")
 
@@ -116,12 +120,11 @@ def test_emit_event_inserts_row_and_fires_notify_after_commit() -> None:
             severity=Severity.INFO,
             payload={"market": "0xabc", "size": "1.5"},
             push=push,
-            session=cast(Any, sess),  # caller-supplied → no scope opened
+            session=cast(Any, sess),  # borrowed → no commit / no NOTIFY
         )
     )
 
     assert event_id == 4242
-    # Exactly one events row, with the frozen jsonb body.
     assert len(sess.added) == 1
     row = sess.added[0]
     assert row.event_type == "copy_fill"
@@ -131,33 +134,18 @@ def test_emit_event_inserts_row_and_fires_notify_after_commit() -> None:
         "push": push.to_json(),
     }
     assert row.pushed_at is None  # sender stamps it later
-    # NOTIFY issued via pg_notify; commit happened BEFORE the NOTIFY.
+    # The R2 contract: id assigned via flush, but the caller's txn is left
+    # for THEM to commit and no NOTIFY is fired on a borrowed session.
     assert sess.flushed == 1
-    assert sess.commits == 2  # commit(row) then commit(notify)
-    assert len(sess.executed) == 1
-    sql = str(sess.executed[0]).lower()
-    assert "pg_notify" in sql
+    assert sess.commits == 0
+    assert sess.executed == []
 
 
-def test_emit_event_without_push_stores_null_push() -> None:
-    sess = _RecordingSession()
-    run(
-        emit_event(
-            event_type=EventType.SYSTEM_BOT_RESTART,
-            payload={"reason": "deploy"},
-            session=cast(Any, sess),
-        )
-    )
-    assert sess.added[0].payload == {
-        "data": {"reason": "deploy"},
-        "push": None,
-    }
-
-
-def test_emit_event_opens_session_scope_when_none(
+def test_emit_event_owned_session_commits_then_notifies(
     monkeypatch: Any,
 ) -> None:
-    """When ``session is None`` a session_scope() is opened + used."""
+    """``session is None`` → ``emit_event`` owns the session: commit, then
+    NOTIFY after the commit, then commit again."""
     sess = _RecordingSession()
 
     class _Scope:
@@ -176,5 +164,67 @@ def test_emit_event_opens_session_scope_when_none(
             payload={"pnl": "12.3"},
         )
     )
+
     assert eid == 4242
     assert len(sess.added) == 1
+    assert sess.flushed == 1
+    # Owned path: commit(row) → pg_notify → commit(notify).
+    assert sess.commits == 2
+    assert len(sess.executed) == 1
+    assert "pg_notify" in str(sess.executed[0]).lower()
+
+
+def test_emit_event_owned_notify_failure_logs_warning_but_returns(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    """R2: if the post-commit ``pg_notify`` raises, the row is already
+    durably committed — the lost wake-up is recoverable but MUST be visible
+    (a WARNING is logged, not silently swallowed)."""
+    import logging
+
+    class _FailNotifySession(_RecordingSession):
+        async def execute(self, stmt: Any) -> Any:
+            self.executed.append(stmt)
+            raise RuntimeError("pg_notify connection reset")
+
+    sess = _FailNotifySession()
+
+    class _Scope:
+        async def __aenter__(self) -> _FailNotifySession:
+            return sess
+
+        async def __aexit__(self, *a: Any) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "polyecho.shared.events.session_scope", lambda: _Scope()
+    )
+    with caplog.at_level(logging.WARNING, logger="polyecho.shared.events"):
+        eid = run(
+            emit_event(
+                event_type=EventType.SYSTEM_API_FAILURE,
+                payload={"x": 1},
+            )
+        )
+
+    assert eid == 4242  # row durably committed despite the NOTIFY failure
+    assert sess.commits == 1  # row commit succeeded; notify commit never reached
+    assert any(
+        "event_notify_failed_wakeup_lost" in r.message
+        for r in caplog.records
+    )
+
+
+def test_emit_event_without_push_stores_null_push() -> None:
+    sess = _RecordingSession()
+    run(
+        emit_event(
+            event_type=EventType.SYSTEM_BOT_RESTART,
+            payload={"reason": "deploy"},
+            session=cast(Any, sess),
+        )
+    )
+    assert sess.added[0].payload == {
+        "data": {"reason": "deploy"},
+        "push": None,
+    }

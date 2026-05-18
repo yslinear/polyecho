@@ -176,3 +176,42 @@ def test_apply_conservative_is_pure_no_mutation() -> None:
     # Original untouched.
     assert src.copy_ratio == Decimal("0.5")
     assert src.max_position_usd == Decimal("999")
+
+
+def test_apply_conservative_resolves_contradictory_price_band(
+    caplog: Any,
+) -> None:
+    """R2: a template ``min_price`` (0.85) above the Conservative
+    ``max_price`` ceiling (0.80) would, with independent per-field clamps,
+    produce ``min_price (0.85) > max_price (0.80)`` — an
+    internally-contradictory band that rejects EVERY price.  The fix clamps
+    ``min_price`` DOWN to ``max_price`` (still tighten-only) and logs."""
+    import logging
+
+    contradictory = _Tpl(
+        min_price=Decimal("0.85"),  # > Conservative max ceiling 0.80
+        max_price=Decimal("0.95"),  # → lowered to 0.80
+    )
+    with caplog.at_level(
+        logging.WARNING, logger="polyecho.shared.risk_mode"
+    ):
+        out = apply_conservative(contradictory)
+
+    assert out.max_price == Decimal("0.80")
+    assert out.min_price == Decimal("0.80")  # clamped down to max
+    assert out.min_price <= out.max_price  # band is now self-consistent
+    # Still strictly tighten-only: the resulting min is not above the
+    # caller's input min (0.85) nor outside the Conservative band.
+    assert out.min_price <= contradictory.min_price
+    assert any(
+        "conservative_band_contradiction_clamped" in r.message
+        for r in caplog.records
+    )
+
+
+def test_apply_conservative_non_contradictory_band_unaffected() -> None:
+    """The contradiction guard must not perturb a normal band."""
+    ok = _Tpl(min_price=Decimal("0.30"), max_price=Decimal("0.70"))
+    out = apply_conservative(ok)
+    assert out.min_price == Decimal("0.30")  # > 0.10 floor → kept
+    assert out.max_price == Decimal("0.70")  # < 0.80 ceiling → kept

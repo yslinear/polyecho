@@ -116,6 +116,53 @@ def test_preexisting_proxy_env_is_restored_exactly(
     assert os.environ["HTTPS_PROXY"] == "http://preexisting:1"
 
 
+def test_scoped_proxy_env_is_serialized_by_module_lock() -> None:
+    """R4: ``_scoped_proxy_env`` mutates the process-global ``os.environ``.
+    Two concurrent ``PolymarketClient(...)`` constructions (each
+    ``ClobClient`` build is offloaded via ``asyncio.to_thread`` →
+    different threads) would interleave the save/set/restore and corrupt
+    each other.  A module-level ``threading.Lock`` must serialize the whole
+    set→yield→restore window so the two windows never overlap."""
+    import threading
+    import time
+
+    import polyecho.shared.polymarket.client as mod
+
+    assert isinstance(mod._PROXY_ENV_LOCK, type(threading.Lock()))
+
+    overlap = {"seen": False}
+    active = {"n": 0}
+    state_lock = threading.Lock()
+
+    def _enter_window(_tid: str) -> None:
+        with state_lock:
+            active["n"] += 1
+            if active["n"] > 1:  # two windows open at once == interleave
+                overlap["seen"] = True
+        time.sleep(0.02)  # widen the window to expose any interleave
+        with state_lock:
+            active["n"] -= 1
+
+    def _worker(tid: str) -> None:
+        # Drive the real context manager exactly as __init__ does.
+        with mod._scoped_proxy_env("http://px:3128"):
+            _enter_window(tid)
+
+    t1 = threading.Thread(target=_worker, args=("a",))
+    t2 = threading.Thread(target=_worker, args=("b",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert overlap["seen"] is False, (
+        "two _scoped_proxy_env windows overlapped — the threading.Lock "
+        "is not serializing the os.environ mutation (R4 regression)"
+    )
+    for v in _PROXY_VARS:
+        assert v not in os.environ  # restored, no global leak
+
+
 def test_two_clients_different_proxies_do_not_contaminate(
     monkeypatch: pytest.MonkeyPatch, patched_clob: type[_RecordingClob]
 ) -> None:

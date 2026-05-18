@@ -94,17 +94,27 @@ class _Sess:
         # the *statement verb* (leading token), not a substring, so the
         # settings lookup is never mis-routed to the bulk-UPDATE branch.
         if text.startswith("update"):
+            from polyecho.shared.pending_actions import DEFAULT_TTL_SECONDS
+
             now = datetime.now(UTC)
+            ttl_cutoff = now - timedelta(seconds=DEFAULT_TTL_SECONDS)
             n = 0
             for r in self.rows:
+                if r.status != PendingActionStatus.AWAITING_CONFIRM.value:
+                    continue
                 ea = r.expires_at
                 if ea is not None and ea.tzinfo is None:
                     ea = ea.replace(tzinfo=UTC)
-                if (
-                    r.status == PendingActionStatus.AWAITING_CONFIRM.value
-                    and ea is not None
-                    and ea < now
-                ):
+                ca = r.created_at
+                if ca is not None and ca.tzinfo is None:
+                    ca = ca.replace(tzinfo=UTC)
+                # Mirror the new expire_stale SQL: TTL-overdue OR
+                # (NULL-expires AND created_at older than DEFAULT_TTL).
+                overdue = ea is not None and ea < now
+                stuck_null = (
+                    ea is None and ca is not None and ca < ttl_cutoff
+                )
+                if overdue or stuck_null:
                     r.status = str(PendingActionStatus.EXPIRED)
                     n += 1
 
@@ -332,3 +342,52 @@ def test_expire_stale_bulk_marks_overdue_rows() -> None:
     assert n == 1
     assert sess.rows[0].status == "expired"
     assert sess.rows[1].status == "awaiting_confirm"
+
+
+# ---------------------------------------------------------------------------
+# R3 — confirm fail-closed on NULL created_at; expire NULL-expires rows
+# ---------------------------------------------------------------------------
+def test_confirm_fail_closed_when_created_at_is_none() -> None:
+    """R3: a row whose ``created_at`` is NULL cannot prove the 5s gate
+    elapsed, so confirm must FAIL CLOSED (TOO_SOON) — never silently allow
+    an un-gated fast-confirm of a danger-tier action."""
+    sess = _Sess(provisioned="pw")
+    aid = _new_action(sess)
+    sess.rows[0].created_at = None  # cannot prove min-age elapsed
+    with pytest.raises(PendingActionError) as ei:
+        run(
+            confirm_pending_action(
+                action_id=aid, passphrase="pw", session=sess
+            )
+        )
+    assert ei.value.reason is PendingActionError.Reason.TOO_SOON
+    # Row untouched — a fail-closed reject never consumes the row.
+    assert sess.rows[0].status == "awaiting_confirm"
+
+
+def test_expire_stale_expires_null_expires_rows_older_than_ttl() -> None:
+    """R3: a row with ``expires_at IS NULL`` was previously skipped forever
+    and stayed permanently stuck in ``awaiting_confirm``.  It must now be
+    expired once its age exceeds DEFAULT_TTL."""
+    from polyecho.shared.pending_actions import DEFAULT_TTL_SECONDS
+
+    sess = _Sess()
+    _new_action(sess)  # old (NULL expires) — should expire
+    _new_action(sess)  # recent (NULL expires) — must NOT expire
+    _new_action(sess)  # NULL expires AND NULL created_at — left alone
+
+    sess.rows[0].expires_at = None
+    sess.rows[0].created_at = datetime.now(UTC) - timedelta(
+        seconds=DEFAULT_TTL_SECONDS + 60
+    )
+    sess.rows[1].expires_at = None
+    sess.rows[1].created_at = datetime.now(UTC)
+    sess.rows[2].expires_at = None
+    sess.rows[2].created_at = None
+
+    n = run(expire_stale(session=sess))
+    assert n == 1
+    assert sess.rows[0].status == "expired"
+    assert sess.rows[1].status == "awaiting_confirm"
+    # NULL/NULL row is not silently expired here; confirm fail-closes it.
+    assert sess.rows[2].status == "awaiting_confirm"

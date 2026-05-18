@@ -212,11 +212,31 @@ class Notification:
     payload: str
 
 
+class ListenConnectionLost(RuntimeError):
+    """Raised out of :func:`pg_listen_iter`'s stream when the dedicated
+    ``LISTEN`` connection drops.
+
+    R2/I1 fix: previously a dropped asyncpg connection made the consumer
+    stall forever silently (the queue simply never produced again, with no
+    termination path — unlike :func:`pg_listen`).  The stream now surfaces
+    the drop by raising this so the caller can reconnect (or, if it uses
+    the built-in ``reconnect`` flag, ``pg_listen_iter`` retries internally).
+    """
+
+
+#: Sentinel pushed onto the notification queue by the termination listener
+#: so the draining ``_stream`` wakes immediately on a dropped connection
+#: (instead of blocking on ``queue.get()`` forever — the R2/I1 stall).
+_CONN_LOST = object()
+
+
 @asynccontextmanager
 async def pg_listen_iter(
     channel: str,
     *,
     db_url: str | None = None,
+    reconnect: bool = False,
+    reconnect_delay: float = 5.0,
 ) -> AsyncGenerator[AsyncGenerator[Notification, None], None]:
     """``async with`` a dedicated ``LISTEN`` connection, ``async for`` notes.
 
@@ -227,24 +247,41 @@ async def pg_listen_iter(
     ``async with`` exit (normal *or* cancellation) the listener is removed and
     the connection closed cleanly.
 
+    Connection-drop handling (R2/I1 fix)
+    ------------------------------------
+    A ``conn.add_termination_listener`` mirrors :func:`pg_listen` /
+    :func:`_listen_once`.  When the dedicated connection drops, the stream
+    no longer stalls forever silently:
+
+    * ``reconnect=False`` (default — preserves the prior call signature):
+      the stream raises :class:`ListenConnectionLost` so the caller learns
+      of the drop and can reconnect.
+    * ``reconnect=True``: ``pg_listen_iter`` transparently re-opens the
+      dedicated connection (after ``reconnect_delay`` s) and re-issues
+      ``LISTEN`` — mirroring :func:`pg_listen`'s resilient loop — so the
+      ``async for`` simply continues across the drop.
+
     Example::
 
-        async with pg_listen_iter("leader_trade") as notes:
+        async with pg_listen_iter("leader_trade", reconnect=True) as notes:
             async for n in notes:
                 handle(n.payload)
 
     Args:
-        channel: Postgres channel name (e.g. ``"leader_trade"``).
-        db_url:  Optional SQLAlchemy/libpq URL override (tests inject this).
+        channel:         Postgres channel name (e.g. ``"leader_trade"``).
+        db_url:          Optional SQLAlchemy/libpq URL override (tests inject).
+        reconnect:       If ``True``, re-establish ``LISTEN`` on a drop
+                         instead of raising :class:`ListenConnectionLost`.
+        reconnect_delay: Seconds to wait before each reconnect attempt.
 
     Yields:
         An ``AsyncGenerator[Notification, None]``.
     """
-    conn = await _connect_asyncpg(_asyncpg_dsn(db_url))
+    dsn = _asyncpg_dsn(db_url)
     # Bounded so a slow / stalled consumer cannot grow the queue without
     # limit (unbounded asyncio.Queue → memory blow-up under a NOTIFY
     # storm). 1000 buffers a healthy burst while capping worst-case memory.
-    queue: asyncio.Queue[Notification] = asyncio.Queue(
+    queue: asyncio.Queue[Notification | object] = asyncio.Queue(
         maxsize=_LISTEN_QUEUE_MAXSIZE
     )
 
@@ -265,31 +302,75 @@ async def pg_listen_iter(
         except asyncio.QueueFull:
             with contextlib.suppress(asyncio.QueueEmpty):
                 dropped = queue.get_nowait()
-                logger.warning(
-                    "pg_listen_queue_overflow_dropped_oldest",
-                    extra={
-                        "channel": chan,
-                        "maxsize": _LISTEN_QUEUE_MAXSIZE,
-                        "dropped_pid": dropped.pid,
-                    },
-                )
+                if isinstance(dropped, Notification):
+                    logger.warning(
+                        "pg_listen_queue_overflow_dropped_oldest",
+                        extra={
+                            "channel": chan,
+                            "maxsize": _LISTEN_QUEUE_MAXSIZE,
+                            "dropped_pid": dropped.pid,
+                        },
+                    )
             with contextlib.suppress(asyncio.QueueFull):
                 queue.put_nowait(note)
 
+    def _on_terminate(_c: object) -> None:
+        # Wake the draining stream immediately on a dropped connection so
+        # it never blocks on ``queue.get()`` forever (the R2/I1 stall).
+        with contextlib.suppress(asyncio.QueueFull):
+            queue.put_nowait(_CONN_LOST)
+
+    async def _open() -> Any:
+        conn = await _connect_asyncpg(dsn)
+        conn.add_termination_listener(_on_terminate)
+        await conn.add_listener(channel, _on_notify)
+        logger.info("pg_listen_iter_subscribed", extra={"channel": channel})
+        return conn
+
+    async def _close(conn: Any) -> None:
+        if conn is None:
+            return
+        with contextlib.suppress(Exception):
+            conn.remove_termination_listener(_on_terminate)
+        with contextlib.suppress(Exception):
+            await conn.remove_listener(channel, _on_notify)
+        with contextlib.suppress(Exception):
+            await conn.close()
+
+    state: dict[str, Any] = {"conn": await _open()}
+
     async def _stream() -> AsyncGenerator[Notification, None]:
         while True:
-            yield await queue.get()
+            item = await queue.get()
+            if item is _CONN_LOST:
+                logger.warning(
+                    "pg_listen_iter_connection_dropped",
+                    extra={"channel": channel, "reconnect": reconnect},
+                )
+                await _close(state["conn"])
+                state["conn"] = None
+                if not reconnect:
+                    raise ListenConnectionLost(
+                        f"LISTEN connection for {channel!r} dropped"
+                    )
+                while state["conn"] is None:
+                    await asyncio.sleep(reconnect_delay)
+                    try:
+                        state["conn"] = await _open()
+                    except Exception as exc:  # noqa: BLE001 - resilient loop
+                        logger.warning(
+                            "pg_listen_iter_reconnect_failed",
+                            extra={"channel": channel, "error": str(exc)},
+                        )
+                continue
+            yield item  # type: ignore[misc]  # _CONN_LOST handled above
 
-    await conn.add_listener(channel, _on_notify)
     gen = _stream()
     try:
         yield gen
     finally:
         await gen.aclose()
-        with contextlib.suppress(Exception):
-            await conn.remove_listener(channel, _on_notify)
-        with contextlib.suppress(Exception):
-            await conn.close()
+        await _close(state["conn"])
 
 
 async def _listen_once(

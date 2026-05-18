@@ -211,6 +211,29 @@ def apply_conservative[T: ConservativeTemplate](template: T) -> T:
     """
     from dataclasses import replace
 
+    # Price band: raise the floor, lower the ceiling (tighten inward).
+    new_min_price = max(template.min_price, _C_MIN_PRICE)
+    new_max_price = min(template.max_price, _C_MAX_PRICE)
+    # R2: the per-field clamps are independent, so a template with a high
+    # min_price (e.g. 0.85) against the Conservative max ceiling (0.80) can
+    # yield ``min_price > max_price`` — an internally-contradictory band
+    # that rejects EVERY price.  Resolve by clamping ``min_price`` DOWN to
+    # ``max_price`` (still strictly tighten-only: the resulting min is
+    # never above either input min, and the band stays inside both the
+    # caller's and the Conservative bounds).  Log so the misconfigured
+    # template is visible.
+    if new_min_price > new_max_price:
+        logger.warning(
+            "conservative_band_contradiction_clamped",
+            extra={
+                "template_min_price": str(template.min_price),
+                "template_max_price": str(template.max_price),
+                "clamped_min_price": str(new_max_price),
+                "clamped_max_price": str(new_max_price),
+            },
+        )
+        new_min_price = new_max_price
+
     return replace(  # type: ignore[type-var]
         template,
         # copy_ratio None ⇒ fixed-size mode: leave None (don't invent a
@@ -225,9 +248,8 @@ def apply_conservative[T: ConservativeTemplate](template: T) -> T:
             template.daily_loss_limit_usd, _C_DAILY_LOSS_USD
         ),
         daily_order_cap=_min_int_opt(template.daily_order_cap, _C_DAILY_ORDER_CAP),
-        # Price band: raise the floor, lower the ceiling (tighten inward).
-        min_price=max(template.min_price, _C_MIN_PRICE),
-        max_price=min(template.max_price, _C_MAX_PRICE),
+        min_price=new_min_price,
+        max_price=new_max_price,
         # Depth is a *minimum* requirement → raise it (max).
         min_depth=max(template.min_depth, _C_MIN_DEPTH),
         max_spread=min(template.max_spread, _C_MAX_SPREAD),

@@ -142,8 +142,15 @@ class Settings(BaseSettings):
         description="VAPID private key — treated as a secret, never logged.",
     )
     vapid_subject: str = Field(
-        default="mailto:yslinear@gmail.com",
-        description="VAPID contact URI (mailto: or https:) sent in the Authorization header.",
+        default="mailto:admin@example.com",
+        description=(
+            "VAPID contact URI (mailto: or https:) sent in the "
+            "Authorization header of every push request (RFC 8292). "
+            "R13: defaults to a NON-personal placeholder — set "
+            "POLYECHO_VAPID_SUBJECT to the operator's own contact before "
+            "enabling web push, or this placeholder is sent to push "
+            "services. Never ship a real personal address as the default."
+        ),
     )
 
     # ------------------------------------------------------------------

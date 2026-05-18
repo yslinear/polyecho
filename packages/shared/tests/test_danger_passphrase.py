@@ -141,6 +141,40 @@ def test_downgraded_iteration_count_rejected() -> None:
     assert verify_danger_passphrase(_PW, forged) is False
 
 
+@pytest.mark.parametrize("salt_len", [1, 8, 15, 17, 32])
+def test_wrong_salt_length_rejected(salt_len: int) -> None:
+    """R1: the verify guard must enforce the EXACT frozen 16-byte salt
+    length.  The old ``not salt`` guard only rejected an empty salt, so a
+    1-byte (or any non-16) salt slipped through — a malformed stored string
+    that ``hash_danger_passphrase`` could never have produced must fail
+    closed."""
+    salt = b"\x11" * salt_len
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", _PW.encode("utf-8"), salt, MIN_KDF_ITERATIONS, dklen=32
+    )
+    forged = (
+        f"pbkdf2${MIN_KDF_ITERATIONS}${base64.b64encode(salt).decode()}"
+        f"${base64.b64encode(digest).decode()}"
+    )
+    # Internally self-consistent (digest matches salt+iter) yet rejected
+    # purely because the salt length is not exactly PASSPHRASE_SALT_BYTES.
+    assert verify_danger_passphrase(_PW, forged) is False
+
+
+def test_exact_16_byte_salt_still_accepted() -> None:
+    """The frozen wire format (16-byte salt) is unchanged — a correctly
+    sized stored string still verifies."""
+    salt = b"\x22" * PASSPHRASE_SALT_BYTES  # exactly 16
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", _PW.encode("utf-8"), salt, MIN_KDF_ITERATIONS, dklen=32
+    )
+    stored = (
+        f"pbkdf2${MIN_KDF_ITERATIONS}${base64.b64encode(salt).decode()}"
+        f"${base64.b64encode(digest).decode()}"
+    )
+    assert verify_danger_passphrase(_PW, stored) is True
+
+
 def test_verify_is_constant_time() -> None:
     stored = hash_danger_passphrase(_PW)
     with patch(

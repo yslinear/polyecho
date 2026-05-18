@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import threading
 from collections.abc import Iterator
 from typing import Any
 
@@ -55,6 +56,16 @@ from polyecho.shared.copytrading import assert_live_allowed
 #: The proxy env vars py-clob-client-v2's underlying HTTP layer honours.
 #: http(s) only — see polyecho.shared.http for the SOCKS limitation note.
 _PROXY_ENV_VARS: tuple[str, ...] = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
+
+#: R4: ``_scoped_proxy_env`` save/set/restore mutates the *process-global*
+#: ``os.environ``.  Two concurrent ``PolymarketClient(...)`` constructions
+#: (each ``ClobClient(...)`` is offloaded via ``asyncio.to_thread`` and can
+#: run on different threads) would interleave the set/restore and corrupt
+#: each other's view — one thread could restore while the other expects the
+#: proxy set, or leak/lose a var.  This module-level lock serialises the
+#: whole set→yield→restore window so the env mutation is atomic per client
+#: construction (constructions are brief; serialising them is acceptable).
+_PROXY_ENV_LOCK = threading.Lock()
 
 
 @contextlib.contextmanager
@@ -88,20 +99,26 @@ def _scoped_proxy_env(proxy: str | None) -> Iterator[None]:
         yield
         return
 
-    _sentinel = object()
-    saved: dict[str, str | object] = {
-        var: os.environ.get(var, _sentinel) for var in _PROXY_ENV_VARS
-    }
-    try:
-        for var in _PROXY_ENV_VARS:
-            os.environ[var] = proxy
-        yield
-    finally:
-        for var, prev in saved.items():
-            if prev is _sentinel:
-                os.environ.pop(var, None)
-            else:
-                os.environ[var] = prev  # type: ignore[assignment]
+    # R4: serialise the entire save→set→yield→restore window.  Without this
+    # lock two concurrent constructions (each ClobClient build runs in its
+    # own ``asyncio.to_thread`` thread) interleave their os.environ
+    # mutations and corrupt each other's save/restore.  The lock makes the
+    # global-env mutation atomic per construction.
+    with _PROXY_ENV_LOCK:
+        _sentinel = object()
+        saved: dict[str, str | object] = {
+            var: os.environ.get(var, _sentinel) for var in _PROXY_ENV_VARS
+        }
+        try:
+            for var in _PROXY_ENV_VARS:
+                os.environ[var] = proxy
+            yield
+        finally:
+            for var, prev in saved.items():
+                if prev is _sentinel:
+                    os.environ.pop(var, None)
+                else:
+                    os.environ[var] = prev  # type: ignore[assignment]
 
 
 class PolymarketClient:

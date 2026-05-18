@@ -17,16 +17,30 @@ What lives here (and only here)
                          ``web-push-sender`` subscribes to (PRD §4.1).
 * :func:`emit_event`   — append one ``events`` row + wake the sender.
 
-NOTIFY ordering
----------------
-``emit_event`` writes the row, **commits**, then issues
-``NOTIFY polyecho_events, '<event_id>'`` on the *same* connection.  The
-NOTIFY is sent strictly *after* the transaction commit so that when
-``web-push-sender`` receives the id it can always ``SELECT`` the row (a
-NOTIFY fired inside an uncommitted txn would race the listener).  The
-payload is the integer event id rendered as a decimal string — safe
-against SQL injection by construction (it is an ``int``), so a
-parameter-bound ``pg_notify(channel, payload)`` call is used.
+NOTIFY ordering & session ownership (R2)
+----------------------------------------
+``emit_event`` writes the row, ensures it is **committed**, then issues
+``NOTIFY polyecho_events, '<event_id>'``.  The NOTIFY is sent strictly
+*after* the commit so that when ``web-push-sender`` receives the id it can
+always ``SELECT`` the row (a NOTIFY fired inside an uncommitted txn would
+race the listener).  The payload is the integer event id rendered as a
+decimal string — safe against SQL injection by construction (it is an
+``int``), so a parameter-bound ``pg_notify(channel, payload)`` call is
+used.
+
+**Session ownership (R2 fix).**  ``emit_event`` only commits a session it
+*created itself* (the ``session is None`` path).  When the caller supplies
+a session, ``emit_event`` does **not** commit it — committing a caller's
+in-flight transaction under them silently ends their unit of work.  For a
+caller-supplied session the row is ``flush``-ed (so the id is assigned and
+visible within the caller's txn) and the NOTIFY is deferred: it is the
+caller's responsibility to commit; the wake-up for that case is recovered
+by the sender's durable backfill on its next real notification.  The owned
+path commits, fires the NOTIFY, and commits again.  If the
+``pg_notify`` send raises, the row is already durably committed but the
+wake-up is lost; this is recoverable (the sender re-reconciles from its
+cursor) **but must be visible**, so a WARNING is logged rather than
+swallowed silently.
 
 No network / SDK I/O on import.  Pure types + the emit helper.
 """
@@ -148,10 +162,17 @@ async def emit_event(
     ``{"data": <payload>, "push": <push.to_json() or None>}``.
     ``pushed_at`` is left ``NULL`` — the sender stamps it after delivery.
 
-    A ``NOTIFY polyecho_events, '<event_id>'`` is issued on the *same*
-    connection **after the commit** (see module docstring for the ordering
-    rationale).  ``pg_notify`` is used with a bound parameter; the id is an
-    ``int`` so the channel payload is injection-safe by construction.
+    Session ownership (R2): when *session* is ``None`` this function owns
+    the session — it commits, fires ``NOTIFY polyecho_events, '<id>'``
+    **after the commit**, and commits again.  When the caller supplies
+    *session*, the row is flushed (id assigned, visible in the caller's
+    txn) but **not committed** (committing the caller's in-flight txn under
+    them is the R2 bug) and the NOTIFY is **not** sent here — the caller
+    commits and the sender's durable backfill covers the wake-up.  If the
+    owned-path ``pg_notify`` send fails the row is still durably committed;
+    the lost wake-up is recoverable but is logged at WARNING so it is
+    visible.  ``pg_notify`` uses a bound parameter; the id is an ``int`` so
+    the channel payload is injection-safe by construction.
 
     Args:
         event_type: One of :class:`EventType`.
@@ -159,7 +180,8 @@ async def emit_event(
         payload:    Caller-defined event data (stored under ``"data"``).
         push:       Optional :class:`PushPayload` the SW will render.
         session:    Optional caller session; if ``None`` a new
-                    :func:`~polyecho.shared.db.session_scope` is opened.
+                    :func:`~polyecho.shared.db.session_scope` is opened
+                    (only then does ``emit_event`` commit / NOTIFY).
 
     Returns:
         The new ``events.id`` (``int``).
@@ -169,7 +191,20 @@ async def emit_event(
         "push": push.to_json() if push is not None else None,
     }
 
-    async def _emit(sess: AsyncSession) -> int:
+    def _log_emitted(event_id: int, *, notified: bool) -> None:
+        logger.info(
+            "event_emitted",
+            extra={
+                "event_id": event_id,
+                "event_type": str(event_type),
+                "severity": str(severity),
+                "has_push": push is not None,
+                "notified": notified,
+            },
+        )
+
+    async def _emit_owned(sess: AsyncSession) -> int:
+        """``session is None`` path — we own the session: commit + NOTIFY."""
         row = Event(
             event_type=str(event_type),
             severity=str(severity),
@@ -181,28 +216,53 @@ async def emit_event(
         event_id = int(row.id)
         # Commit first: the listener must be able to SELECT the row the
         # instant it receives the id (a NOTIFY inside an open txn would
-        # race the sender).  pg_notify with a bound param keeps the
-        # channel payload injection-safe (event_id is an int regardless).
+        # race the sender).
         await sess.commit()
-        await sess.execute(
-            text("SELECT pg_notify(:chan, :payload)").bindparams(
-                bindparam("chan", EVENTS_NOTIFY_CHANNEL),
-                bindparam("payload", str(event_id)),
+        try:
+            await sess.execute(
+                text("SELECT pg_notify(:chan, :payload)").bindparams(
+                    bindparam("chan", EVENTS_NOTIFY_CHANNEL),
+                    bindparam("payload", str(event_id)),
+                )
             )
+            await sess.commit()
+        except Exception as exc:  # noqa: BLE001 - wake-up loss must be visible
+            # The row is durably committed; only the advisory wake-up was
+            # lost.  The sender re-reconciles from its cursor, so this is
+            # recoverable — but it MUST be visible, not swallowed silently.
+            logger.warning(
+                "event_notify_failed_wakeup_lost",
+                extra={
+                    "event_id": event_id,
+                    "channel": EVENTS_NOTIFY_CHANNEL,
+                    "error": str(exc),
+                },
+            )
+            _log_emitted(event_id, notified=False)
+            return event_id
+        _log_emitted(event_id, notified=True)
+        return event_id
+
+    async def _emit_borrowed(sess: AsyncSession) -> int:
+        """Caller-supplied session — DO NOT commit it / DO NOT NOTIFY here.
+
+        Committing a caller's in-flight transaction under them (the R2 bug)
+        silently ends their unit of work.  We only flush so the id is
+        assigned and visible within their txn; the caller commits, and the
+        sender's durable backfill recovers the (here-undelivered) wake-up.
+        """
+        row = Event(
+            event_type=str(event_type),
+            severity=str(severity),
+            payload=body,
         )
-        await sess.commit()
-        logger.info(
-            "event_emitted",
-            extra={
-                "event_id": event_id,
-                "event_type": str(event_type),
-                "severity": str(severity),
-                "has_push": push is not None,
-            },
-        )
+        sess.add(row)
+        await sess.flush()
+        event_id = int(row.id)
+        _log_emitted(event_id, notified=False)
         return event_id
 
     if session is not None:
-        return await _emit(session)
+        return await _emit_borrowed(session)
     async with session_scope() as owned:
-        return await _emit(owned)
+        return await _emit_owned(owned)

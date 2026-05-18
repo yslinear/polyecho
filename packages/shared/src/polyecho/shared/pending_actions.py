@@ -280,17 +280,21 @@ async def confirm_pending_action(
 
         # Server-enforced minimum age (the authoritative "5s countdown").
         # ``created_at`` is a NOT NULL server-default column; treat a naive
-        # value as UTC (matches the expires_at handling above).
+        # value as UTC (matches the expires_at handling above).  R3
+        # FAIL-CLOSED: if ``created_at`` is somehow NULL we cannot prove the
+        # 5s gate elapsed, so we must REFUSE (TOO_SOON) — never silently
+        # allow an un-gated fast-confirm of a danger-tier action.
         created_at = row.created_at
-        if created_at is not None:
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=UTC)
-            if now < created_at + timedelta(
-                seconds=MIN_CONFIRM_AGE_SECONDS
-            ):
-                raise PendingActionError(
-                    PendingActionError.Reason.TOO_SOON
-                )
+        if created_at is None:
+            logger.warning(
+                "pending_action_missing_created_at_fail_closed",
+                extra={"action_id": action_id},
+            )
+            raise PendingActionError(PendingActionError.Reason.TOO_SOON)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=UTC)
+        if now < created_at + timedelta(seconds=MIN_CONFIRM_AGE_SECONDS):
+            raise PendingActionError(PendingActionError.Reason.TOO_SOON)
 
         # P0-1 fail-closed: the secret of record is the operator
         # pre-provisioned hash.  If it is unset, refuse — NEVER
@@ -331,8 +335,19 @@ async def confirm_pending_action(
 async def expire_stale(session: Any = None) -> int:
     """Bulk-mark overdue ``awaiting_confirm`` rows as ``expired``.
 
-    Updates every row whose ``status == 'awaiting_confirm'`` and
-    ``expires_at < now``.  Idempotent; safe to run on a scheduler.
+    Expires an ``awaiting_confirm`` row when **either**:
+
+    * ``expires_at`` is set and ``expires_at < now`` (normal TTL), **or**
+    * ``expires_at IS NULL`` *and* ``created_at < now - DEFAULT_TTL`` — R3
+      fix: a row with no ``expires_at`` was previously skipped forever and
+      stayed permanently stuck in ``awaiting_confirm``.  A NULL-expires row
+      whose age exceeds :data:`DEFAULT_TTL_SECONDS` is now expired so it
+      cannot linger indefinitely.  (A NULL-expires row with NULL
+      ``created_at`` cannot have its age proven, so it is left for manual
+      remediation rather than being silently kept alive — confirm itself
+      fail-closes on such a row via ``TOO_SOON``.)
+
+    Idempotent; safe to run on a scheduler.
 
     Args:
         session: Optional caller session; ``None`` → new scope.
@@ -340,12 +355,13 @@ async def expire_stale(session: Any = None) -> int:
     Returns:
         The number of rows transitioned to ``expired``.
     """
-    from sqlalchemy import update
+    from sqlalchemy import and_, or_, update
 
     from polyecho.shared.db import session_scope
     from polyecho.shared.models import PendingAction
 
     now = datetime.now(UTC)
+    default_ttl_cutoff = now - timedelta(seconds=DEFAULT_TTL_SECONDS)
 
     async def _expire(sess: Any) -> int:
         result = await sess.execute(
@@ -353,8 +369,17 @@ async def expire_stale(session: Any = None) -> int:
             .where(
                 PendingAction.status
                 == str(PendingActionStatus.AWAITING_CONFIRM),
-                PendingAction.expires_at.is_not(None),
-                PendingAction.expires_at < now,
+                or_(
+                    and_(
+                        PendingAction.expires_at.is_not(None),
+                        PendingAction.expires_at < now,
+                    ),
+                    and_(
+                        PendingAction.expires_at.is_(None),
+                        PendingAction.created_at.is_not(None),
+                        PendingAction.created_at < default_ttl_cutoff,
+                    ),
+                ),
             )
             .values(status=str(PendingActionStatus.EXPIRED))
         )

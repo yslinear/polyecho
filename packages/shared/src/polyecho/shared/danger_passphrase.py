@@ -207,7 +207,15 @@ def verify_danger_passphrase(passphrase: str, stored: str | None) -> bool:
         expected = base64.b64decode(hash_b64, validate=True)
     except (ValueError, TypeError):
         return False
-    if not salt or len(expected) != PASSPHRASE_HASH_BYTES:
+    # Enforce the EXACT frozen salt length (16 B): the old ``not salt``
+    # guard rejected only an empty salt, so a malformed 1-byte salt slipped
+    # through.  A wrong salt length means the stored string was never
+    # produced by ``hash_danger_passphrase`` — fail closed.  The wire
+    # format is unchanged; this only hardens the verify guard.
+    if (
+        len(salt) != PASSPHRASE_SALT_BYTES
+        or len(expected) != PASSPHRASE_HASH_BYTES
+    ):
         return False
     candidate = _pbkdf2(passphrase, salt, iterations)
     return hmac.compare_digest(candidate, expected)

@@ -482,6 +482,11 @@ class _FakeAsyncpgConn:
     def add_termination_listener(self, cb: Any) -> None:
         self.term_listeners.append(cb)
 
+    def remove_termination_listener(self, cb: Any) -> None:
+        # asyncpg has this; pg_listen_iter calls it on teardown (R2/I1).
+        if cb in self.term_listeners:
+            self.term_listeners.remove(cb)
+
     def is_closed(self) -> bool:
         return self.closed
 
@@ -588,6 +593,100 @@ class TestPgListenIter:
             run(_flow())
         assert conn.close_calls == 1
         assert conn.remove_calls == ["c"]
+
+    def test_registers_termination_listener(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R2/I1: pg_listen_iter must install a termination listener so a
+        dropped connection is detectable (it had none before — the
+        consumer stalled forever silently)."""
+        import polyecho.shared.db as dbmod
+        from polyecho.shared.db import pg_listen_iter
+
+        conn = _FakeAsyncpgConn()
+        monkeypatch.setattr(
+            dbmod, "_connect_asyncpg", lambda _dsn: _ret(conn)
+        )
+
+        async def _flow() -> None:
+            async with pg_listen_iter("c", db_url="postgresql://x@h/db"):
+                assert len(conn.term_listeners) == 1
+
+        run(_flow())
+        # Cleaned up on exit (no leaked termination listener).
+        assert conn.term_listeners == []
+
+    def test_connection_drop_raises_when_not_reconnecting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R2/I1: with ``reconnect=False`` (default) a dropped connection
+        must SURFACE as ``ListenConnectionLost`` instead of stalling the
+        ``async for`` forever silently."""
+        import polyecho.shared.db as dbmod
+        from polyecho.shared.db import ListenConnectionLost, pg_listen_iter
+
+        conn = _FakeAsyncpgConn()
+        monkeypatch.setattr(
+            dbmod, "_connect_asyncpg", lambda _dsn: _ret(conn)
+        )
+
+        async def _flow() -> None:
+            async with pg_listen_iter(
+                "c", db_url="postgresql://x@h/db"
+            ) as notes:
+                conn.terminate()  # server drops the dedicated connection
+                with pytest.raises(ListenConnectionLost):
+                    await notes.__anext__()
+
+        run(_flow())
+        # The dropped connection is closed on the way out.
+        assert conn.is_closed() is True
+
+    def test_connection_drop_reconnects_when_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R2/I1: with ``reconnect=True`` a drop transparently re-opens the
+        dedicated connection and re-issues LISTEN (mirrors pg_listen) so
+        the ``async for`` continues across the drop."""
+        import polyecho.shared.db as dbmod
+        from polyecho.shared.db import Notification, pg_listen_iter
+
+        conns = [_FakeAsyncpgConn(), _FakeAsyncpgConn()]
+        idx = {"i": 0}
+
+        async def _connect(_dsn: str) -> Any:
+            c = conns[idx["i"]]
+            idx["i"] = min(idx["i"] + 1, len(conns) - 1)
+            return c
+
+        monkeypatch.setattr(dbmod, "_connect_asyncpg", _connect)
+
+        async def _flow() -> list[Notification]:
+            got: list[Notification] = []
+            async with pg_listen_iter(
+                "c",
+                db_url="postgresql://x@h/db",
+                reconnect=True,
+                reconnect_delay=0.0,
+            ) as notes:
+                assert conns[0].add_calls == ["c"]
+                conns[0].terminate()  # drop the first connection
+                # Drive the stream: it consumes the _CONN_LOST sentinel,
+                # reconnects on conns[1], then yields a fresh notification.
+                anext_task = asyncio.ensure_future(notes.__anext__())
+                for _ in range(30):
+                    await asyncio.sleep(0)
+                    if conns[1].add_calls:
+                        break
+                assert conns[1].add_calls == ["c"]  # re-subscribed
+                await conns[1].fire("c", 9, "after-reconnect")
+                got.append(await anext_task)
+            return got
+
+        out = run(_flow())
+        assert out == [Notification(pid=9, channel="c", payload="after-reconnect")]
+        assert conns[0].is_closed() is True  # dropped conn closed
+        assert conns[1].close_calls == 1  # fresh conn closed on exit
 
 
 async def _ret(value: Any) -> Any:

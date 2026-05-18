@@ -35,12 +35,19 @@ from pydantic import ValidationError
 
 from polyecho.shared.config import Settings, get_settings
 from polyecho.shared.crypto import (
+    _BLOB_VERSION_V1,
     _NONCE_SIZE,
     _SALT_SIZE,
     _TAG_SIZE,
+    _V1_HEADER_SIZE,
     decrypt_private_key,
     encrypt_private_key,
 )
+
+# v1 (current) blobs prepend a 5-byte header (version || iter); the salt
+# therefore starts at offset _V1_HEADER_SIZE, not 0.
+_V1_SALT_OFF = _V1_HEADER_SIZE
+_V1_NONCE_OFF = _V1_HEADER_SIZE + _SALT_SIZE
 
 # A realistic 32-byte (64-hex) secp256k1 private key string.
 _PK = "0x" + "ab" * 32
@@ -86,23 +93,71 @@ class TestCryptoRoundTrip:
         blob = encrypt_private_key(_PK, _PASSPHRASE)
         assert decrypt_private_key(blob, _PASSPHRASE) == _PK
 
-    def test_blob_encrypted_under_different_iterations_fails(
+    def test_blob_survives_iteration_count_change(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The KDF count is *not* stored in the blob; decrypting with a
-        different ``key_kdf_iterations`` derives a different key → InvalidTag.
-        This documents the (intentional) coupling and guards against a
-        silent-success regression."""
+        """R1 FIX: the iteration count is now stored in the v1 blob header,
+        so changing ``POLYECHO_KEY_KDF_ITERATIONS`` after encryption must
+        STILL decrypt the existing blob (previously this raised InvalidTag
+        and made every existing key permanently undecryptable)."""
         _fast_env(monkeypatch, 100_000)
         get_settings.cache_clear()
         blob = encrypt_private_key(_PK, _PASSPHRASE)
+        # v1 header: first byte is the version tag.
+        assert blob[0] == _BLOB_VERSION_V1
 
-        # Both values must be ABOVE the clamp floor or they'd collapse to
-        # the same effective count (100_000) and decrypt successfully.
-        monkeypatch.setenv("POLYECHO_KEY_KDF_ITERATIONS", "200000")
+        # Change the env iteration count well above the floor (so it does
+        # NOT collapse back to 100_000) — the blob must still decrypt
+        # because its own header carries the original count.
+        monkeypatch.setenv("POLYECHO_KEY_KDF_ITERATIONS", "350000")
         get_settings.cache_clear()
+        assert decrypt_private_key(blob, _PASSPHRASE) == _PK
+
+    def test_tampered_iteration_header_fails_authentication(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The 5-byte header is bound as AES-GCM associated data, so
+        flipping the stored iteration count fails the auth tag rather than
+        silently mis-deriving the key (tamper-evident)."""
+        _fast_env(monkeypatch, 100_000)
+        get_settings.cache_clear()
+        blob = bytearray(encrypt_private_key(_PK, _PASSPHRASE))
+        blob[1] ^= 0x7F  # corrupt the big-endian iteration field
         with pytest.raises(InvalidTag):
-            decrypt_private_key(blob, _PASSPHRASE)
+            decrypt_private_key(bytes(blob), _PASSPHRASE)
+
+    def test_legacy_v0_blob_still_decrypts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Back-compat: a header-less legacy v0 blob
+        (``salt||nonce||tag||ct``) must still decrypt via the current
+        ``key_kdf_iterations`` fallback, including the 1/256 case where the
+        random salt's first byte collides with the v1 version tag 0x01."""
+        import os
+
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        from polyecho.shared.crypto import _derive_key
+
+        _fast_env(monkeypatch, 100_000)
+        get_settings.cache_clear()
+        iters = get_settings().key_kdf_iterations
+
+        def _make_v0(first_salt_byte: int) -> bytes:
+            salt = bytes([first_salt_byte]) + os.urandom(_SALT_SIZE - 1)
+            nonce = os.urandom(_NONCE_SIZE)
+            key = _derive_key(_PASSPHRASE, salt, iters)
+            ct = AESGCM(key).encrypt(nonce, _PK.encode(), None)  # no AAD (v0)
+            return salt + nonce + ct
+
+        # Ordinary legacy blob.
+        assert decrypt_private_key(_make_v0(0xAB), _PASSPHRASE) == _PK
+        # Ambiguous legacy blob: salt[0] == 0x01 looks like a v1 header; the
+        # v1 parse is attempted, its tag fails, we transparently fall back.
+        assert (
+            decrypt_private_key(_make_v0(_BLOB_VERSION_V1), _PASSPHRASE)
+            == _PK
+        )
 
     def test_unicode_passphrase_and_plaintext(
         self, monkeypatch: pytest.MonkeyPatch
@@ -128,9 +183,11 @@ class TestCryptoBlobLayout:
         get_settings.cache_clear()
         b1 = encrypt_private_key(_PK, _PASSPHRASE)
         b2 = encrypt_private_key(_PK, _PASSPHRASE)
-        assert b1[:_SALT_SIZE] != b2[:_SALT_SIZE], "salt must be random"
-        n1 = b1[_SALT_SIZE : _SALT_SIZE + _NONCE_SIZE]
-        n2 = b2[_SALT_SIZE : _SALT_SIZE + _NONCE_SIZE]
+        s1 = b1[_V1_SALT_OFF : _V1_SALT_OFF + _SALT_SIZE]
+        s2 = b2[_V1_SALT_OFF : _V1_SALT_OFF + _SALT_SIZE]
+        assert s1 != s2, "salt must be random"
+        n1 = b1[_V1_NONCE_OFF : _V1_NONCE_OFF + _NONCE_SIZE]
+        n2 = b2[_V1_NONCE_OFF : _V1_NONCE_OFF + _NONCE_SIZE]
         assert n1 != n2, "nonce must be random"
 
     def test_overhead_is_exactly_declared(
@@ -140,7 +197,8 @@ class TestCryptoBlobLayout:
         get_settings.cache_clear()
         plaintext = "A" * 37
         blob = encrypt_private_key(plaintext, _PASSPHRASE)
-        overhead = _SALT_SIZE + _NONCE_SIZE + _TAG_SIZE  # 60
+        # v1 overhead = 5-byte header + salt + nonce + tag = 65.
+        overhead = _V1_HEADER_SIZE + _SALT_SIZE + _NONCE_SIZE + _TAG_SIZE
         # AES-GCM is a stream cipher → ciphertext length == plaintext length.
         assert len(blob) == overhead + len(plaintext.encode())
 
@@ -180,22 +238,24 @@ class TestCryptoTamperDetection:
             decrypt_private_key(bytes(tampered), _PASSPHRASE)
 
     def test_flipped_tag_byte_raises(self, blob: bytes) -> None:
-        # GCM tag = last 16 bytes of (ciphertext||tag) region.
+        # GCM tag = last 16 bytes of the blob (after the v1 header region).
         tampered = bytearray(blob)
-        tag_start = _SALT_SIZE + _NONCE_SIZE + (len(blob) - _SALT_SIZE - _NONCE_SIZE - _TAG_SIZE)
+        tag_start = len(blob) - _TAG_SIZE
         tampered[tag_start] ^= 0x01
         with pytest.raises(InvalidTag):
             decrypt_private_key(bytes(tampered), _PASSPHRASE)
 
     def test_corrupted_salt_raises(self, blob: bytes) -> None:
         tampered = bytearray(blob)
-        tampered[0] ^= 0xFF  # wrong salt → wrong derived key
+        # Corrupt the salt (offset shifted past the 5-byte v1 header) →
+        # wrong derived key → v1 tag fails, v0 fallback also fails.
+        tampered[_V1_SALT_OFF] ^= 0xFF
         with pytest.raises(InvalidTag):
             decrypt_private_key(bytes(tampered), _PASSPHRASE)
 
     def test_corrupted_nonce_raises(self, blob: bytes) -> None:
         tampered = bytearray(blob)
-        tampered[_SALT_SIZE] ^= 0xFF  # wrong nonce → auth fails
+        tampered[_V1_NONCE_OFF] ^= 0xFF  # wrong nonce → auth fails
         with pytest.raises(InvalidTag):
             decrypt_private_key(bytes(tampered), _PASSPHRASE)
 
@@ -319,3 +379,37 @@ class TestConfigSecrets:
         s = Settings()
         assert s.datasource in {"fixture", "live"}
         assert s.polymarket_clob_url.startswith("https://")
+
+    def test_vapid_subject_default_is_not_personal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R13 (privacy): the shipped ``vapid_subject`` default must be a
+        non-personal placeholder — never a real personal address that would
+        be sent in every outbound VAPID JWT when unset."""
+        monkeypatch.delenv("POLYECHO_VAPID_SUBJECT", raising=False)
+        get_settings.cache_clear()
+        # Assert the SHIPPED code default in true isolation.  model_config
+        # sets ``env_file=".env"``, so plain ``get_settings()`` would read
+        # the operator's local ``.env`` — which ``monkeypatch.delenv``
+        # cannot scrub (it only clears os.environ, not the .env file).
+        # ``_env_file=None`` bypasses any .env so this asserts the code
+        # default, not a deployer's private config (otherwise: false PASS
+        # in CI where no .env exists, false FAIL on a configured host).
+        # ``_env_file`` is a pydantic-settings *runtime* init kwarg; the
+        # pydantic mypy plugin synthesises ``__init__`` from declared fields
+        # only, so it is absent there — the ignore is required, not laziness.
+        subject = Settings(_env_file=None).vapid_subject  # type: ignore[call-arg]
+        assert "gmail.com" not in subject
+        assert "yslinear" not in subject
+        assert subject == "mailto:admin@example.com"
+
+    def test_vapid_subject_env_override_still_works(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(
+            "POLYECHO_VAPID_SUBJECT", "mailto:ops@operator.example"
+        )
+        get_settings.cache_clear()
+        assert (
+            get_settings().vapid_subject == "mailto:ops@operator.example"
+        )
