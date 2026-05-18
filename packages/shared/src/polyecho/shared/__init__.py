@@ -19,12 +19,20 @@ Import examples::
     from polyecho.shared.logging import configure_logging
 """
 
-from polyecho.shared import config, crypto, db, logging, models
+from polyecho.shared import (
+    config,
+    crypto,
+    danger_passphrase,
+    db,
+    logging,
+    models,
+)
 from polyecho.shared.polymarket import client as polymarket_client
 
 __all__ = [
     "config",
     "crypto",
+    "danger_passphrase",
     "db",
     "logging",
     "models",

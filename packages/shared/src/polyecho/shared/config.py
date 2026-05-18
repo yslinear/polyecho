@@ -19,8 +19,19 @@ from __future__ import annotations
 import functools
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+#: Hard OWASP-floor minimum for PBKDF2-HMAC-SHA256 iterations (P0-7).
+#:
+#: ``Settings.key_kdf_iterations`` is clamped UP to this value: anything
+#: lower (a typo, a too-fast test override, a hostile env) is silently
+#: raised to ``MIN_KDF_ITERATIONS``.  This is the SINGLE source of truth for
+#: the project's KDF iteration floor and is exported so the TypeScript web
+#: mirror (Node ``crypto.pbkdf2``) can match it byte-for-byte.  100 000 is
+#: the OWASP 2023 minimum for PBKDF2-HMAC-SHA256; the default
+#: (``key_kdf_iterations`` = 600 000) stays well above it.
+MIN_KDF_ITERATIONS: int = 100_000
 
 
 class Settings(BaseSettings):
@@ -91,9 +102,24 @@ class Settings(BaseSettings):
         default=600_000,
         description=(
             "PBKDF2-HMAC-SHA256 iteration count for private-key encryption. "
-            "600 000 matches the OWASP 2023 recommendation."
+            "600 000 matches the OWASP 2023 recommendation.  Clamped UP to "
+            f"a hard floor of {MIN_KDF_ITERATIONS} (MIN_KDF_ITERATIONS): a "
+            "lower value (typo / hostile env) is silently raised, never "
+            "honoured.  Everything that derives a key reads this clamped "
+            "value (config is the single chokepoint)."
         ),
     )
+
+    @field_validator("key_kdf_iterations")
+    @classmethod
+    def _clamp_kdf_iterations(cls, v: int) -> int:
+        """Fail-closed clamp: ``max(v, MIN_KDF_ITERATIONS)`` (P0-7).
+
+        Runs on every load so *any* reader of ``settings.key_kdf_iterations``
+        (``crypto._derive_key``, the danger-passphrase hash) always gets a
+        value at or above the OWASP floor — no caller can opt below it.
+        """
+        return max(int(v), MIN_KDF_ITERATIONS)
 
     # ------------------------------------------------------------------
     # Web Push / VAPID  (RFC 8292)

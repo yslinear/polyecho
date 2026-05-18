@@ -47,7 +47,14 @@ _PK = "0x" + "ab" * 32
 _PASSPHRASE = "correct horse battery staple"
 
 
-def _fast_env(monkeypatch: pytest.MonkeyPatch, iterations: int = 1000) -> None:
+# P0-7: Settings clamps key_kdf_iterations UP to MIN_KDF_ITERATIONS
+# (100_000).  Crypto tests therefore cannot run "fast" below the floor any
+# more — every effective count is >= 100_000.  These tests stay correct
+# (round-trip / tamper detection are iteration-count agnostic); only the
+# explicit "different iterations" coupling test changes (see below).
+def _fast_env(
+    monkeypatch: pytest.MonkeyPatch, iterations: int = 100_000
+) -> None:
     monkeypatch.setenv("POLYECHO_DB_URL", "postgresql+asyncpg://u:p@localhost/test")
     monkeypatch.setenv("POLYECHO_KEY_KDF_ITERATIONS", str(iterations))
 
@@ -66,12 +73,14 @@ class TestCryptoRoundTrip:
         blob = encrypt_private_key(_PK, _PASSPHRASE)
         assert decrypt_private_key(blob, _PASSPHRASE) == _PK
 
-    @pytest.mark.parametrize("iterations", [1, 1000, 50_000])
+    @pytest.mark.parametrize("iterations", [100_000, 150_000, 600_000])
     def test_round_trip_across_iteration_counts(
         self, monkeypatch: pytest.MonkeyPatch, iterations: int
     ) -> None:
-        """Encrypt+decrypt must succeed for any iteration count, and a blob
-        encrypted under one count must decrypt under the *same* count."""
+        """Encrypt+decrypt must succeed for any (clamped) iteration count,
+        and a blob encrypted under one count must decrypt under the *same*
+        count.  Values below the floor are covered by the dedicated KDF
+        clamp test; here we use floor-and-above values."""
         _fast_env(monkeypatch, iterations)
         get_settings.cache_clear()
         blob = encrypt_private_key(_PK, _PASSPHRASE)
@@ -84,11 +93,13 @@ class TestCryptoRoundTrip:
         different ``key_kdf_iterations`` derives a different key → InvalidTag.
         This documents the (intentional) coupling and guards against a
         silent-success regression."""
-        _fast_env(monkeypatch, 1000)
+        _fast_env(monkeypatch, 100_000)
         get_settings.cache_clear()
         blob = encrypt_private_key(_PK, _PASSPHRASE)
 
-        monkeypatch.setenv("POLYECHO_KEY_KDF_ITERATIONS", "2000")
+        # Both values must be ABOVE the clamp floor or they'd collapse to
+        # the same effective count (100_000) and decrypt successfully.
+        monkeypatch.setenv("POLYECHO_KEY_KDF_ITERATIONS", "200000")
         get_settings.cache_clear()
         with pytest.raises(InvalidTag):
             decrypt_private_key(blob, _PASSPHRASE)

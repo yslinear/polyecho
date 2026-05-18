@@ -92,7 +92,6 @@ from typing import Any, Protocol, runtime_checkable
 # ``from eth_utils import …`` as "not explicitly exported".  The submodules
 # carry ``py.typed`` and are the stable public locations.
 from eth_utils.address import is_address, to_checksum_address
-from eth_utils.crypto import keccak
 
 from polyecho.shared.datasource.dto import ActivityRecord, PositionRecord
 
@@ -165,36 +164,28 @@ SIGNATURE_TYPE_DESCRIPTIONS: dict[int, str] = {
 
 
 # ---------------------------------------------------------------------------
-# TODO(verify) — Polygon-mainnet factory / singleton constants
+# CREATE2 funder derivation — SINGLE SOURCE OF TRUTH (P0-5)
 # ---------------------------------------------------------------------------
-# These are the community-documented Polymarket proxy infrastructure addresses
-# on Polygon (chain id 137).  Verification pass 2026-05-17 — what was checked:
-#   * docs.polymarket.com/trading/overview — enum + funder semantics only.
-#   * docs.polymarket.com/api-reference/authentication — "derive
-#     deterministically" but NO factory address / salt / init-code published.
-#   * docs.polymarket.com/trading/gasless — deployment is delegated to the
-#     off-chain relayer (relayer-v2.polymarket.com via
-#     @polymarket/builder-relayer-client); factory bytecode never exposed.
-#   * py_clob_client_v2 v1.0.1 — config.py carries only exchange/collateral/
-#     CTF addresses; ClobClient takes `funder` explicitly, no derivation API.
-# None of these confirm the factory/salt/init-code, so each constant stays
-# `# TODO(verify)` (NOT silently promoted to verified).  Detection does not
-# rely on these being correct (it ranks by observed on-chain evidence); type 0
-# (EOA) is always exact and independently verified.
+# Type-1 (POLY_PROXY / MAGIC) derivation is the VERIFIED scheme implemented
+# once in ``polyecho.shared.polymarket.wallet.magic_proxy_address``
+#   addr = keccak256(0xff ++ factory ++ keccak256(eoa) ++ initCodeHash)[-20:]
+# using the PolyHermes brief §9 ``MAGIC_PROXY_FACTORY`` /
+# ``MAGIC_PROXY_INIT_CODE_HASH`` constants (centralised in
+# ``polyecho.shared.constants``).  ``accounts`` derives type-1 by CALLING
+# that function (late import to avoid the wallet→accounts import cycle) so
+# there is exactly ONE implementation; the earlier EIP-1167
+# placeholder/factory-as-impl scheme here was WRONG and has been removed.
 #
-# proxy-wallet factory (POLY_PROXY, type 1) — 1-of-1 EOA-owned proxy.
-# TODO(verify): unconfirmed (see verification block above).
-_POLY_PROXY_FACTORY: str = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"
-# gnosis-safe proxy factory (POLY_GNOSIS_SAFE, type 2) used by polymarket.com.
-# TODO(verify): unconfirmed (see verification block above).
-_POLY_SAFE_FACTORY: str = "0xaacFeEa03eb1561C4e67d661e40682Bd20E3541b"
-# gnosis-safe singleton / master copy the factory clones via CREATE2.
-# TODO(verify): unconfirmed (see verification block above).
-_GNOSIS_SAFE_SINGLETON: str = "0x3E5c63644E683549055b9Be8653de26E0B4CD36E"
-# Minimal EIP-1167 proxy creation prefix/suffix wrapping the singleton; the
-# real Polymarket proxy bytecode is not published, hence TODO(verify).
-_EIP1167_PREFIX = bytes.fromhex("3d602d80600a3d3981f3363d3d373d3d3d363d73")
-_EIP1167_SUFFIX = bytes.fromhex("5af43d82803e903d91602b57fd5bf3")
+# Type-2 (POLY_GNOSIS_SAFE) has NO offline derivation: the funder is
+# resolved via the Safe factory RPC ``computeProxyAddress(eoa)``
+# (``wallet.resolve_wallet`` SAFE path).  ``accounts`` MUST NOT fabricate a
+# SAFE address from a guessed scheme — :func:`derive_wallets` returns
+# ``None`` for type-2/type-3, signalling "needs explicit funder / RPC"
+# rather than emitting a wrong address.
+#
+# Type-3 (POLY_1271) has no reference at all and ALWAYS requires an explicit
+# operator-supplied funder (``wallet.resolve_wallet`` fails closed) — never
+# derived; :func:`derive_wallets` returns ``None`` for it too.
 
 # Polymarket collateral on Polygon — USDC.e — for the optional balance probe.
 # Widely-published Polygon USDC.e; the contract-addresses doc page was not
@@ -222,100 +213,67 @@ def _normalize_eoa(eoa: str) -> str:
     return to_checksum_address(eoa).lower()
 
 
-def _create2(deployer: str, salt: bytes, init_code: bytes) -> str:
-    """Standard EIP-1014 CREATE2 address.
-
-    ``address = keccak256(0xff ++ deployer ++ salt ++ keccak256(init_code))[12:]``
-
-    Args:
-        deployer:  Factory contract address (``0x…``).
-        salt:      32-byte salt.
-        init_code: Contract creation bytecode.
-
-    Returns:
-        The lowercased ``0x…`` deployment address.
-    """
-    deployer_bytes = bytes.fromhex(to_checksum_address(deployer)[2:])
-    pre = b"\xff" + deployer_bytes + salt + keccak(init_code)
-    return to_checksum_address(keccak(pre)[-20:]).lower()
-
-
-def _proxy_salt(eoa_lower: str) -> bytes:
-    """CREATE2 salt for a Polymarket proxy keyed by the owner EOA.
-
-    TODO(verify): Polymarket's exact salt pre-image is not documented.  The
-    common pattern (and what is implemented here) is
-    ``keccak256(abi.encode(owner_address))`` i.e. the 32-byte
-    left-padded EOA.  Isolated here so a verified salt is a one-line fix.
-    """
-    return keccak(bytes(12) + bytes.fromhex(to_checksum_address(eoa_lower)[2:]))
-
-
 def _poly_proxy_address(eoa_lower: str) -> str:
-    """Type 1 (POLY_PROXY) funder address.
+    """Type-1 (POLY_PROXY / MAGIC) funder — the ONE verified scheme (P0-5).
 
-    TODO(verify): uses an EIP-1167 minimal-proxy init code pointing at a
-    placeholder implementation.  Structurally correct CREATE2; the exact
-    Polymarket proxy bytecode is unverified.
+    Delegates to :func:`polyecho.shared.polymarket.wallet.magic_proxy_address`
+    so ``accounts`` and ``wallet`` share a SINGLE implementation
+    (``keccak256(0xff ++ factory ++ keccak256(eoa) ++ initCodeHash)[-20:]``
+    over the brief §9 Magic constants).  Imported lazily here because
+    ``wallet`` imports ``SignatureType`` from this module — a module-level
+    import would be circular; the call site (``derive_wallets`` /
+    ``detect_signature_type``) is never import-time, so a function-local
+    import is safe and keeps both modules import-side-effect-free.
     """
-    init_code = _EIP1167_PREFIX + bytes.fromhex(
-        to_checksum_address(_POLY_PROXY_FACTORY)[2:]
-    ) + _EIP1167_SUFFIX
-    return _create2(_POLY_PROXY_FACTORY, _proxy_salt(eoa_lower), init_code)
+    from polyecho.shared.polymarket.wallet import magic_proxy_address
+
+    return magic_proxy_address(eoa_lower)
 
 
-def _poly_safe_address(eoa_lower: str) -> str:
-    """Type 2 (POLY_GNOSIS_SAFE) funder address.
+def derive_wallets(eoa: str) -> dict[int, str | None]:
+    """Derive the candidate funder addresses for *eoa* (P0-5).
 
-    TODO(verify): Gnosis-Safe proxies are CREATE2-deployed by a
-    ProxyFactory cloning a singleton.  The init code below is the canonical
-    GnosisSafeProxy creation pattern wrapping the singleton; Polymarket's
-    precise factory/singleton/salt are unverified.
-    """
-    init_code = _EIP1167_PREFIX + bytes.fromhex(
-        to_checksum_address(_GNOSIS_SAFE_SINGLETON)[2:]
-    ) + _EIP1167_SUFFIX
-    return _create2(_POLY_SAFE_FACTORY, _proxy_salt(eoa_lower), init_code)
+    Returns a mapping keyed by signature type (0..3).  Only the values that
+    are *verifiably* derivable offline are addresses; the rest are ``None``
+    to signal "needs explicit funder / RPC" rather than a fabricated wrong
+    address:
 
-
-def derive_wallets(eoa: str) -> dict[int, str]:
-    """Derive the four candidate funder addresses for *eoa*.
-
-    The returned mapping is keyed by signature type (0..3); every value is a
-    lowercased ``0x…`` address.
-
-    * **0 EOA** — the signer itself is the funder.
-    * **1 POLY_PROXY** — CREATE2 proxy via the Polymarket proxy factory.
-    * **2 POLY_GNOSIS_SAFE** — CREATE2 Gnosis-Safe proxy via the Polymarket
-      safe factory + singleton.
-    * **3 POLY_1271** — Polymarket's "deposit wallet"; the on-chain holder is
-      the same Gnosis-Safe proxy as type 2 (the 1271 flag only changes
-      signature *verification*, not the address).
+    * **0 EOA** — the signer itself is the funder (always exact).
+    * **1 POLY_PROXY** — CREATE2 Magic proxy via the verified
+      :func:`polyecho.shared.polymarket.wallet.magic_proxy_address` (the
+      single source of truth; brief §9 constants).
+    * **2 POLY_GNOSIS_SAFE** — ``None``.  The Safe funder has **no** offline
+      derivation; it is resolved via the Safe factory RPC
+      ``computeProxyAddress(eoa)`` (``wallet.resolve_wallet`` SAFE path).
+      ``accounts`` deliberately does NOT fabricate it.
+    * **3 POLY_1271** — ``None``.  Always requires an explicit
+      operator-supplied funder (never derived; ``wallet.resolve_wallet``
+      fails closed).
 
     Args:
         eoa: The externally-owned account / signer address (``0x…``).
 
     Returns:
-        ``{0: eoa, 1: poly_proxy, 2: poly_safe, 3: poly_safe}`` — all
-        lowercased.  Types 2 and 3 intentionally share an address.
+        ``{0: eoa, 1: magic_proxy, 2: None, 3: None}`` — addresses
+        lowercased; ``None`` where offline derivation is not trustworthy.
 
     Raises:
         ValueError: If *eoa* is not a valid EVM address.
 
     .. note::
-       Types 1/2/3 depend on ``# TODO(verify)`` factory constants (see module
-       docstring).  Type 0 is always exact.  Detection ranks by observed
-       on-chain evidence and does not require 1/2/3 to be byte-exact.
+       Only type 0 (exact) and type 1 (verified CREATE2, brief §9) yield an
+       address.  Detection ranks whatever addresses are present by observed
+       on-chain evidence; types 2/3 contribute no candidate (they need RPC /
+       explicit funder), which is correct — emitting a guessed address would
+       be worse than emitting none.
     """
     eoa_lower = _normalize_eoa(eoa)
-    safe = _poly_safe_address(eoa_lower)
     return {
         SignatureType.EOA: eoa_lower,
         SignatureType.POLY_PROXY: _poly_proxy_address(eoa_lower),
-        SignatureType.POLY_GNOSIS_SAFE: safe,
-        # POLY_1271 shares the type-2 Safe proxy on-chain; the 1271 flag only
-        # changes how the order signature is verified, not the funder address.
-        SignatureType.POLY_1271: safe,
+        # No trustworthy offline derivation — see docstring (P0-5).
+        SignatureType.POLY_GNOSIS_SAFE: None,
+        SignatureType.POLY_1271: None,
     }
 
 
@@ -391,11 +349,12 @@ def _score(position_count: int, activity_count: int, usdc_balance: float | None)
 def _confidence(ranked: list[TypeEvidence]) -> str:
     """Map the score distribution to a coarse confidence label.
 
-    Types 2 (POLY_GNOSIS_SAFE) and 3 (POLY_1271) derive to the *same*
-    on-chain address, so they always tie.  That tie is **not** real
-    ambiguity about the funder wallet — only about which signature flag to
-    use — so the runner-up for confidence purposes is the best candidate
-    with a *different* address than the winner.
+    Types 2 (POLY_GNOSIS_SAFE) and 3 (POLY_1271) have no offline-derivable
+    funder (P0-5) and so contribute zero-evidence rows with an empty
+    address.  The runner-up for confidence purposes is the best candidate
+    with a *different*, non-empty address than the winner — empty-address
+    (type 2/3) rows are inherently score-0 and never become a spurious
+    runner-up.
     """
     top = ranked[0]
     if top.score <= 0:
@@ -446,6 +405,7 @@ async def detect_signature_type(
     """
     wallets = derive_wallets(eoa)
     eoa_lower = wallets[SignatureType.EOA]
+    assert eoa_lower is not None  # type 0 is always an address (never None)
 
     evidence: list[TypeEvidence] = []
     for sig_type in (
@@ -455,6 +415,23 @@ async def detect_signature_type(
         SignatureType.POLY_1271,
     ):
         address = wallets[sig_type]
+        if address is None:
+            # Types 2/3 have no trustworthy offline derivation (P0-5): they
+            # contribute no candidate.  Surface a zero-evidence row so the
+            # result still describes all four types, but never query a
+            # fabricated address.
+            evidence.append(
+                TypeEvidence(
+                    signature_type=int(sig_type),
+                    name=SIGNATURE_TYPE_NAMES[sig_type],
+                    address="",
+                    position_count=0,
+                    activity_count=0,
+                    usdc_balance=None,
+                    score=0.0,
+                )
+            )
+            continue
 
         try:
             positions = await datasource.get_positions(address)

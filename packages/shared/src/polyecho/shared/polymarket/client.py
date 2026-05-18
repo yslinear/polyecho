@@ -42,12 +42,66 @@ Usage (Phase 1+)::
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+from collections.abc import Iterator
 from typing import Any
 
 from py_clob_client_v2 import ApiCreds, ClobClient  # type: ignore[import-untyped]
 
 from polyecho.shared.config import get_settings
 from polyecho.shared.copytrading import assert_live_allowed
+
+#: The proxy env vars py-clob-client-v2's underlying HTTP layer honours.
+#: http(s) only — see polyecho.shared.http for the SOCKS limitation note.
+_PROXY_ENV_VARS: tuple[str, ...] = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
+
+
+@contextlib.contextmanager
+def _scoped_proxy_env(proxy: str | None) -> Iterator[None]:
+    """Apply *proxy* to the proxy env vars **only for the wrapped block**.
+
+    P0-4: ``py_clob_client_v2.ClobClient`` exposes NO proxy / session /
+    transport parameter (verified via context7 against py-clob-client-v2
+    v1.0.1 — ``ClobClient(host, chain_id, key, creds, signature_type,
+    funder, builder_config, use_server_time, retry_on_error)``; no network
+    hook).  Its sync HTTP layer only honours the standard proxy env vars, so
+    a proxy *must* travel through ``os.environ`` — but the previous
+    ``os.environ.setdefault(...)`` mutated the **process global** and
+    leaked: it (a) survived past client construction, (b) leaked the proxy
+    (with any ``user:pass@`` creds) into every later HTTP call and every
+    subprocess, and (c) let one ``PolymarketClient`` contaminate another
+    with a different proxy (``setdefault`` is first-write-wins, so instance
+    B silently inherited instance A's proxy).
+
+    This context manager instead sets the vars *just* around the single
+    ``ClobClient(...)`` construction (the only point where the SDK builds
+    its session) and **restores the exact prior environment** on exit —
+    including deleting vars that were unset before.  Net effect: no
+    process-global mutation survives, two clients with different proxies
+    never contaminate each other, and proxy credentials never leak into the
+    global env or inherited subprocess environments.  When *proxy* is
+    ``None`` the environment is left completely untouched (byte-for-byte
+    identical to no proxy configured).
+    """
+    if not proxy:
+        yield
+        return
+
+    _sentinel = object()
+    saved: dict[str, str | object] = {
+        var: os.environ.get(var, _sentinel) for var in _PROXY_ENV_VARS
+    }
+    try:
+        for var in _PROXY_ENV_VARS:
+            os.environ[var] = proxy
+        yield
+    finally:
+        for var, prev in saved.items():
+            if prev is _sentinel:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = prev  # type: ignore[assignment]
 
 
 class PolymarketClient:
@@ -86,30 +140,27 @@ class PolymarketClient:
                 api_passphrase=creds["api_passphrase"],
             )
 
-        # py-clob-client-v2's ClobClient exposes NO proxy/session parameter
-        # (verified via context7). Its underlying HTTP layer honours the
-        # standard proxy env vars, so when an operator proxy is configured
-        # (PRD §8.1 geo-block) export it for this process before building the
-        # client. http(s) only — see polyecho.shared.http SOCKS note.
-        # TODO(verify): exact transport of py-clob-client-v2 is unconfirmed;
-        # env-proxy is the documented best-effort for requests/httpx clients.
-        import os
-
+        # P0-4: py-clob-client-v2 v1.0.1's ClobClient exposes NO proxy /
+        # session / transport parameter (verified via context7). Its sync
+        # HTTP layer only honours the standard proxy env vars, so the proxy
+        # is applied via _scoped_proxy_env() — set ONLY around this single
+        # ClobClient(...) construction (where the SDK builds its session)
+        # and the prior environment is restored on exit. No process-global
+        # mutation survives: two PolymarketClient instances with different
+        # proxies never contaminate each other and proxy creds never leak
+        # into the global env / subprocesses. http(s) only — see
+        # polyecho.shared.http SOCKS note. PRD §8.1 geo-block.
         from polyecho.shared.http import get_proxy_url
 
-        _proxy = get_proxy_url()
-        if _proxy:
-            for _var in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
-                os.environ.setdefault(_var, _proxy)
-
-        self._client = ClobClient(
-            host=settings.polymarket_clob_url,
-            chain_id=settings.polymarket_chain_id,
-            key=private_key,
-            creds=api_creds,
-            signature_type=signature_type,
-            funder=funder,
-        )
+        with _scoped_proxy_env(get_proxy_url()):
+            self._client = ClobClient(
+                host=settings.polymarket_clob_url,
+                chain_id=settings.polymarket_chain_id,
+                key=private_key,
+                creds=api_creds,
+                signature_type=signature_type,
+                funder=funder,
+            )
 
     # ------------------------------------------------------------------
     # Public — Discovery / read-only (Phase 1)

@@ -126,7 +126,10 @@ class TestSettings:
         settings = get_settings()
 
         assert settings.db_url == "postgresql+asyncpg://u:p@localhost/test"
-        assert settings.key_kdf_iterations == 1000
+        # P0-7: env asks for 1000 but Settings clamps UP to the OWASP
+        # floor MIN_KDF_ITERATIONS (100_000) — a too-low value is never
+        # honoured for key derivation.
+        assert settings.key_kdf_iterations == 100_000
         assert settings.log_level == "INFO"
 
     def test_settings_default_values(self, monkeypatch: pytest.MonkeyPatch) -> None:

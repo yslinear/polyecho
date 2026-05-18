@@ -4,7 +4,12 @@ version = "0.0.0"
 description = "PolyEcho shared library: Polymarket client, ORM models, db, config, crypto"
 requires-python = ">=3.12"
 dependencies = [
-  "py-clob-client-v2",
+  # P0-6: exact pin (supply-chain). The trading SDK owns EIP-712/HMAC/
+  # rounding for live orders; an unpinned range would let a future release
+  # silently change signing/transport. 1.0.1 == the version in uv.lock
+  # (verified). py-builder-relayer-client is deliberately NOT declared:
+  # gasless deploy is delegated to the off-chain relayer (no client lib).
+  "py-clob-client-v2==1.0.1",
   "sqlalchemy[asyncio]>=2.0",
   "asyncpg>=0.30",
   "pydantic>=2",

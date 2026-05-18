@@ -1,11 +1,15 @@
 """
 tests/test_pending_actions.py
 =============================
-Phase-5 Wave-1 — :mod:`polyecho.shared.pending_actions` binding contract.
+Phase-5 Wave-1 — :mod:`polyecho.shared.pending_actions` FROZEN contract
+(P0-1: operator pre-provisioned danger passphrase).
 
-No Postgres: an in-memory session double stands in for the row store so
-we exercise the full create→confirm lifecycle, the typed-error reasons,
-the constant-time passphrase check, and ``expire_stale``.
+No Postgres: an in-memory session double stands in for the row store **and**
+the ``settings`` row (so ``get_danger_passphrase_hash`` resolves through the
+same fake).  We exercise the full create→confirm lifecycle, the typed-error
+reasons (incl. ``NOT_PROVISIONED`` / ``TOO_SOON``), the constant-time check,
+fail-closed when the operator secret is unset, the server-enforced minimum
+confirm age, and ``expire_stale``.
 """
 
 from __future__ import annotations
@@ -17,7 +21,12 @@ from unittest.mock import patch
 
 import pytest
 
+from polyecho.shared.danger_passphrase import (
+    DANGER_PASSPHRASE_SETTINGS_KEY,
+    hash_danger_passphrase,
+)
 from polyecho.shared.pending_actions import (
+    MIN_CONFIRM_AGE_SECONDS,
     PendingActionError,
     PendingActionStatus,
     PendingActionType,
@@ -27,6 +36,10 @@ from polyecho.shared.pending_actions import (
 )
 
 from .conftest import run
+
+# A creation time safely older than the server-enforced minimum confirm age
+# so confirms in the happy-path tests are not rejected as TOO_SOON.
+_OLD = datetime.now(UTC) - timedelta(seconds=MIN_CONFIRM_AGE_SECONDS + 60)
 
 
 class _Row:
@@ -39,24 +52,48 @@ class _Row:
         self.status = kw["status"]
         self.confirm_passphrase_hash = kw.get("confirm_passphrase_hash")
         self.expires_at = kw.get("expires_at")
+        # Server-default in the real model; the double backdates it so the
+        # MIN_CONFIRM_AGE_SECONDS gate does not reject happy-path confirms.
+        self.created_at = kw.get("created_at", _OLD)
+
+
+class _SettingRow:
+    """Stand-in for the settings ORM row (danger_passphrase_hash)."""
+
+    def __init__(self, key: str, value: Any) -> None:
+        self.key = key
+        self.value = value
 
 
 class _Sess:
-    """Tiny async session: ``add``/``flush`` insert; ``execute`` selects."""
+    """Tiny async session: ``add``/``flush`` insert; ``execute`` selects.
 
-    def __init__(self) -> None:
+    Holds both pending-action rows and a single settings row so
+    ``get_danger_passphrase_hash(sess)`` resolves against the same double.
+    """
+
+    def __init__(self, *, provisioned: str | None = None) -> None:
         self.rows: list[_Row] = []
+        self.settings: dict[str, _SettingRow] = {}
+        if provisioned is not None:
+            self.settings[DANGER_PASSPHRASE_SETTINGS_KEY] = _SettingRow(
+                DANGER_PASSPHRASE_SETTINGS_KEY,
+                hash_danger_passphrase(provisioned),
+            )
 
     def add(self, obj: Any) -> None:
-        self.rows.append(obj)  # already a _Row built by the patched model
+        self.rows.append(obj)
 
     async def flush(self) -> None:
         return None
 
     async def execute(self, stmt: Any) -> Any:
-        # select(PendingAction).where(id == pk) — find by the bound pk.
-        text = str(stmt).lower()
-        if "update" in text:
+        text = str(stmt).lower().lstrip()
+
+        # NB: a SELECT on `settings` contains the column "updated_at" — match
+        # the *statement verb* (leading token), not a substring, so the
+        # settings lookup is never mis-routed to the bulk-UPDATE branch.
+        if text.startswith("update"):
             now = datetime.now(UTC)
             n = 0
             for r in self.rows:
@@ -77,8 +114,7 @@ class _Sess:
             return _U()
 
         target = stmt.compile().params
-        pk = next(iter(target.values()))
-        match = next((r for r in self.rows if r.id == pk), None)
+        key = next(iter(target.values()))
 
         class _R:
             def __init__(self, row: Any) -> None:
@@ -87,6 +123,10 @@ class _Sess:
             def scalar_one_or_none(self) -> Any:
                 return self._row
 
+        # settings lookup (key is a str) vs pending_actions (key is a UUID).
+        if "settings" in text:
+            return _R(self.settings.get(key))
+        match = next((r for r in self.rows if r.id == key), None)
         return _R(match)
 
 
@@ -98,6 +138,21 @@ def _patch_model(sess: _Sess) -> Any:
     )
 
 
+def _new_action(sess: _Sess, **over: Any) -> str:
+    kw: dict[str, Any] = {
+        "action_type": PendingActionType.MANUAL_SELL,
+        "params": {},
+        "session": sess,
+    }
+    kw.update(over)
+    with _patch_model(sess):
+        action_id: str = run(create_pending_action(**kw))
+    return action_id
+
+
+# ---------------------------------------------------------------------------
+# enums / reasons
+# ---------------------------------------------------------------------------
 def test_enums_match_db_values() -> None:
     assert PendingActionType.MANUAL_SELL.value == "manual_sell"
     assert PendingActionType.EMERGENCY_LIQUIDATE.value == "emergency_liquidate"
@@ -113,48 +168,70 @@ def test_enums_match_db_values() -> None:
         "expired",
         "already_resolved",
         "bad_passphrase",
+        "not_provisioned",
+        "too_soon",
     }
 
 
-def test_create_then_confirm_happy_path() -> None:
+# ---------------------------------------------------------------------------
+# create — stores NO caller passphrase material (P0-1)
+# ---------------------------------------------------------------------------
+def test_create_stores_no_passphrase_material() -> None:
     sess = _Sess()
-    with _patch_model(sess):
-        aid = run(
-            create_pending_action(
-                action_type=PendingActionType.MANUAL_SELL,
-                params={"market": "0xabc", "shares": "3"},
-                passphrase="hunter2",
-                ttl_seconds=300,
-                session=sess,
-            )
-        )
+    aid = _new_action(sess, params={"market": "0xabc", "shares": "3"})
     row = sess.rows[0]
     assert str(row.id) == aid
     assert row.status == "awaiting_confirm"
-    # Passphrase is hashed, never stored in plaintext.
-    assert row.confirm_passphrase_hash
-    assert "hunter2" not in row.confirm_passphrase_hash
+    # The per-row hash column is intentionally NULL — the secret of record
+    # is the operator pre-provisioned hash, not anything the caller sent.
+    assert row.confirm_passphrase_hash is None
 
+
+def test_create_signature_has_no_passphrase_kw() -> None:
+    import inspect
+
+    sig = inspect.signature(create_pending_action)
+    assert "passphrase" not in sig.parameters
+
+
+# ---------------------------------------------------------------------------
+# confirm — verifies the operator pre-provisioned secret
+# ---------------------------------------------------------------------------
+def test_confirm_happy_path_with_provisioned_secret() -> None:
+    sess = _Sess(provisioned="operator-secret")
+    aid = _new_action(sess, action_type=PendingActionType.MANUAL_SELL)
     result = run(
         confirm_pending_action(
-            action_id=aid, passphrase="hunter2", session=sess
+            action_id=aid, passphrase="operator-secret", session=sess
         )
     )
     assert result is PendingActionType.MANUAL_SELL
-    assert row.status == "confirmed"
+    assert sess.rows[0].status == "confirmed"
+
+
+def test_confirm_fails_closed_when_not_provisioned() -> None:
+    """No operator secret → refuse; NEVER auto-provision from caller input."""
+    sess = _Sess()  # nothing provisioned
+    aid = _new_action(sess)
+    with pytest.raises(PendingActionError) as ei:
+        run(
+            confirm_pending_action(
+                action_id=aid, passphrase="anything", session=sess
+            )
+        )
+    assert ei.value.reason is PendingActionError.Reason.NOT_PROVISIONED
+    # Row untouched (not consumed / not expired) and still NO stored hash:
+    # confirm must never write/derive the secret from caller input.
+    assert sess.rows[0].status == "awaiting_confirm"
+    assert sess.rows[0].confirm_passphrase_hash is None
+    assert DANGER_PASSPHRASE_SETTINGS_KEY not in sess.settings
 
 
 def test_wrong_passphrase_raises_and_does_not_consume() -> None:
-    sess = _Sess()
-    with _patch_model(sess):
-        aid = run(
-            create_pending_action(
-                action_type=PendingActionType.EMERGENCY_LIQUIDATE,
-                params={},
-                passphrase="correct",
-                session=sess,
-            )
-        )
+    sess = _Sess(provisioned="correct")
+    aid = _new_action(
+        sess, action_type=PendingActionType.EMERGENCY_LIQUIDATE
+    )
     with pytest.raises(PendingActionError) as ei:
         run(
             confirm_pending_action(
@@ -162,23 +239,28 @@ def test_wrong_passphrase_raises_and_does_not_consume() -> None:
             )
         )
     assert ei.value.reason is PendingActionError.Reason.BAD_PASSPHRASE
-    # Row NOT consumed/expired on a single wrong try (TTL handles it).
+    assert sess.rows[0].status == "awaiting_confirm"
+
+
+def test_confirm_too_soon_is_server_enforced() -> None:
+    """A confirm before created_at + MIN_CONFIRM_AGE_SECONDS is rejected."""
+    sess = _Sess(provisioned="pw")
+    aid = _new_action(sess)
+    # Force creation to "just now" — inside the minimum-age window.
+    sess.rows[0].created_at = datetime.now(UTC)
+    with pytest.raises(PendingActionError) as ei:
+        run(
+            confirm_pending_action(
+                action_id=aid, passphrase="pw", session=sess
+            )
+        )
+    assert ei.value.reason is PendingActionError.Reason.TOO_SOON
     assert sess.rows[0].status == "awaiting_confirm"
 
 
 def test_expired_row_raises_expired() -> None:
-    sess = _Sess()
-    with _patch_model(sess):
-        aid = run(
-            create_pending_action(
-                action_type=PendingActionType.MANUAL_SELL,
-                params={},
-                passphrase="pw",
-                ttl_seconds=300,
-                session=sess,
-            )
-        )
-    # Force it past its window.
+    sess = _Sess(provisioned="pw")
+    aid = _new_action(sess)
     sess.rows[0].expires_at = datetime.now(UTC) - timedelta(seconds=1)
     with pytest.raises(PendingActionError) as ei:
         run(
@@ -190,7 +272,7 @@ def test_expired_row_raises_expired() -> None:
 
 
 def test_missing_row_raises_not_found() -> None:
-    sess = _Sess()
+    sess = _Sess(provisioned="pw")
     with pytest.raises(PendingActionError) as ei:
         run(
             confirm_pending_action(
@@ -201,7 +283,7 @@ def test_missing_row_raises_not_found() -> None:
 
 
 def test_bad_uuid_raises_not_found() -> None:
-    sess = _Sess()
+    sess = _Sess(provisioned="pw")
     with pytest.raises(PendingActionError) as ei:
         run(
             confirm_pending_action(
@@ -212,16 +294,8 @@ def test_bad_uuid_raises_not_found() -> None:
 
 
 def test_already_resolved_raises() -> None:
-    sess = _Sess()
-    with _patch_model(sess):
-        aid = run(
-            create_pending_action(
-                action_type=PendingActionType.MANUAL_SELL,
-                params={},
-                passphrase="pw",
-                session=sess,
-            )
-        )
+    sess = _Sess(provisioned="pw")
+    aid = _new_action(sess)
     sess.rows[0].status = "confirmed"
     with pytest.raises(PendingActionError) as ei:
         run(
@@ -234,18 +308,10 @@ def test_already_resolved_raises() -> None:
 
 def test_confirm_uses_constant_time_compare() -> None:
     """The verify path must route through ``hmac.compare_digest``."""
-    sess = _Sess()
-    with _patch_model(sess):
-        aid = run(
-            create_pending_action(
-                action_type=PendingActionType.MANUAL_SELL,
-                params={},
-                passphrase="pw",
-                session=sess,
-            )
-        )
+    sess = _Sess(provisioned="pw")
+    aid = _new_action(sess)
     with patch(
-        "polyecho.shared.pending_actions.hmac.compare_digest",
+        "polyecho.shared.danger_passphrase.hmac.compare_digest",
         return_value=True,
     ) as cmp_mock:
         run(
@@ -258,27 +324,10 @@ def test_confirm_uses_constant_time_compare() -> None:
 
 def test_expire_stale_bulk_marks_overdue_rows() -> None:
     sess = _Sess()
-    with _patch_model(sess):
-        run(
-            create_pending_action(
-                action_type=PendingActionType.MANUAL_SELL,
-                params={},
-                passphrase="pw",
-                ttl_seconds=300,
-                session=sess,
-            )
-        )
-        run(
-            create_pending_action(
-                action_type=PendingActionType.MANUAL_SELL,
-                params={},
-                passphrase="pw",
-                ttl_seconds=300,
-                session=sess,
-            )
-        )
-    # One overdue, one still fresh.
+    _new_action(sess)
+    _new_action(sess)
     sess.rows[0].expires_at = datetime.now(UTC) - timedelta(seconds=10)
+    sess.rows[1].expires_at = datetime.now(UTC) + timedelta(seconds=300)
     n = run(expire_stale(session=sess))
     assert n == 1
     assert sess.rows[0].status == "expired"
