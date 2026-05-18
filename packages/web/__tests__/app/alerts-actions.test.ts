@@ -18,11 +18,29 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 process.env.POLYECHO_KEY_KDF_ITERATIONS = "1000"; // keep tests fast
 
+// Real schema table objects: used for insert-target identity in the mock
+// and to assert the events row goes to the `events` table.
+import { events as eventsTable } from "@/lib/db/schema";
+
 // --- Drizzle mock: a chainable builder recording calls --------------------
 const onConflictDoUpdate = vi.fn().mockResolvedValue(undefined);
-const returning = vi.fn().mockResolvedValue([{ id: "pa-1" }]);
+// pending_actions insert -> [{ id: "pa-1" }]; events insert -> [{ id: 42 }].
+// Keyed off the table object passed to db.insert(table).
+let lastInsertTable: unknown;
+const returning = vi.fn(() =>
+  Promise.resolve(
+    lastInsertTable === eventsTable ? [{ id: 42 }] : [{ id: "pa-1" }]
+  )
+);
 const insertValues = vi.fn(() => ({ onConflictDoUpdate, returning }));
-const insert = vi.fn(() => ({ values: insertValues }));
+const insert = vi.fn((table?: unknown) => {
+  lastInsertTable = table;
+  return { values: insertValues };
+});
+
+// db.execute(sql`...`) — the pg_notify path. Records the tagged-template
+// SQL fragment so tests can assert the channel + bound id.
+const execute = vi.fn().mockResolvedValue([]);
 
 const deleteWhere = vi.fn().mockResolvedValue(undefined);
 const del = vi.fn(() => ({ where: deleteWhere }));
@@ -45,6 +63,7 @@ vi.mock("@/lib/db", () => ({
     delete: (...a: unknown[]) => del(...a),
     update: (...a: unknown[]) => update(...a),
     select: (...a: unknown[]) => select(...a),
+    execute: (...a: unknown[]) => execute(...a),
   },
 }));
 vi.mock("@/lib/env", () => ({ env: { POLYECHO_DB_URL_DRIZZLE: "stub" } }));
@@ -61,7 +80,9 @@ beforeEach(() => {
   insert.mockClear();
   insertValues.mockClear();
   onConflictDoUpdate.mockClear().mockResolvedValue(undefined);
-  returning.mockClear().mockResolvedValue([{ id: "pa-1" }]);
+  returning.mockClear();
+  execute.mockClear().mockResolvedValue([]);
+  lastInsertTable = undefined;
   del.mockClear();
   deleteWhere.mockClear().mockResolvedValue(undefined);
   update.mockClear();
@@ -149,6 +170,66 @@ describe("createPendingAction", () => {
     );
     expect(res.ok).toBe(false);
     expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("ALSO emits the frozen pending_dangerous_action events row + NOTIFY", async () => {
+    const res = await createPendingAction("emergency_liquidate", {
+      target: "m9",
+    });
+    expect(res.ok).toBe(true);
+
+    // Two inserts: pending_actions (call 0) THEN events (call 1).
+    expect(insert).toHaveBeenCalledTimes(2);
+    expect(insert.mock.calls[1][0]).toBe(eventsTable);
+
+    const ev = insertValues.mock.calls[1][0] as Record<string, unknown>;
+    expect(ev.event_type).toBe("pending_dangerous_action");
+    expect(ev.severity).toBe("warning");
+    // pushed_at left NULL == omitted from the insert values (sender stamps it).
+    expect("pushed_at" in ev).toBe(false);
+
+    const payload = ev.payload as {
+      data: Record<string, unknown>;
+      push: Record<string, unknown>;
+    };
+    // Frozen jsonb shape: { data: <payload>, push: <PushPayload.to_json()> }.
+    expect(payload.data).toEqual({
+      pending_action_id: "pa-1",
+      action_type: "emergency_liquidate",
+      params_summary: { target: "m9" },
+    });
+    expect(payload.push.title).toBe("待確認的危險操作");
+    expect(payload.push.url).toBe("/alerts");
+    expect(payload.push.tag).toBe("pending:pa-1");
+    expect(payload.push.data).toEqual({ url: "/alerts" });
+    expect(typeof payload.push.body).toBe("string");
+    // PushPayload.to_json() frozen key set: {title,body,url,tag,data}.
+    expect(Object.keys(payload.push).sort()).toEqual(
+      ["body", "data", "tag", "title", "url"].sort()
+    );
+
+    // NOTIFY issued exactly once on channel `polyecho_events` with the
+    // events.id rendered as a string, AFTER the events row insert.
+    expect(execute).toHaveBeenCalledTimes(1);
+    const notifySql = JSON.stringify(execute.mock.calls[0][0]);
+    expect(notifySql).toContain("pg_notify");
+    expect(notifySql).toContain("polyecho_events");
+    expect(notifySql).toContain("42");
+  });
+
+  it("is best-effort: events insert failure still returns success", async () => {
+    returning.mockImplementationOnce(() =>
+      Promise.resolve([{ id: "pa-1" }])
+    ); // pending insert OK
+    returning.mockImplementationOnce(() =>
+      Promise.reject(new Error("events insert boom"))
+    ); // events insert throws
+    const res = await createPendingAction("manual_sell", { target: "m1" });
+    // Pending action creation MUST still succeed (mirrors Python best-effort).
+    expect(res.ok).toBe(true);
+    expect(res.id).toBe("pa-1");
+    // NOTIFY never reached because the events insert threw.
+    expect(execute).not.toHaveBeenCalled();
   });
 });
 

@@ -23,12 +23,111 @@
  * redirect; islands toast + router.refresh()).
  */
 
-import { and, eq, lte } from "drizzle-orm";
+import { and, eq, lte, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db";
-import { pushSubscriptions, pendingActions, settings } from "@/lib/db/schema";
+import {
+  pushSubscriptions,
+  pendingActions,
+  settings,
+  events,
+} from "@/lib/db/schema";
 import { VAPID_PUBLIC_KEY, coerceStringSetting } from "@/lib/settings-keys";
 import { hashPassphrase, verifyPassphrase } from "@/lib/passphrase";
+
+/**
+ * Frozen Phase-5 Wave-1 contract mirror (packages/shared
+ * polyecho/shared/events.py — do NOT diverge).
+ *
+ * The Python `emit_event` writes one `events` row whose jsonb `payload`
+ * column is EXACTLY `{ "data": <payload>, "push": <PushPayload.to_json()
+ * or null> }`, leaves `pushed_at` NULL (the sender stamps it), then —
+ * strictly AFTER the row is committed — issues
+ * `SELECT pg_notify('polyecho_events', '<event_id>')` with the id as a
+ * decimal string. The web is TS and cannot call the Python helper, so it
+ * reproduces those semantics byte-for-byte here.
+ *
+ * `EVENTS_NOTIFY_CHANNEL` mirrors events.py:64 verbatim — the
+ * web-push-sender LISTENs on exactly this string.
+ */
+const EVENTS_NOTIFY_CHANNEL = "polyecho_events" as const;
+
+/** Mirrors `PushPayload.to_json()` — the frozen `{title,body,url,tag,data}`
+ * key set the Service Worker renders (events.py:120-134). */
+interface PushPayloadJson {
+  title: string;
+  body: string;
+  url: string;
+  tag: string | null;
+  data: Record<string, unknown>;
+}
+
+/**
+ * emitPendingDangerousActionEvent — the TS mirror of Python `emit_event`
+ * for the `pending_dangerous_action` push event (PRD §5.8 待確認的危險操作).
+ *
+ * Best-effort, exactly like the Python intent: a failure here MUST NOT
+ * fail the pending-action creation, so this never throws — it logs and
+ * returns. Drizzle's postgres-js client autocommits each statement, so the
+ * `events` INSERT is durably committed before the separate `pg_notify`
+ * statement runs — the same "commit THEN notify" ordering guarantee the
+ * Python `emit_event` provides (events.py:179-193), so the sender can
+ * always SELECT the row the instant it receives the id.
+ */
+async function emitPendingDangerousActionEvent(args: {
+  pendingActionId: string;
+  actionType: PendingActionType;
+  params: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    const { pendingActionId, actionType, params } = args;
+    const actionLabel =
+      actionType === "emergency_liquidate" ? "緊急清倉" : "手動賣出";
+    const push: PushPayloadJson = {
+      title: "待確認的危險操作",
+      body: `有一筆「${actionLabel}」危險操作待確認，請於 5 分鐘內完成二次確認，逾時自動失效。`,
+      url: "/alerts",
+      tag: `pending:${pendingActionId}`,
+      data: { url: "/alerts" },
+    };
+    // payload jsonb shape is FROZEN: { data: <payload>, push: <push or null> }
+    const payload = {
+      data: {
+        pending_action_id: pendingActionId,
+        action_type: actionType,
+        params_summary: params,
+      },
+      push,
+    };
+
+    const [evRow] = await db
+      .insert(events)
+      .values({
+        event_type: "pending_dangerous_action",
+        severity: "warning",
+        payload,
+        // pushed_at omitted -> NULL (the sender stamps it after delivery).
+      })
+      .returning({ id: events.id });
+
+    // NOTIFY strictly AFTER the row is committed (autocommit above). The id
+    // is an integer -> injection-safe by construction; we still bind it as
+    // a parameter via the tagged template, mirroring the Python
+    // `pg_notify(:chan, :payload)` bound-param call (events.py:187-192).
+    if (evRow?.id != null) {
+      await db.execute(
+        sql`select pg_notify(${EVENTS_NOTIFY_CHANNEL}, ${String(evRow.id)})`
+      );
+    }
+  } catch (err) {
+    // Best-effort: never break pending-action creation (mirrors the
+    // Python best-effort intent). Log without leaking payload contents.
+    console.error(
+      "[alerts] pending_dangerous_action event emit failed (best-effort, ignored)",
+      err
+    );
+  }
+}
 
 // --- Web Push -------------------------------------------------------------
 
@@ -142,6 +241,18 @@ export async function createPendingAction(
       expires_at,
     })
     .returning({ id: pendingActions.id });
+
+  // PRD §5.8 待確認的危險操作: emit the frozen `pending_dangerous_action`
+  // push event so the web-push-sender notifies the operator. Best-effort —
+  // a failure here must NOT fail the pending-action creation (it never
+  // throws), mirroring the Python `emit_event` best-effort intent.
+  if (row?.id) {
+    await emitPendingDangerousActionEvent({
+      pendingActionId: row.id,
+      actionType,
+      params,
+    });
+  }
 
   return {
     ok: true,
