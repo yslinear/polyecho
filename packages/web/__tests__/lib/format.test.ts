@@ -52,11 +52,11 @@ describe("formatUsd / formatSignedUsd", () => {
 });
 
 describe("pnlColor", () => {
-  it("greens positive, reds negative, mutes zero/null", () => {
-    expect(pnlColor("5")).toContain("green");
-    expect(pnlColor("-5")).toContain("red");
-    expect(pnlColor(0)).toContain("muted");
-    expect(pnlColor(null)).toContain("muted");
+  it("uses gain/loss tokens for +/-, muted for zero/null (DESIGN.md)", () => {
+    expect(pnlColor("5")).toBe("text-gain");
+    expect(pnlColor("-5")).toBe("text-loss");
+    expect(pnlColor(0)).toBe("text-muted-foreground");
+    expect(pnlColor(null)).toBe("text-muted-foreground");
   });
 });
 
@@ -66,10 +66,10 @@ describe("shortAddress", () => {
       shortAddress("0xabcdef0123456789abcdef0123456789abcdef01")
     ).toBe("0xabcd…ef01");
   });
-  it("returns short input unchanged and em-dash for nullish", () => {
+  it("returns short input unchanged and a textual placeholder for nullish", () => {
     expect(shortAddress("0x1234")).toBe("0x1234");
-    expect(shortAddress(null)).toBe("—");
-    expect(shortAddress(undefined)).toBe("—");
+    expect(shortAddress(null)).toBe("Not set");
+    expect(shortAddress(undefined)).toBe("Not set");
   });
 });
 
@@ -83,8 +83,8 @@ describe("formatDateTime / formatDate", () => {
     expect(formatDateTime("2026-01-02T03:04:00.000Z")).toBe(
       "2026-01-02 03:04"
     );
-    expect(formatDateTime(null)).toBe("—");
-    expect(formatDate("not-a-date")).toBe("—");
+    expect(formatDateTime(null)).toBe("Not recorded");
+    expect(formatDate("not-a-date")).toBe("Not recorded");
   });
 });
 

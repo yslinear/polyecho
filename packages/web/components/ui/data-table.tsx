@@ -51,6 +51,12 @@ interface DataTableProps<TData, TValue> {
   facetedFilters?: FacetedFilter[];
   pageSize?: number;
   className?: string;
+  /**
+   * Honest empty-state node shown when there are zero rows. Pages should pass
+   * a calm one-sentence message plus the real next action (DESIGN.md "Tables:
+   * real empty state"; PRODUCT.md honest-empty). Defaults to a generic line.
+   */
+  emptyState?: React.ReactNode;
 }
 
 interface FacetedFilter {
@@ -67,6 +73,7 @@ export function DataTable<TData, TValue>({
   facetedFilters = [],
   pageSize = 25,
   className,
+  emptyState = "No rows to show yet. Adjust the filters above or check back once data has been ingested.",
 }: DataTableProps<TData, TValue>) {
   const [sorting, setSorting] = React.useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([]);
@@ -175,21 +182,31 @@ export function DataTable<TData, TValue>({
       </div>
 
       {/* Table */}
-      <div className="rounded-md border">
+      <div className="rounded-lg border overflow-hidden">
         <Table>
-          <TableHeader>
+          <TableHeader className="sticky top-0 z-10 bg-muted">
             {table.getHeaderGroups().map((hg) => (
               <TableRow key={hg.id}>
-                {hg.headers.map((header) => (
-                  <TableHead key={header.id}>
-                    {header.isPlaceholder
-                      ? null
-                      : flexRender(
-                          header.column.columnDef.header,
-                          header.getContext()
-                        )}
-                  </TableHead>
-                ))}
+                {hg.headers.map((header) => {
+                  const sortDir = header.column.getIsSorted();
+                  const ariaSort = !header.column.getCanSort()
+                    ? undefined
+                    : sortDir === "asc"
+                      ? "ascending"
+                      : sortDir === "desc"
+                        ? "descending"
+                        : "none";
+                  return (
+                    <TableHead key={header.id} aria-sort={ariaSort}>
+                      {header.isPlaceholder
+                        ? null
+                        : flexRender(
+                            header.column.columnDef.header,
+                            header.getContext()
+                          )}
+                    </TableHead>
+                  );
+                })}
               </TableRow>
             ))}
           </TableHeader>
@@ -216,7 +233,7 @@ export function DataTable<TData, TValue>({
                   colSpan={columns.length}
                   className="h-24 text-center text-muted-foreground text-sm"
                 >
-                  No results.
+                  {emptyState}
                 </TableCell>
               </TableRow>
             )}

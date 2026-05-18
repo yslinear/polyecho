@@ -53,10 +53,25 @@ describe("ui/DataTable", () => {
     expect(screen.getByText("4 rows")).toBeInTheDocument();
   });
 
-  it("renders an empty state when there is no data", () => {
+  it("renders the default honest empty state when there is no data", () => {
     render(<DataTable columns={columns} data={[]} />);
-    expect(screen.getByText("No results.")).toBeInTheDocument();
+    expect(
+      screen.getByText(/No rows to show yet\./)
+    ).toBeInTheDocument();
     expect(screen.getByText("0 rows")).toBeInTheDocument();
+  });
+
+  it("renders a caller-supplied emptyState node when provided", () => {
+    render(
+      <DataTable
+        columns={columns}
+        data={[]}
+        emptyState="No candidates yet. Run discovery."
+      />
+    );
+    expect(
+      screen.getByText("No candidates yet. Run discovery.")
+    ).toBeInTheDocument();
   });
 
   it("sorts ascending then descending by the score column header", async () => {

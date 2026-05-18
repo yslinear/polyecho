@@ -14,34 +14,39 @@ describe("ScoreBadge", () => {
     expect(screen.getByText("55.5")).toBeInTheDocument();
   });
 
-  it("uses green styling for high scores (>= 70)", () => {
+  it("uses the gain token + a 'High' text tier for high scores (>= 70)", () => {
     const { container } = render(<ScoreBadge label="" value={85} />);
-    expect(container.firstChild).toHaveClass("bg-green-100");
+    expect(container.firstChild).toHaveClass("text-gain");
+    expect(screen.getByText("High")).toBeInTheDocument();
   });
 
-  it("uses yellow styling for mid scores (40–69)", () => {
+  it("uses the muted token + a 'Mid' text tier for mid scores (40–69)", () => {
     const { container } = render(<ScoreBadge label="" value={50} />);
-    expect(container.firstChild).toHaveClass("bg-yellow-100");
+    expect(container.firstChild).toHaveClass("text-muted-foreground");
+    expect(screen.getByText("Mid")).toBeInTheDocument();
   });
 
-  it("uses red styling for low scores (< 40)", () => {
+  it("uses the loss token + a 'Low' text tier for low scores (< 40)", () => {
     const { container } = render(<ScoreBadge label="" value={12} />);
-    expect(container.firstChild).toHaveClass("bg-red-100");
+    expect(container.firstChild).toHaveClass("text-loss");
+    expect(screen.getByText("Low")).toBeInTheDocument();
   });
 
-  it("boundary: exactly 70 is green and exactly 40 is yellow", () => {
+  it("boundary: exactly 70 is High (gain) and exactly 40 is Mid (muted)", () => {
     const { container: c70 } = render(<ScoreBadge label="" value={70} />);
-    expect(c70.firstChild).toHaveClass("bg-green-100");
+    expect(c70.firstChild).toHaveClass("text-gain");
+    expect(screen.getByText("High")).toBeInTheDocument();
     const { container: c40 } = render(<ScoreBadge label="" value={40} />);
-    expect(c40.firstChild).toHaveClass("bg-yellow-100");
+    expect(c40.firstChild).toHaveClass("text-muted-foreground");
+    expect(screen.getByText("Mid")).toBeInTheDocument();
   });
 
-  it("renders a muted dash for null / undefined / NaN", () => {
+  it("renders a muted textual placeholder for null / undefined / NaN", () => {
     const { container: cNull } = render(
       <ScoreBadge label="" value={null} />
     );
     expect(cNull.firstChild).toHaveClass("bg-muted");
-    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Not set").length).toBeGreaterThan(0);
 
     const { container: cUndef } = render(
       <ScoreBadge label="" value={undefined} />
