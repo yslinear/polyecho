@@ -105,6 +105,16 @@ class TradeDeduplicator:
     def __init__(self, capacity: int = 4096) -> None:
         self._seen = _LruSet(capacity=capacity)
         self._locks: dict[str, asyncio.Lock] = {}
+        # C4a (R6): a single instance-level lock that makes the
+        # lock_for → claim sequence ATOMIC.  Previously a key could be
+        # evicted from ``_seen`` (and its per-tx lock dropped) by an
+        # unrelated tx *between* one coroutine's ``lock_for`` and its
+        # ``claim`` — letting a second coroutine fetch a *different* Lock
+        # object "for the same K" and both think they hold "the lock for
+        # K" ⇒ duplicate processing.  All structural mutation of
+        # ``_locks``/``_seen`` (lock_for + claim + eviction) now happens
+        # under this guard, so claim+lock for one tx is indivisible.
+        self._guard = asyncio.Lock()
 
     @staticmethod
     def key(leader_address: str, tx_hash: str) -> str:
@@ -118,23 +128,52 @@ class TradeDeduplicator:
             self._locks[k] = lock
         return lock
 
-    def claim(self, leader_address: str, tx_hash: str) -> bool:
-        """Claim a ``(leader, tx)`` once; ``True`` ⇒ first, ``False`` ⇒ dup.
+    async def acquire_for(
+        self, leader_address: str, tx_hash: str
+    ) -> tuple[asyncio.Lock, bool]:
+        """Atomically resolve the per-tx lock AND claim the key (C4a/R6).
+
+        Returns ``(lock, is_new)`` where ``lock`` is **already acquired**
+        and ``is_new`` is ``True`` iff this caller is the first to claim
+        ``(leader, tx)`` (``False`` ⇒ a duplicate the caller must drop).
+        The whole resolve-lock → acquire-lock → claim window runs under
+        the instance ``_guard`` so no concurrent eviction can swap the
+        per-tx lock identity mid-sequence (the old TOCTOU).  The caller
+        MUST ``release()`` the returned lock when done (see
+        :meth:`TraderCore.process_detected`).
+        """
+        async with self._guard:
+            lock = self.lock_for(leader_address, tx_hash)
+            await lock.acquire()
+            is_new = self._claim(leader_address, tx_hash)
+        return lock, is_new
+
+    def _claim(self, leader_address: str, tx_hash: str) -> bool:
+        """Claim ``(leader, tx)`` once; ``True`` ⇒ first, ``False`` ⇒ dup.
 
         P1-13: the per-tx :class:`asyncio.Lock` dict used to grow
         unboundedly (``_seen`` is LRU-capped but ``_locks`` was never
         pruned — a memory leak in the long-running loop).  When the LRU
         evicts a key we evict its lock in lock-step so ``_locks`` stays
-        bounded by the same capacity as ``_seen``.  The lock is only
-        dropped *after* the dedup decision, and a key already past its LRU
-        window is, by definition, no longer being raced — so this never
-        drops a lock a concurrent ``process_detected`` still holds.
+        bounded by the same capacity as ``_seen``.  Eviction only ever
+        runs while holding ``_guard`` (via :meth:`acquire_for`), so a key
+        currently being raced can never have its lock dropped out from
+        under a concurrent claimer (the C4a invariant).  This is internal:
+        callers go through :meth:`acquire_for` for the atomic claim+lock.
         """
         is_new = self._seen.add(self.key(leader_address, tx_hash))
         evicted = self._seen._evicted
         if evicted is not None:
             self._locks.pop(evicted, None)
         return is_new
+
+    def claim(self, leader_address: str, tx_hash: str) -> bool:
+        """Back-compat sync claim (kept for existing callers/tests).
+
+        Prefer :meth:`acquire_for` for the atomic claim+lock; this remains
+        for code paths that already hold the per-tx lock another way.
+        """
+        return self._claim(leader_address, tx_hash)
 
     def seen(self, leader_address: str, tx_hash: str) -> bool:
         return self.key(leader_address, tx_hash) in self._seen

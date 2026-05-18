@@ -505,6 +505,12 @@ async def _redeem_loop(
     A pass that raises is logged and the loop continues — the redeem
     cadence must never crash the supervised process.
     """
+    # R9 I-4: this loop must TRULY never exit.  If it ever returned or
+    # raised, the supervised group would tear down the sibling reconcile
+    # loop and the redeem cadence would silently stop.  ``while True`` +
+    # ``except BaseException`` (re-raising ONLY KeyboardInterrupt /
+    # SystemExit / CancelledError so a real shutdown still works) keeps the
+    # cadence alive across ANY iteration fault.
     while True:
         try:
             outcomes = await worker.poll_once()
@@ -513,7 +519,9 @@ async def _redeem_loop(
                     "redeem_pass_complete",
                     extra={"outcomes": len(outcomes)},
                 )
-        except Exception as exc:  # noqa: BLE001 - never crash the loop
+        except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+            raise
+        except BaseException as exc:  # noqa: BLE001 - never crash the loop
             logger.warning(
                 "redeem_pass_failed_continuing",
                 extra={"error": str(exc)},
@@ -524,19 +532,30 @@ async def _redeem_loop(
 async def _daily_reconcile_loop(*, interval_seconds: float) -> None:
     """Daily on-chain reconcile cadence (delegates to ``run_forever``).
 
-    ``run_forever`` already logs+continues on a failing iteration; this
-    wrapper adds a final guard so even an unexpected error in the loop
-    setup never crashes the supervised process.
+    R9 I-4: ``run_forever`` already logs+continues on a failing
+    *iteration*, but if it ever RETURNS (e.g. a future test bound) or
+    raises at setup, the old wrapper just fell through and exited — which
+    under the supervised group would silently kill the sibling redeem
+    cadence too.  This wrapper is now itself a true never-exit loop:
+    ``run_forever`` returning/raising only makes us re-enter it after the
+    interval; only KeyboardInterrupt / SystemExit / CancelledError (a real
+    shutdown) propagate.
     """
-    try:
-        from polyecho.core.onchain_reconcile import run_forever
+    from polyecho.core.onchain_reconcile import run_forever
 
-        await run_forever(interval_seconds=interval_seconds)
-    except Exception as exc:  # noqa: BLE001 - never crash the loop
-        logger.warning(
-            "daily_onchain_reconcile_loop_failed_continuing",
-            extra={"error": str(exc)},
-        )
+    while True:
+        try:
+            await run_forever(interval_seconds=interval_seconds)
+        except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+            raise
+        except BaseException as exc:  # noqa: BLE001 - never crash the loop
+            logger.warning(
+                "daily_onchain_reconcile_loop_failed_continuing",
+                extra={"error": str(exc)},
+            )
+        # run_forever returned/raised — wait then re-enter so the daily
+        # cadence is genuinely perpetual (never silently stops).
+        await asyncio.sleep(interval_seconds)
 
 
 async def run_supervised(
@@ -570,15 +589,18 @@ async def run_supervised(
     await core.run_once()
 
     worker = build_redeem_worker(getattr(core, "_follows", []))
-    async with asyncio.TaskGroup() as tg:  # pragma: no cover - supervised loop
-        tg.create_task(
-            _redeem_loop(worker, interval_seconds=redeem_interval_seconds)
-        )
-        tg.create_task(
-            _daily_reconcile_loop(
-                interval_seconds=reconcile_interval_seconds
-            )
-        )
+    # R9 I-4: ``asyncio.gather(return_exceptions=True)`` instead of a
+    # TaskGroup so the two cadence loops survive INDEPENDENTLY.  A
+    # TaskGroup cancels every sibling the instant one task exits/raises —
+    # so a fault in the daily reconcile loop would silently stop the
+    # redeem cadence (and vice-versa).  With ``gather`` each loop is a
+    # genuine never-exit ``while True`` (above) and a stray return/raise
+    # in one is captured as a result without disturbing the other.
+    await asyncio.gather(  # pragma: no cover - supervised loop
+        _redeem_loop(worker, interval_seconds=redeem_interval_seconds),
+        _daily_reconcile_loop(interval_seconds=reconcile_interval_seconds),
+        return_exceptions=True,
+    )
 
 
 # Imported lazily by callers; re-exported for tests.

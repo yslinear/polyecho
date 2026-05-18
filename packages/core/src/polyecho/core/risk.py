@@ -44,7 +44,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
 from polyecho.core.evaluator import TemplateConfig
@@ -304,7 +304,16 @@ class LayeredRiskGate:
         if tpl.max_position_usd is not None and notional > tpl.max_position_usd:
             # 9. size-normalize: adjust, skip only if infeasible (brief §4).
             if price > _ZERO:
-                adjusted = (tpl.max_position_usd / price).quantize(Decimal("0.000001"))
+                # C2 (R7): ROUND_DOWN — Python's Decimal default is
+                # ROUND_HALF_EVEN, which can round the size UP and make
+                # ``adjusted * price`` exceed ``max_position_usd`` (the cap
+                # we are enforcing).  Always round toward zero so the
+                # normalised size never breaches the per-position USD cap;
+                # this also matches the evaluator's sizing quantum
+                # (evaluator.py uses ``quantize(_QUANT, rounding=ROUND_DOWN)``).
+                adjusted = (tpl.max_position_usd / price).quantize(
+                    Decimal("0.000001"), rounding=ROUND_DOWN
+                )
                 if adjusted >= _ONE and (
                     tpl.min_trade_size_usd is None
                     or adjusted * price >= tpl.min_trade_size_usd

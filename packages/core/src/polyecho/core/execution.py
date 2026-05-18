@@ -112,8 +112,19 @@ class FifoLedger:
         outcome: str,
         sell_size: Decimal,
         sell_price: Decimal,
+        mutate: bool = True,
     ) -> SellMatch:
-        """FIFO-match *sell_size* against oldest open BUY lots (brief §3)."""
+        """FIFO-match *sell_size* against oldest open BUY lots (brief §3).
+
+        R8: ``mutate`` MUST be ``False`` in dry-run.  P1-3 only fixed the
+        BUY-add path; ``match_sell`` was still mutating
+        ``BuyLot.matched_qty`` even when the live lock was OFF, so a
+        dry-run SELL silently consumed the live FIFO ledger (corrupting
+        realised-PnL accounting the moment live trading was later
+        enabled).  When ``mutate is False`` the SellMatch is computed
+        READ-ONLY (the lots are never touched) purely for the dry-run log
+        / preview; the durable ledger is advanced only on the live path.
+        """
         remaining = sell_size
         matched: list[tuple[str, Decimal]] = []
         realised = _ZERO
@@ -124,7 +135,8 @@ class FifoLedger:
             if avail <= _ZERO:
                 continue
             take = avail if avail < remaining else remaining
-            lot.matched_qty += take
+            if mutate:
+                lot.matched_qty += take
             remaining -= take
             realised += (sell_price - lot.price) * take
             matched.append((lot.trade_id, take))
@@ -217,8 +229,13 @@ class OrderExecutor:
             evaluated.raw.get("outcome") or decision.token_id or evaluated.condition_id
         )
 
-        # FIFO sell-match is pure bookkeeping and runs in BOTH modes so the
-        # ledger / PnL stays correct even in dry-run (brief §3/§5).
+        # FIFO sell-match is computed in BOTH modes (the dry-run log shows
+        # the would-be realised PnL), but R8: it MUST NOT consume the live
+        # FIFO ledger when the live lock is OFF — a dry-run SELL that
+        # mutated ``BuyLot.matched_qty`` corrupts the durable accounting
+        # the instant live trading is later enabled.  ``mutate`` is gated
+        # on ``is_live_enabled()`` exactly like the BUY-add path (P1-3),
+        # so dry-run is fully read-only over the ledger.
         sell_match: SellMatch | None = None
         if decision.side is TradeSide.SELL:
             sell_match = self._ledger.match_sell(
@@ -227,6 +244,7 @@ class OrderExecutor:
                 outcome=outcome_name,
                 sell_size=size,
                 sell_price=price,
+                mutate=is_live_enabled(),
             )
 
         # --- THE HARD LIVE LOCK (default OFF ⇒ place nothing) ------------

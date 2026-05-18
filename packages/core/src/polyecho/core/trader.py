@@ -594,10 +594,15 @@ class TraderCore:
         tx_hash = str(trade["tx_hash"])
 
         # Idempotency layers 1 & 2 (brief §3): per-tx lock + LRU.
-        lock = self._dedup.lock_for(leader, tx_hash)
+        # C4a (R6): claim+lock is now ATOMIC — ``acquire_for`` resolves the
+        # per-tx Lock and claims the key under one instance-level guard, so
+        # a concurrent eviction can no longer swap the lock identity
+        # between "get the lock" and "claim" (the old TOCTOU that let two
+        # coroutines both think they held the lock for the same tx).
         with perf_timer() as elapsed:
-            async with lock:
-                if not self._dedup.claim(leader, tx_hash):
+            lock, is_new = await self._dedup.acquire_for(leader, tx_hash)
+            try:
+                if not is_new:
                     self.stats.deduped += 1
                     logger.info(
                         "trade_deduped",
@@ -609,6 +614,8 @@ class TraderCore:
                 await self._process_follows(
                     trade, leader, tx_hash, condition_id
                 )
+            finally:
+                lock.release()
 
         # Best-effort copy-trade latency observability — wrapped so a
         # timing/log failure can NEVER propagate into the trade outcome.
@@ -1010,10 +1017,20 @@ class TraderCore:
         )
         n = await rec.reconcile_once()
         # Drain anything reconcile re-enqueued (dedup makes dups no-ops).
+        # C4b (R6): one bad backfilled trade must NOT abort the whole
+        # ``run_once`` pass — mirror the detection drain's contract
+        # (count the error, log, keep draining) instead of only a bare
+        # ``finally: task_done()``.
         while not self._queue.empty():
             trade = self._queue.get_nowait()
             try:
                 await self.process_detected(trade)
+            except Exception as exc:  # noqa: BLE001 - count, never abort pass
+                self.stats.errors += 1
+                logger.warning(
+                    "reconcile_process_detected_failed_continuing",
+                    extra={"error": str(exc)},
+                )
             finally:
                 self._queue.task_done()
         return n

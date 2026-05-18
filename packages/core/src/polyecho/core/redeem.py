@@ -202,7 +202,24 @@ class RedeemablePoller:
             )
             return []
 
+        # R9 I-1: FAIR per-account share.  The old code ``break``-ed the
+        # OUTER account loop the moment the global ``max_per_poll`` cap was
+        # hit — so a single account with many redeemable positions starved
+        # every later account indefinitely (their winnings never got a
+        # job).  We now give each account an equal share of the per-poll
+        # quota so every account contributes before the global cap, then
+        # do a second "fill" pass to use any leftover budget (no waste
+        # when some accounts are under their share) — still bounded by
+        # ``max_per_poll`` overall.
+        n_accounts = len(self.accounts)
         out: list[RedeemCandidate] = []
+        if n_accounts == 0:
+            return out
+        per_account = max(1, self.max_per_poll // n_accounts)
+
+        # Cache each account's redeemable rows once (one get_positions call
+        # per account — same I/O budget as before, just fairly allocated).
+        per_acct_rows: list[tuple[uuid.UUID, list[RedeemCandidate]]] = []
         for account_id, wallet in self.accounts:
             try:
                 positions = await self.datasource.get_positions(wallet)
@@ -211,23 +228,36 @@ class RedeemablePoller:
                     "redeem_poll_positions_failed",
                     extra={"account_id": str(account_id), "error": str(exc)},
                 )
+                per_acct_rows.append((account_id, []))
                 continue
-            for pos in positions:
-                raw = dict(pos.raw)
-                if not _is_redeemable(raw):
-                    continue
-                out.append(
-                    RedeemCandidate(
-                        account_id=account_id,
-                        condition_id=pos.condition_id,
-                        outcome_index=_redeemable_outcome_index(raw),
-                        is_neg_risk=_is_neg_risk(raw),
-                    )
+            cands = [
+                RedeemCandidate(
+                    account_id=account_id,
+                    condition_id=pos.condition_id,
+                    outcome_index=_redeemable_outcome_index(raw),
+                    is_neg_risk=_is_neg_risk(raw),
                 )
-                if len(out) >= self.max_per_poll:
-                    break
+                for pos in positions
+                if _is_redeemable(raw := dict(pos.raw))
+            ]
+            per_acct_rows.append((account_id, cands))
+
+        # Pass 1 — every account gets up to its fair share (fairness).
+        for _account_id, cands in per_acct_rows:
             if len(out) >= self.max_per_poll:
                 break
+            out.extend(cands[:per_account])
+        # Pass 2 — distribute any remaining global budget over leftovers
+        # (no wasted quota; still hard-capped at max_per_poll).
+        if len(out) < self.max_per_poll:
+            for _account_id, cands in per_acct_rows:
+                if len(out) >= self.max_per_poll:
+                    break
+                for extra in cands[per_account:]:
+                    out.append(extra)
+                    if len(out) >= self.max_per_poll:
+                        break
+        out = out[: self.max_per_poll]
         if out:
             self._last_poll = now
         return out
@@ -298,6 +328,13 @@ class DbJobUpserter:
             ).scalar_one_or_none()
 
             if existing is not None:
+                # C1 (R9/R19): REAL bounded retry via the durable
+                # ``redeem_jobs.attempts`` column.  A ``failed`` job is
+                # reset to ``pending`` ONLY while it still has retry
+                # budget (``attempts < max_attempts``); at/above the cap
+                # it stays TERMINALLY ``failed`` and is never re-attempted
+                # (no more infinite on-chain redeem retry when live).  The
+                # counter is persisted, so the cap survives a restart.
                 if (
                     existing.status == RedeemJobStatus.FAILED.value
                     and self._attempt_count(existing) < self._max_attempts
@@ -327,12 +364,14 @@ class DbJobUpserter:
 
     @staticmethod
     def _attempt_count(row: object) -> int:
-        # ``redeem_jobs`` has no attempts column in the frozen schema; a
-        # ``failed`` row that was reset to ``pending`` is itself the retry
-        # signal. We treat each ``failed`` observation as one attempt and
-        # cap via the status flips the writer records. Conservative: a
-        # row currently ``failed`` ⇒ at least 1 attempt already spent.
-        return 1
+        # C1 (R9/R19): the durable ``redeem_jobs.attempts`` column (added in
+        # Wave E-schema, ``INT NOT NULL DEFAULT 0``) is the REAL retry
+        # counter — incremented in :meth:`record` on every ``failed``
+        # transition.  Previously this returned a hardcoded ``1`` so the
+        # ``max_attempts`` cap was a no-op (a failed redeem reset to
+        # ``pending`` forever ⇒ infinite on-chain retry when live).  Now
+        # the cap is enforced off the persisted count and is restart-safe.
+        return int(getattr(row, "attempts", 0) or 0)
 
     async def record(
         self, spec: RedeemJobSpec, result: RedeemResult
@@ -376,6 +415,11 @@ class DbJobUpserter:
                 and result.confirmed_at is not None
             ):
                 row.confirmed_at = result.confirmed_at
+            # C1 (R9/R19): count every FAILED attempt durably so the
+            # ``max_attempts`` cap in :meth:`upsert` is real & restart-safe
+            # (a confirmed/submitted transition never burns retry budget).
+            if result.status is RedeemJobStatus.FAILED:
+                row.attempts = int(getattr(row, "attempts", 0) or 0) + 1
             await session.commit()
 
 

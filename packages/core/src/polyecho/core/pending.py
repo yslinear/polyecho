@@ -46,6 +46,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from polyecho.core.detection import _LruSet
 from polyecho.core.execution import ExecutionResult, FifoLedger, OrderExecutor
 from polyecho.shared.copytrading import (
     Decision,
@@ -166,8 +167,14 @@ class PendingActionExecutor:
         )
         self._event_hook = event_hook
         # In-proc guard so overlapping polls never double-execute a row
-        # even before the DB marker round-trips.
-        self._seen: set[str] = set()
+        # even before the DB marker round-trips.  R8: bounded LRU (same
+        # primitive as TradeDeduplicator) instead of an unbounded ``set``
+        # — a long-running supervised process polling many confirmed rows
+        # could otherwise grow ``_seen`` without limit.  The durable
+        # ``PROCESSED_MARKER`` (``row.processed``) is the real idempotency
+        # anchor; this set is only the cheap in-proc overlap guard, so an
+        # LRU eviction of a long-finalised row id is harmless.
+        self._seen = _LruSet(capacity=8192)
 
     @property
     def executor(self) -> OrderExecutor:
@@ -271,9 +278,22 @@ class PendingActionExecutor:
                 )
                 continue  # NOT added to _seen ⇒ retried next poll
 
-            await self._finalise(row)
-            self._seen.add(row.id)  # success ⇒ claim (idempotent w/ marker)
-            out.append((row.id, results))
+            # R8: claim the row in ``_seen`` ONLY after BOTH the execution
+            # AND the durable finalise (PROCESSED_MARKER persist) succeed.
+            # Previously ``_finalise`` swallowed its DB failure and
+            # ``_seen.add`` ran unconditionally → a row whose marker never
+            # persisted was abandoned for the process lifetime.  Now a
+            # finalise failure leaves the row un-seen so the very next
+            # poll retries it; idempotency stays guaranteed by the durable
+            # marker + the P0 expired/not-provisioned guards above.
+            if await self._finalise(row):
+                self._seen.add(row.id)  # success ⇒ claim (idempotent w/ marker)
+                out.append((row.id, results))
+            else:
+                logger.warning(
+                    "pending_action_finalise_unpersisted_will_retry",
+                    extra={"action_id": row.id},
+                )
         return out
 
     # ------------------------------------------------------------------
@@ -444,21 +464,34 @@ class PendingActionExecutor:
             },
         )
 
-    async def _finalise(self, row: PendingActionRow) -> None:
-        """Persist the idempotency marker so the row never re-executes."""
+    async def _finalise(self, row: PendingActionRow) -> bool:
+        """Persist the idempotency marker; return ``True`` iff it stuck.
+
+        R8: previously this swallowed the ``_mark_processed`` failure and
+        the caller added the row to ``_seen`` unconditionally afterwards —
+        so a row whose DB-finalise failed was abandoned for the whole
+        process lifetime (no durable marker, never retried).  We now
+        report success/failure so the caller only claims the row in
+        ``_seen`` when the durable marker actually persisted; on a
+        finalise failure the row is left un-seen and is retried next poll
+        (the durable ``PROCESSED_MARKER`` + P0 expired/not-provisioned
+        guards keep that retry idempotent).
+        """
         new_params = dict(row.params)
         new_params[PROCESSED_MARKER] = datetime.now(tz=UTC).isoformat()
         try:
             await self._mark_processed(row.id, new_params)
-        except Exception as exc:  # noqa: BLE001 - in-proc guard still holds
+        except Exception as exc:  # noqa: BLE001 - signal, leave for retry
             logger.warning(
-                "pending_action_mark_failed",
+                "pending_action_mark_failed_will_retry",
                 extra={"action_id": row.id, "error": str(exc)},
             )
+            return False
         logger.info(
             "pending_action_processed",
             extra={"action_id": row.id, "action_type": str(row.action_type)},
         )
+        return True
 
 
 def _dec(value: Any) -> Decimal:
