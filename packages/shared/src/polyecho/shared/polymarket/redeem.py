@@ -1,65 +1,182 @@
 """
 polyecho.shared.polymarket.redeem
 =================================
-Redeem / claim-winnings client **interface** (brief §9 — Phase-4 binding).
+Redeem / claim-winnings client (brief §9 — Phase-4 binding; Wave C-redeem
+concrete implementation).
 
-Phase-4 Wave-1 freezes the *contract*; Wave-2 implements the live path.
-Trigger / call / execution semantics (brief §9):
+Trigger / call / execution semantics (brief §9 / polyhermes-analysis §9):
 
 * **Trigger** — poll the Polymarket data-api ``redeemable`` flag (do NOT
   compute UMA/on-chain resolution; adopt the pragmatic API-trust).  Gate
-  on ``auto_redeem`` + relayer/key configured + quota-cooldown.
+  on ``auto_redeem`` + relayer/key configured + quota-cooldown.  Owned by
+  :mod:`polyecho.core.redeem` (this module only performs one resolved call).
 * **Call** — ``redeemPositions(collateral, PARENT_COLLECTION_ID,
   conditionId, [2**outcomeIndex…])`` on the CTF contract.  Collateral is
   **pUSD for normal markets vs WrappedCollateral for NegRisk** (the brief's
   highest-risk detail).  NegRisk redeem pays WCOL → must then
-  ``unwrap(to, amount)``.
-* **Execution per mode** — MAGIC → Builder-Relayer PROXY; SAFE →
-  Builder-Relayer SafeTx / manual ``execTransaction``; EOA → direct
-  ``web3.py``.  Use the official ``py-builder-relayer-client`` (PRD §11.2)
-  for gasless; ``web3.py`` for EOA/manual.  Do NOT hand-roll the
-  relayer/HMAC (brief §9).
+  ``unwrap(to, amount)`` on WCOL (PolyHermes polls ~20s for the balance).
+* **Execution per mode** —
+  * **EOA (sig 0)** — CONCRETE: ``web3.py`` v7 build → ``eth_account``
+    sign → send raw → wait receipt.  This is the only mode made fully
+    real (verified against web3.py v7 docs + Polymarket CTF examples).
+  * **MAGIC (sig 1)** — Builder-Relayer PROXY (EIP-191 personal_sign):
+    ABSTRACT — :meth:`BaseRedeemClient._do_redeem` dispatches to
+    :meth:`_relay_redeem`, default raises a clear "relayer not configured"
+    error.  ``# TODO(verify)`` — the official ``py-builder-relayer-client``
+    (PRD §11.2) PyPI name/version could not be verified from this sandbox
+    (2026-05-18); we do NOT invent/import a guessed package name.
+  * **SAFE (sig 2)** — Builder-Relayer SafeTx (EIP-712) / manual
+    ``execTransaction``: ABSTRACT, same dispatch + ``# TODO(verify)``.
+  * **POLY_1271 (sig 3)** — no PolyHermes blueprint: ABSTRACT + TODO.
 
-This module is interface-only: no network, no web3, no relayer import.
-The concrete client lands in Wave-2 (core).  Every method is wired with
-the correct signature + the live-lock guard so the chokepoint is binding.
+The live-lock chokepoint is :func:`assert_live_allowed` called FIRST in
+the public :meth:`BaseRedeemClient.redeem` / :meth:`unwrap_collateral`, so
+a misconfigured deployment fails closed before any irreversible call.
 
-Dependency note (Phase-4 W1)
-----------------------------
-* ``web3`` (EOA direct tx + Safe ``computeProxyAddress`` RPC + CTF
-  ``redeemPositions`` encoding) is **already declared** in
-  ``packages/core/pyproject.toml`` (``web3>=7.0``) — core owns redeem
-  execution; shared stays web3-free (the SAFE proxy RPC is *injected* into
-  :func:`polyecho.shared.polymarket.wallet.resolve_wallet`).
+Dependency note (Wave C-redeem)
+-------------------------------
+* ``web3`` (EOA direct tx + ABI encoding) is declared in
+  ``packages/core/pyproject.toml`` (``web3>=7.0``).  This shared module
+  stays import-side-effect-free and **web3-free at import time**: the EOA
+  path takes an injected :class:`Web3Backend` (a tiny structural Protocol)
+  so the concrete client is unit-testable with a fake and core owns the
+  real ``AsyncWeb3`` wiring.
 * ``py-builder-relayer-client`` (PRD §11.2, official gasless relayer for
-  MAGIC/SAFE redeem): **# TODO(verify)** — PyPI availability could not be
-  confirmed from this sandboxed environment (curl/WebFetch blocked,
-  2026-05-18).  Per the brief this MUST NOT block: the gasless path is
-  expressed here only as the abstract :class:`RedeemClient` Protocol /
-  :class:`BaseRedeemClient` (no import of the relayer package), so Wave-2
-  adds the concrete dependency to ``packages/core/pyproject.toml`` once
-  the exact PyPI name/version is verified, with zero change to this
-  frozen contract.
+  MAGIC/SAFE/1271 redeem): **# TODO(verify)** — PyPI availability could
+  not be confirmed from this sandboxed environment.  Per the brief this
+  MUST NOT block: the gasless path is the abstract :meth:`_relay_redeem` /
+  :meth:`_relay_unwrap` seam (no import of any relayer package), so a
+  later wave slots the concrete dependency with zero change to the frozen
+  :class:`RedeemClient` Protocol or the live-lock chokepoint.
 """
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol, runtime_checkable
 
 from polyecho.shared.constants import (
     CTF_ADDRESS,
+    MAX_UINT256,
     PARENT_COLLECTION_ID,
+    POLYGON_CHAIN_ID,
     PUSD_ADDRESS,
     WRAPPED_COLLATERAL_ADDRESS,
 )
 from polyecho.shared.copytrading import (
     RedeemJobSpec,
+    RedeemJobStatus,
     RedeemResult,
     WalletBinding,
     assert_live_allowed,
 )
 
-__all__ = ["collateral_for", "index_set_for", "RedeemClient", "BaseRedeemClient"]
+__all__ = [
+    "collateral_for",
+    "index_set_for",
+    "CTF_REDEEM_ABI",
+    "WRAPPED_COLLATERAL_ABI",
+    "ERC20_APPROVE_ABI",
+    "RelayerNotConfiguredError",
+    "Web3Backend",
+    "RedeemClient",
+    "BaseRedeemClient",
+    "Web3RedeemClient",
+]
+
+# ---------------------------------------------------------------------------
+# Minimal ABIs (brief §9 — redeemPositions / unwrap / approve).  Verified
+# against the Polymarket CTF examples (context7
+# /polymarket/conditional-token-examples-py): the CTF on Polygon at
+# 0x4D97…6045 exposes split/merge/redeem with the SAME 4-arg conditional-
+# tokens shape; ``redeemPositions`` takes (collateral, parentCollectionId,
+# conditionId, indexSets) — Polymarket passes ``HASH_ZERO`` for
+# parentCollectionId on all top-level markets.
+# ---------------------------------------------------------------------------
+#: ``CTF.redeemPositions(collateral, parentCollectionId, conditionId,
+#: indexSets)`` — Gnosis Conditional Tokens redeem (brief §9).
+CTF_REDEEM_ABI: tuple[dict[str, Any], ...] = (
+    {
+        "constant": False,
+        "inputs": [
+            {"name": "collateralToken", "type": "address"},
+            {"name": "parentCollectionId", "type": "bytes32"},
+            {"name": "conditionId", "type": "bytes32"},
+            {"name": "indexSets", "type": "uint256[]"},
+        ],
+        "name": "redeemPositions",
+        "outputs": [],
+        "payable": False,
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+)
+
+#: ``WrappedCollateral.unwrap(to, amount)`` — NegRisk post-redeem unwrap
+#: of WCOL back to pUSD (brief §9 — "must then unwrap(to,amount)").
+WRAPPED_COLLATERAL_ABI: tuple[dict[str, Any], ...] = (
+    {
+        "constant": False,
+        "inputs": [
+            {"name": "to", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "name": "unwrap",
+        "outputs": [],
+        "payable": False,
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "constant": True,
+        "inputs": [{"name": "account", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "payable": False,
+        "stateMutability": "view",
+        "type": "function",
+    },
+)
+
+#: ERC-20 ``approve(spender, amount)`` + ``allowance`` — one-time max
+#: approve at account setup so redeem never needs a per-call approval
+#: (brief §9 — ``approve(spender, 2**256-1)`` once).
+ERC20_APPROVE_ABI: tuple[dict[str, Any], ...] = (
+    {
+        "constant": False,
+        "inputs": [
+            {"name": "spender", "type": "address"},
+            {"name": "value", "type": "uint256"},
+        ],
+        "name": "approve",
+        "outputs": [{"name": "", "type": "bool"}],
+        "payable": False,
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "constant": True,
+        "inputs": [
+            {"name": "owner", "type": "address"},
+            {"name": "spender", "type": "address"},
+        ],
+        "name": "allowance",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "payable": False,
+        "stateMutability": "view",
+        "type": "function",
+    },
+)
+
+
+class RelayerNotConfiguredError(RuntimeError):
+    """Raised when a gasless (MAGIC/SAFE/1271) redeem is requested but no
+    Builder-Relayer client is wired (brief §9 — ``# TODO(verify)``).
+
+    This is a *correctness* guard: it fails closed with a clear message
+    rather than submitting a wrong transaction via a guessed relayer
+    package.  EOA (sig 0) never raises this — it is the concrete path.
+    """
 
 
 def collateral_for(*, is_neg_risk: bool) -> str:
@@ -79,9 +196,61 @@ def index_set_for(outcome_index: int) -> int:
     return 1 << outcome_index
 
 
+# ---------------------------------------------------------------------------
+# Injected web3 seam (keeps this module web3-free at import time)
+# ---------------------------------------------------------------------------
+@runtime_checkable
+class Web3Backend(Protocol):
+    """The tiny async web3 surface the EOA path needs (brief §9).
+
+    Structurally satisfied by a thin adapter around web3.py v7 ``AsyncWeb3``
+    (core owns the concrete adapter / RPC URL); tests pass a fake.  Method
+    shapes mirror web3.py v7 verbatim (context7 /ethereum/web3.py v7.12.0):
+
+    * ``send_signed`` — build a contract-function tx dict, sign it with the
+      account's private key via ``eth_account`` (sync, no I/O — the only
+      place the decrypted key is used) and broadcast the raw bytes,
+      returning the ``0x…`` tx hash.  Encapsulating build+sign+send keeps
+      the decrypted key out of this module entirely (defence-in-depth).
+    * ``wait_receipt`` — ``w3.eth.wait_for_transaction_receipt``; returns
+      ``status`` (1 = success) and ``blockNumber``.
+    * ``call`` — a read-only ``view`` contract call (e.g. WCOL
+      ``balanceOf``) used to poll the post-NegRisk-redeem WCOL balance.
+    """
+
+    async def send_signed(
+        self,
+        *,
+        contract_address: str,
+        abi: tuple[dict[str, Any], ...],
+        fn_name: str,
+        args: tuple[Any, ...],
+        signer_private_key: str,
+        from_address: str,
+        chain_id: int,
+    ) -> str: ...
+
+    async def wait_receipt(self, tx_hash: str) -> dict[str, Any]: ...
+
+    async def call(
+        self,
+        *,
+        contract_address: str,
+        abi: tuple[dict[str, Any], ...],
+        fn_name: str,
+        args: tuple[Any, ...],
+    ) -> Any: ...
+
+
+#: ``async (account_funder_or_eoa) -> decrypted 0x… private key`` — injected
+#: so the decrypted key never persists in this module and the EOA path is
+#: testable with a fake.  Core wires this to the crypto-config decrypt path.
+PrivateKeyResolver = Callable[[WalletBinding], Awaitable[str]]
+
+
 @runtime_checkable
 class RedeemClient(Protocol):
-    """The redeem client contract Wave-2 implements (brief §9).
+    """The redeem client contract core's worker drives (brief §9).
 
     Idempotency / durability is the ``redeem_jobs`` table's job (brief §9 —
     survives restart, no double-redeem); this client only performs the
@@ -100,10 +269,12 @@ class RedeemClient(Protocol):
 class BaseRedeemClient:
     """Abstract base wiring the live-lock chokepoint (brief §9).
 
-    Subclasses (Wave-2) override :meth:`_do_redeem` / :meth:`_do_unwrap`
-    with the real Builder-Relayer / web3 calls.  The public methods call
-    :func:`assert_live_allowed` FIRST so a misconfigured deployment fails
-    closed before any irreversible call.
+    The public methods call :func:`assert_live_allowed` FIRST so a
+    misconfigured deployment fails closed before any irreversible call.
+    :class:`Web3RedeemClient` overrides the ``_do_*`` hooks with the real
+    EOA web3 path; the MAGIC/SAFE/1271 gasless seam (:meth:`_relay_redeem`
+    / :meth:`_relay_unwrap`) stays abstract (``# TODO(verify)``) and fails
+    closed with :class:`RelayerNotConfiguredError`.
     """
 
     #: Brief §9 constants surfaced for subclasses (no inline hardcoding).
@@ -128,14 +299,235 @@ class BaseRedeemClient:
         self, spec: RedeemJobSpec, *, binding: WalletBinding
     ) -> RedeemResult:
         raise NotImplementedError(
-            "Phase-4 W2: redeemPositions via py-builder-relayer-client "
-            "(MAGIC/SAFE gasless) or web3.py (EOA) — see brief §9"
+            "Wave C-redeem: use Web3RedeemClient for the concrete EOA path "
+            "(brief §9)"
         )
 
     async def _do_unwrap(
         self, *, binding: WalletBinding, amount: int
     ) -> RedeemResult:
         raise NotImplementedError(
-            "Phase-4 W2: WrappedCollateral.unwrap(to, amount) after a "
-            "NegRisk redeem — see brief §9"
+            "Wave C-redeem: use Web3RedeemClient for the concrete EOA path "
+            "(brief §9)"
+        )
+
+    # -- Gasless seam (MAGIC/SAFE/1271) — ABSTRACT, # TODO(verify) --------
+    async def _relay_redeem(
+        self, spec: RedeemJobSpec, *, binding: WalletBinding
+    ) -> RedeemResult:
+        """Gasless redeem via the official Builder-Relayer (brief §9).
+
+        # TODO(verify): ``py-builder-relayer-client`` (PRD §11.2) PyPI
+        name/version is UNVERIFIED from this sandbox.  MAGIC = PROXY /
+        EIP-191 personal_sign; SAFE = SafeTx / EIP-712 (MultiSend
+        DELEGATECALL); POLY_1271 has no PolyHermes blueprint.  We do NOT
+        hand-roll the relayer/HMAC and do NOT import a guessed package —
+        this fails closed with a clear error so it can be slotted later
+        with zero change to the live-lock chokepoint.
+        """
+        raise RelayerNotConfiguredError(
+            f"Gasless redeem for wallet_mode={binding.wallet_mode!r} "
+            f"(signature_type={binding.signature_type}) requires the "
+            f"official Builder-Relayer client, which is not configured. "
+            f"# TODO(verify) py-builder-relayer-client (PRD §11.2) — only "
+            f"the EOA (signature_type=0) path is concrete in Wave C-redeem."
+        )
+
+    async def _relay_unwrap(
+        self, *, binding: WalletBinding, amount: int
+    ) -> RedeemResult:
+        """Gasless WCOL unwrap via the Builder-Relayer (brief §9).
+
+        # TODO(verify): same as :meth:`_relay_redeem` — abstract seam,
+        fails closed, no guessed relayer import.
+        """
+        raise RelayerNotConfiguredError(
+            f"Gasless unwrap for wallet_mode={binding.wallet_mode!r} "
+            f"(signature_type={binding.signature_type}) requires the "
+            f"official Builder-Relayer client, which is not configured. "
+            f"# TODO(verify) py-builder-relayer-client (PRD §11.2)."
+        )
+
+
+# Wallet signature_type that has a concrete on-chain path (brief §9).
+_SIG_EOA = 0
+
+
+class Web3RedeemClient(BaseRedeemClient):
+    """Concrete redeem client (brief §9 — Wave C-redeem).
+
+    * **EOA (signature_type 0)** — CONCRETE: builds the CTF
+      ``redeemPositions`` (and WCOL ``unwrap`` for NegRisk) tx via the
+      injected :class:`Web3Backend`, signs with the decrypted key from the
+      injected :data:`PrivateKeyResolver`, sends raw and waits for the
+      receipt.  Verified against web3.py v7 (``sign_transaction`` →
+      ``raw_transaction`` → ``send_raw_transaction`` →
+      ``wait_for_transaction_receipt``) + the Polymarket CTF examples.
+    * **MAGIC / SAFE / POLY_1271** — dispatched to the abstract
+      :meth:`_relay_redeem` / :meth:`_relay_unwrap` seam, which fails
+      closed (:class:`RelayerNotConfiguredError`, ``# TODO(verify)``).
+
+    The collateral branch is the brief's highest-risk detail and is
+    derived ONLY from :attr:`RedeemJobSpec.is_neg_risk` via
+    :func:`collateral_for` (normal → pUSD, NegRisk → WrappedCollateral).
+    NegRisk redeem pays WCOL → the worker (core) then calls
+    :meth:`unwrap_collateral`; this client exposes
+    :meth:`poll_wcol_balance` so the worker can poll ~20s for the WCOL
+    balance before unwrapping (brief §9 — "PolyHermes polls 20s").
+
+    Args:
+        web3: A :class:`Web3Backend` (core wires the real ``AsyncWeb3``).
+        private_key_resolver: ``async (binding) -> 0x… key``; called ONLY
+            on the EOA live path (the lock + worker short-circuit keep it
+            uncalled by default).
+        chain_id: EVM chain id for the signed tx (default Polygon 137).
+    """
+
+    def __init__(
+        self,
+        *,
+        web3: Web3Backend,
+        private_key_resolver: PrivateKeyResolver,
+        chain_id: int = POLYGON_CHAIN_ID,
+    ) -> None:
+        self._web3 = web3
+        self._resolve_key = private_key_resolver
+        self._chain_id = chain_id
+
+    # -- EOA concrete path ----------------------------------------------
+    async def _do_redeem(
+        self, spec: RedeemJobSpec, *, binding: WalletBinding
+    ) -> RedeemResult:
+        if binding.signature_type != _SIG_EOA:
+            # MAGIC(1)/SAFE(2)/POLY_1271(3): abstract gasless seam.
+            return await self._relay_redeem(spec, binding=binding)
+
+        collateral = collateral_for(is_neg_risk=spec.is_neg_risk)
+        key = await self._resolve_key(binding)
+        tx_hash = await self._web3.send_signed(
+            contract_address=self.ctf_address,
+            abi=CTF_REDEEM_ABI,
+            fn_name="redeemPositions",
+            args=(
+                collateral,
+                self.parent_collection_id,
+                spec.condition_id,
+                [spec.index_set],
+            ),
+            signer_private_key=key,
+            from_address=binding.funder,
+            chain_id=self._chain_id,
+        )
+        receipt = await self._web3.wait_receipt(tx_hash)
+        if int(receipt.get("status", 0)) != 1:
+            return RedeemResult(
+                status=RedeemJobStatus.FAILED,
+                tx_hash=tx_hash,
+                detail=(
+                    f"redeemPositions reverted (status="
+                    f"{receipt.get('status')!r}, collateral="
+                    f"{'WCOL' if spec.is_neg_risk else 'pUSD'})"
+                ),
+            )
+        return RedeemResult(
+            status=RedeemJobStatus.CONFIRMED,
+            tx_hash=tx_hash,
+            detail=(
+                f"redeemPositions confirmed "
+                f"(collateral={'WCOL' if spec.is_neg_risk else 'pUSD'}, "
+                f"neg_risk={spec.is_neg_risk}); NegRisk ⇒ unwrap next"
+                if spec.is_neg_risk
+                else "redeemPositions confirmed (collateral=pUSD)"
+            ),
+        )
+
+    async def _do_unwrap(
+        self, *, binding: WalletBinding, amount: int
+    ) -> RedeemResult:
+        if binding.signature_type != _SIG_EOA:
+            return await self._relay_unwrap(binding=binding, amount=amount)
+        if amount <= 0:
+            return RedeemResult(
+                status=RedeemJobStatus.CONFIRMED,
+                detail="unwrap skipped: WCOL balance is 0 (nothing to unwrap)",
+            )
+        key = await self._resolve_key(binding)
+        tx_hash = await self._web3.send_signed(
+            contract_address=WRAPPED_COLLATERAL_ADDRESS,
+            abi=WRAPPED_COLLATERAL_ABI,
+            fn_name="unwrap",
+            args=(binding.funder, amount),
+            signer_private_key=key,
+            from_address=binding.funder,
+            chain_id=self._chain_id,
+        )
+        receipt = await self._web3.wait_receipt(tx_hash)
+        if int(receipt.get("status", 0)) != 1:
+            return RedeemResult(
+                status=RedeemJobStatus.FAILED,
+                tx_hash=tx_hash,
+                detail=f"WCOL.unwrap reverted (amount={amount})",
+            )
+        return RedeemResult(
+            status=RedeemJobStatus.CONFIRMED,
+            tx_hash=tx_hash,
+            detail=f"WCOL.unwrap confirmed (amount={amount})",
+        )
+
+    async def poll_wcol_balance(self, *, binding: WalletBinding) -> int:
+        """Read the funder's WrappedCollateral balance (brief §9).
+
+        Used by the core worker after a NegRisk redeem so it can pass the
+        actual WCOL amount to :meth:`unwrap_collateral` (PolyHermes polls
+        ~20s; the poll loop / cooldown lives in the worker).
+        """
+        raw = await self._web3.call(
+            contract_address=WRAPPED_COLLATERAL_ADDRESS,
+            abi=WRAPPED_COLLATERAL_ABI,
+            fn_name="balanceOf",
+            args=(binding.funder,),
+        )
+        return int(raw)
+
+    async def ensure_collateral_approval(
+        self, *, binding: WalletBinding, collateral: str, spender: str
+    ) -> str | None:
+        """One-time idempotent ERC-20 ``approve(spender, 2**256-1)``.
+
+        Brief §9: USDC/collateral ``approve`` once at account setup so
+        redeem never needs a per-call approval.  Idempotent — checks the
+        current ``allowance`` first and returns ``None`` (no tx) if already
+        at/above the max.  Live-lock guarded by the caller (account-setup
+        path) which MUST call :func:`assert_live_allowed` before this; the
+        guard is asserted here too (defence-in-depth) so a stray call can
+        never approve when the lock is off.
+
+        EOA only — gasless approval is part of the relayer seam (TODO).
+        """
+        assert_live_allowed("approve_collateral")
+        if binding.signature_type != _SIG_EOA:
+            raise RelayerNotConfiguredError(
+                "Collateral approval for non-EOA wallets goes through the "
+                "Builder-Relayer seam. # TODO(verify) py-builder-relayer-"
+                "client (PRD §11.2)."
+            )
+        current = int(
+            await self._web3.call(
+                contract_address=collateral,
+                abi=ERC20_APPROVE_ABI,
+                fn_name="allowance",
+                args=(binding.funder, spender),
+            )
+        )
+        if current >= MAX_UINT256:
+            return None  # already approved — idempotent no-op
+        key = await self._resolve_key(binding)
+        return await self._web3.send_signed(
+            contract_address=collateral,
+            abi=ERC20_APPROVE_ABI,
+            fn_name="approve",
+            args=(spender, MAX_UINT256),
+            signer_private_key=key,
+            from_address=binding.funder,
+            chain_id=self._chain_id,
         )
