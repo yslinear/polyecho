@@ -316,7 +316,10 @@ export default async function BacktestResultPage({ params }: PageProps) {
       {job.status === "completed" && result?.scenarios && (
         <>
           <Separator />
-          {/* 3-scenario side-by-side */}
+          {/* One comparison surface: scenarios as columns, metrics as rows.
+              DESIGN.md bans identical card grids and the hero-metric
+              template; a single matrix table is the right affordance for a
+              best/base/worst comparison and reads left-to-right at a glance. */}
           <div className="space-y-4">
             <div className="space-y-1">
               <h2 className="text-sm font-semibold text-foreground">
@@ -327,11 +330,7 @@ export default async function BacktestResultPage({ params }: PageProps) {
                 delay assumptions.
               </p>
             </div>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              {result.scenarios.map((s) => (
-                <ScenarioCard key={s.label} scenario={s} />
-              ))}
-            </div>
+            <ScenarioComparison scenarios={result.scenarios} />
           </div>
 
           {/* PnL curve — all 3 scenarios */}
@@ -387,26 +386,71 @@ export default async function BacktestResultPage({ params }: PageProps) {
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
-function ScenarioCard({ scenario }: { scenario: ScenarioResult }) {
-  const { stats, label, slippage_bps, delay_seconds } = scenario;
+/**
+ * One comparison matrix: metrics down the rows, the three scenarios across
+ * the columns. Replaces the former 3-up identical ScenarioCard grid (which
+ * tripped DESIGN.md "no identical card grids" and the per-card big-number
+ * "hero-metric template"). This is a single varied surface and directly
+ * serves the best/base/worst reading intent.
+ */
+function ScenarioComparison({ scenarios }: { scenarios: ScenarioResult[] }) {
+  // Return / drawdown carry gain/loss meaning -> sign+arrow+tint contract.
+  // Win Rate is a magnitude (not a PnL), so it stays a plain tabular figure
+  // (color would be a false signal). Mirrors StatsTable's contract.
+  const metrics: {
+    label: string;
+    render: (s: ScenarioStats) => ReactNode;
+  }[] = [
+    {
+      label: "Total Return",
+      render: (s) => <ReturnPct value={s.total_return_pct} />,
+    },
+    {
+      label: "Annualized",
+      render: (s) => <ReturnPct value={s.annualized_return_pct} />,
+    },
+    { label: "Sharpe", render: (s) => num2(s.sharpe) },
+    {
+      label: "Max Drawdown",
+      render: (s) => <ReturnPct value={s.max_drawdown_pct} />,
+    },
+    { label: "Win Rate", render: (s) => `${num2(s.win_rate_pct)}%` },
+    { label: "Avg Hold", render: (s) => `${num2(s.avg_hold_hours)} h` },
+    { label: "Trades", render: (s) => String(s.trades_total) },
+    { label: "Skipped", render: (s) => String(s.trades_skipped) },
+  ];
 
   return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="flex items-center justify-between text-base capitalize">
-          {label}
-          <span className="text-xs font-normal tabular-nums text-muted-foreground">
-            {slippage_bps} bps / {delay_seconds} s
-          </span>
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="mb-3 text-2xl font-semibold">
-          <ReturnPct value={stats.total_return_pct} />
-        </div>
-        <StatsTable stats={stats} compact />
-      </CardContent>
-    </Card>
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Metric</TableHead>
+          {scenarios.map((s) => (
+            <TableHead key={s.label} className="text-right">
+              <span className="capitalize">{s.label}</span>
+              <span className="block text-xs font-normal tabular-nums text-muted-foreground">
+                {s.slippage_bps} bps / {s.delay_seconds} s
+              </span>
+            </TableHead>
+          ))}
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {metrics.map(({ label, render }) => (
+          <TableRow key={label}>
+            <TableCell className="text-sm">{label}</TableCell>
+            {scenarios.map((s) => (
+              <TableCell
+                key={s.label}
+                className="text-right text-sm tabular-nums"
+              >
+                {render(s.stats)}
+              </TableCell>
+            ))}
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
   );
 }
 

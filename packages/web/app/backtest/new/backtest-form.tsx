@@ -179,7 +179,7 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
         category_whitelist,
         scenario: values.scenario,
       });
-      toast.success("Backtest queued — redirecting…");
+      toast.success("Backtest queued. Redirecting…");
     } catch (err) {
       // redirect() throws internally; re-throw to let Next.js handle it
       if ((err as Error).message?.includes("NEXT_REDIRECT")) {
