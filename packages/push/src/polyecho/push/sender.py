@@ -38,6 +38,7 @@ import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import structlog
 from pywebpush import WebPushException, webpush
@@ -90,6 +91,21 @@ ALL_EVENT_TYPES: frozenset[str] = frozenset(
 #: rows are deleted so we never retry a dead device.
 _GONE_STATUSES: frozenset[int] = frozenset({404, 410})
 
+#: HTTP statuses meaning "our VAPID auth is bad" (RFC 8292): 401 Unauthorized
+#: / 403 Forbidden from the push service.  This is a *config* fault (wrong /
+#: expired ``vapid_private_key`` or claims), not a per-subscription problem —
+#: retrying every subscription would just hammer the service with the same
+#: bad key.  We raise :class:`PushConfigError` to halt delivery so the
+#: operator fixes VAPID rather than silently stamping events "delivered".
+_VAPID_AUTH_STATUSES: frozenset[int] = frozenset({401, 403})
+
+#: HTTP 413 Payload Too Large: the encrypted body exceeded the push service's
+#: limit (RFC 8030 §7.2).  This is a *content* fault for this event — never a
+#: real delivery and not retryable (the same oversized payload will always
+#: 413).  We stamp the event so it is not retried forever, but classify the
+#: per-subscription outcome distinctly so it never counts as a real delivery.
+_CONTENT_TOO_LARGE_STATUS = 413
+
 #: Default Web Push TTL (seconds) — how long the push service retains the
 #: message for an offline device before discarding it.  4 weeks matches the
 #: PRD §5.8 "離線累積" intent for transient delivery.
@@ -102,9 +118,48 @@ _MAX_TRANSIENT_RETRIES = 3
 _RETRY_BACKOFF_BASE_SECONDS = 0.5
 
 
+#: Cap on concurrent ``webpush`` worker threads per event fan-out (I6).
+#: Per-subscription delivery runs ``asyncio.to_thread`` (blocking
+#: ``pywebpush`` call); without a bound, one event with thousands of
+#: subscriptions — or a handful of very slow endpoints — would either spawn
+#: an unbounded thread pile-up or, when serial, head-of-line block the whole
+#: loop.  20 keeps fan-out parallel while bounding thread + socket pressure.
+_FANOUT_CONCURRENCY = 20
+
+
+class PushConfigError(RuntimeError):
+    """Fatal misconfiguration that must halt delivery (I4).
+
+    Raised when the push service rejects our VAPID credentials (401/403):
+    every subscription would fail identically, so retrying is pointless and
+    silently stamping the event "delivered" would lose it.  The supervised
+    loop surfaces this instead of swallowing it, so the operator fixes the
+    ``vapid_private_key`` / claims rather than the bug hiding as "ok".
+    """
+
+
 def _now() -> datetime:
     """Timezone-aware UTC ``now`` (single seam so tests can monkeypatch)."""
     return datetime.now(UTC)
+
+
+def _start_of_today(tz_name: str) -> datetime:
+    """UTC instant of local midnight *today* in ``tz_name`` (P1-8).
+
+    The daily-PnL push body says "今日" (today); the aggregate must therefore
+    count only trades whose fill time is on or after local midnight in the
+    configured display timezone, converted back to a tz-aware UTC bound for
+    the ``TIMESTAMPTZ`` comparison.
+    """
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001 - bad tz string ⇒ fall back to UTC
+        tz = ZoneInfo("UTC")
+    local_now = datetime.now(tz)
+    local_midnight = local_now.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return local_midnight.astimezone(UTC)
 
 
 def _is_db_down(exc: BaseException) -> bool:
@@ -151,17 +206,46 @@ class WebPushSender:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        """Backfill, then stream live events forever (supervised loop).
+        """Stream live events forever, LISTEN-before-backfill (P1-7).
 
-        Order matters (PRD §5.8): the startup backfill drains everything
-        accumulated while browsers were offline *before* we start consuming
-        live NOTIFYs, so a restart never drops an event.  The live loop
-        reconnects automatically (``pg_listen_iter`` owns a dedicated
-        asyncpg connection); any per-event error is contained.
+        Ordering is the whole correctness story here.  The naive order
+        (backfill → then LISTEN) loses every event committed in the window
+        between the backfill ``SELECT`` finishing and ``LISTEN`` attaching:
+        such events are neither in the backfill snapshot nor in the (not-yet
+        attached) NOTIFY stream, so they sit ``pushed_at IS NULL`` until the
+        *next* process restart.
+
+        Fix: open the dedicated ``pg_listen`` connection and attach
+        ``LISTEN polyecho_events`` *first* (``pg_listen_iter``'s
+        ``async with`` enter does exactly this — it ``add_listener``s before
+        yielding, and asyncpg's read loop then buffers every inbound NOTIFY
+        into the wrapper's bounded queue regardless of whether we are
+        iterating yet).  Only *then* run the startup backfill.  Any event
+        committed during the backfill therefore lands in the NOTIFY buffer;
+        the existing ``pushed_at IS NOT NULL`` idempotency in
+        :meth:`_safe_deliver` makes the inevitable backfill/stream overlap a
+        no-op (delivered once, not twice).
+
+        On stream loss the same hazard reappears for events committed while
+        disconnected, so the reconnect path runs a *mini-backfill*
+        (``pushed_at IS NULL``) **before** re-entering the LISTEN loop —
+        again under a freshly-attached listener — so a disconnect strands
+        nothing until restart.
         """
         log.info("web_push_sender_starting", channel=EVENTS_NOTIFY_CHANNEL)
-        await self.run_backfill()
-        await self._stream_forever()
+        await self._stream_forever(initial=True)
+
+    async def run_mini_backfill(self) -> int:
+        """Re-deliver every ``pushed_at IS NULL`` event (reconnect path).
+
+        Identical query to the startup backfill; named distinctly so the
+        reconnect log line and tests can assert it ran *before* the LISTEN
+        loop is re-entered, recovering events missed during the disconnect.
+
+        Returns:
+            The number of events processed.
+        """
+        return await self.run_backfill()
 
     async def run_once(self) -> int:
         """Drain every currently-unpushed event then return (CI smoke path).
@@ -220,16 +304,50 @@ class WebPushSender:
     # Live stream
     # ------------------------------------------------------------------
 
-    async def _stream_forever(self) -> None:
-        """Consume the NOTIFY stream; reconnect on any connection drop."""
+    async def _stream_forever(self, *, initial: bool) -> None:
+        """LISTEN, then backfill, then consume; reconnect with mini-backfill.
+
+        Each iteration: enter ``pg_listen_iter`` (attaches ``LISTEN`` and
+        starts asyncpg buffering NOTIFYs) → run the (mini-)backfill while the
+        listener is already live → drain the stream.  On a connection drop we
+        loop: the next iteration's mini-backfill recovers anything committed
+        during the gap *before* re-entering the loop (P1-7).  ``initial`` only
+        changes the log label; the recovery query is identical.
+        """
+        first = initial
         while True:
             try:
                 async with pg_listen_iter(EVENTS_NOTIFY_CHANNEL) as notes:
-                    log.info("web_push_listening", channel=EVENTS_NOTIFY_CHANNEL)
+                    # LISTEN is attached *now* (pg_listen_iter.__aenter__
+                    # called add_listener before yielding); asyncpg's read
+                    # loop buffers every NOTIFY committed from here on into
+                    # the wrapper queue — including any that land *during*
+                    # the backfill below. Run the backfill only after this.
+                    if first:
+                        log.info(
+                            "web_push_listening_then_backfill",
+                            channel=EVENTS_NOTIFY_CHANNEL,
+                        )
+                        await self.run_backfill()
+                        first = False
+                    else:
+                        log.info(
+                            "web_push_reconnect_mini_backfill",
+                            channel=EVENTS_NOTIFY_CHANNEL,
+                        )
+                        await self.run_mini_backfill()
+                    log.info(
+                        "web_push_listening", channel=EVENTS_NOTIFY_CHANNEL
+                    )
                     async for note in notes:
                         await self._handle_notification(note.payload)
             except asyncio.CancelledError:
                 log.info("web_push_sender_cancelled")
+                raise
+            except PushConfigError:
+                # Bad VAPID — retrying the same key just hammers the push
+                # service; halt so the operator fixes config (I4).
+                log.error("web_push_halt_bad_vapid")
                 raise
             except Exception as exc:  # noqa: BLE001 - resilient reconnect loop
                 log.warning("web_push_stream_lost", error=str(exc))
@@ -245,7 +363,14 @@ class WebPushSender:
         await self._safe_deliver(event_id)
 
     async def _safe_deliver(self, event_id: int) -> None:
-        """Deliver one event by id; never let one failure kill the loop."""
+        """Deliver one event by id; never let one *event* failure kill the loop.
+
+        A normal per-event error is logged and swallowed so the next event /
+        next backfill proceeds.  :class:`PushConfigError` (bad VAPID, I4) is
+        the deliberate exception: it is *not* swallowed — it propagates up
+        through backfill / the stream loop so delivery halts instead of the
+        config bug hiding as silently-"ok" stamped events.
+        """
         try:
             async with session_scope() as session:
                 row = await session.get(Event, event_id)
@@ -256,6 +381,9 @@ class WebPushSender:
                     # Already delivered (backfill/live race) — idempotent skip.
                     return
                 await self._deliver_event(session, row)
+        except PushConfigError:
+            # Bad VAPID config — must halt delivery, not be swallowed (I4).
+            raise
         except Exception as exc:  # noqa: BLE001 - one event never kills loop
             log.error(
                 "web_push_event_failed", event_id=event_id, error=str(exc)
@@ -292,9 +420,43 @@ class WebPushSender:
             return
 
         data = json.dumps(push_json, separators=(",", ":"))
+
+        # I6: fan out concurrently but bounded. A serial ``await`` loop lets
+        # one slow endpoint head-of-line block every other subscription (and
+        # the whole event loop); an unbounded ``gather`` would spawn one
+        # ``to_thread`` worker per subscription. A semaphore caps in-flight
+        # blocking threads at _FANOUT_CONCURRENCY while keeping fan-out
+        # parallel. ``return_exceptions=True`` so one crashing sub never
+        # aborts the others — except PushConfigError, which we re-raise to
+        # halt delivery (bad VAPID; I4).
+        sem = asyncio.Semaphore(_FANOUT_CONCURRENCY)
+
+        async def _bounded(sub: PushSubscription) -> str:
+            async with sem:
+                return await self._deliver_to_subscription(
+                    session, sub, data
+                )
+
+        results = await asyncio.gather(
+            *(_bounded(sub) for sub in subs), return_exceptions=True
+        )
+
         all_durable = True
-        for sub in subs:
-            outcome = await self._deliver_to_subscription(session, sub, data)
+        for sub, outcome in zip(subs, results, strict=True):
+            if isinstance(outcome, PushConfigError):
+                # Bad VAPID — halt delivery; do NOT stamp the event.
+                raise outcome
+            if isinstance(outcome, BaseException):
+                # Any other unexpected error for one sub: log, treat as
+                # transient so the event retries (never silently "ok").
+                log.error(
+                    "web_push_subscription_error",
+                    event_id=event.id,
+                    subscription_id=str(sub.id),
+                    error=str(outcome),
+                )
+                all_durable = False
+                continue
             if outcome == "transient":
                 all_durable = False
 
@@ -319,11 +481,22 @@ class WebPushSender:
         sub: PushSubscription,
         data: str,
     ) -> str:
-        """Deliver to one subscription with bounded transient retry.
+        """Deliver to one subscription with bounded transient retry (I4).
 
-        Returns one of ``"ok"`` (2xx — ``last_used_at`` stamped),
-        ``"gone"`` (404/410 — row deleted), or ``"transient"`` (5xx /
-        network, retries exhausted — event must NOT be marked pushed).
+        Returns one of:
+
+        * ``"ok"`` — 2xx, ``last_used_at`` stamped (a *real* delivery);
+        * ``"gone"`` — 404/410, row deleted (dead device);
+        * ``"content_error"`` — 413 Payload Too Large: never a real
+          delivery and not retryable (same body always 413), but the event
+          *is* stamped so it is not retried forever;
+        * ``"transient"`` — 5xx / network, retries exhausted (event must
+          NOT be marked pushed — next backfill retries).
+
+        Raises:
+            PushConfigError: on 401/403 — bad VAPID auth halts the whole
+                delivery (every sub would fail identically; silently
+                stamping would lose the event).
         """
         sub_id = sub.id
         for attempt in range(1, _MAX_TRANSIENT_RETRIES + 1):
@@ -347,16 +520,42 @@ class WebPushSender:
                         status=status,
                     )
                     return "gone"
+                if status in _VAPID_AUTH_STATUSES:
+                    # 401/403: the push service rejects our VAPID key/claims.
+                    # This is a config fault that would fail *every*
+                    # subscription identically — surface it so delivery halts
+                    # and the operator fixes VAPID, never stamp "ok".
+                    log.error(
+                        "web_push_vapid_auth_error",
+                        subscription_id=str(sub_id),
+                        status=status,
+                    )
+                    raise PushConfigError(
+                        f"push service rejected VAPID auth (HTTP {status}); "
+                        "check settings.vapid_private_key / claims"
+                    ) from exc
+                if status == _CONTENT_TOO_LARGE_STATUS:
+                    # 413: the encrypted body is too large for this service.
+                    # Not retryable (identical body always 413) and never a
+                    # real delivery — distinct outcome: stamp so it is not
+                    # retried forever, but do NOT count it as "ok".
+                    log.error(
+                        "web_push_content_too_large",
+                        subscription_id=str(sub_id),
+                        status=status,
+                    )
+                    return "content_error"
                 if status is not None and 400 <= status < 500:
-                    # Non-410/404 4xx (e.g. malformed) — not retryable and
-                    # not "gone"; treat as durable failure for this sub so a
-                    # single bad row never blocks the event forever.
+                    # Other 4xx (e.g. malformed request): not retryable and
+                    # not "gone"; never a real delivery. Treat like 413 —
+                    # stamp so a single permanently-bad sub never blocks the
+                    # event forever, but do NOT count it as a delivery.
                     log.error(
                         "web_push_client_error",
                         subscription_id=str(sub_id),
                         status=status,
                     )
-                    return "ok"
+                    return "content_error"
                 log.warning(
                     "web_push_transient_error",
                     subscription_id=str(sub_id),
@@ -433,23 +632,33 @@ class WebPushSender:
     # ------------------------------------------------------------------
 
     async def emit_daily_pnl_summary(self) -> int:
-        """Compute today's realised PnL / fills digest and emit the event.
+        """Compute *today's* realised PnL / fills digest and emit the event.
 
-        Aggregates ``my_trades`` filled today (``fill_status == 'filled'``):
-        realised PnL is ``SUM(pnl_usd)`` over rows with a non-null
-        ``pnl_usd``; fills is the row count.  Emits a
+        P1-8: the push body says "今日" (today), so the aggregate must be
+        date-scoped to *today in* ``settings.tz`` — previously it summed
+        ALL-time ``my_trades`` so the number contradicted the label.
+
+        Aggregates ``my_trades`` filled today: ``fill_status == 'filled'``
+        **and** ``opened_at >= start-of-today`` (local midnight in
+        ``settings.tz``, converted to a tz-aware UTC bound for the
+        ``TIMESTAMPTZ`` column — ``my_trades`` has no ``filled_at``; the BUY
+        ``opened_at`` is the fill timestamp).  Realised PnL is
+        ``SUM(pnl_usd)`` over those rows; fills is the row count.  Emits a
         ``DAILY_PNL_SUMMARY`` event with a Chinese-language
         :class:`PushPayload`; the normal delivery loop ships it.
 
         Returns:
             The new ``events.id``.
         """
+        today_start = _start_of_today(self._settings.tz)
         async with session_scope() as session:
             pnl_row = await session.execute(
                 select(
                     func.coalesce(func.sum(MyTrade.pnl_usd), 0),
                     func.count(MyTrade.id),
-                ).where(MyTrade.fill_status == "filled")
+                )
+                .where(MyTrade.fill_status == "filled")
+                .where(MyTrade.opened_at >= today_start)
             )
             total_pnl_raw, fills = pnl_row.one()
             total_pnl = Decimal(str(total_pnl_raw or 0))

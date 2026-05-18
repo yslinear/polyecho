@@ -422,3 +422,308 @@ async def test_daily_pnl_summary_emits_event(_patched_scope: Any) -> None:
 
     assert kwargs["event_type"] == EventType.DAILY_PNL_SUMMARY
     assert kwargs["push"].title == "每日跟單摘要"
+
+
+# ---------------------------------------------------------------------------
+# P1-7: LISTEN attaches BEFORE the startup backfill — an event committed
+# during the backfill (queued in the asyncpg NOTIFY buffer) is still
+# delivered, not stranded until restart.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_listen_attaches_before_backfill_no_lost_event() -> None:
+    """Order proof: ``pg_listen_iter.__aenter__`` (LISTEN) runs strictly
+    before ``run_backfill``; a NOTIFY arriving during backfill is buffered
+    by the (already-attached) listener and delivered from the stream.
+    """
+    sender = _make_sender()
+
+    order: list[str] = []
+    # The bounded buffer the (already-attached) listener feeds. We push a
+    # "gap" event id into it the instant LISTEN is attached, simulating an
+    # event committed during the backfill window.
+    buffer: asyncio.Queue[Any] = asyncio.Queue()
+
+    class _Note:
+        def __init__(self, payload: str) -> None:
+            self.payload = payload
+
+    @asynccontextmanager
+    async def _fake_listen(_channel: str) -> Any:
+        order.append("listen_attached")
+        # Event 99 was committed in the gap → NOTIFY queued *now*.
+        await buffer.put(_Note("99"))
+
+        async def _gen() -> Any:
+            while True:
+                note = await buffer.get()
+                yield note
+
+        gen = _gen()
+        try:
+            yield gen
+        finally:
+            await gen.aclose()
+
+    delivered: list[int] = []
+
+    async def _fake_backfill() -> int:
+        order.append("backfill_ran")
+        # The gap event is NOT visible to the backfill snapshot (committed
+        # after its SELECT) — but it is already sitting in the buffer.
+        return 0
+
+    async def _fake_safe(event_id: int) -> None:
+        delivered.append(event_id)
+        if event_id == 99:
+            raise asyncio.CancelledError  # stop the infinite stream
+
+    with (
+        patch("polyecho.push.sender.pg_listen_iter", _fake_listen),
+        patch.object(sender, "run_backfill", _fake_backfill),
+        patch.object(sender, "_safe_deliver", _fake_safe),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await sender.run()
+
+    # LISTEN attached strictly before the backfill ran (P1-7 ordering).
+    assert order == ["listen_attached", "backfill_ran"]
+    # The gap event (committed during backfill) was still delivered.
+    assert 99 in delivered
+
+
+# ---------------------------------------------------------------------------
+# P1-7: a stream-loss reconnect runs a mini-backfill BEFORE re-entering the
+# LISTEN loop, so events missed during the disconnect are recovered.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reconnect_runs_mini_backfill_before_listen_loop() -> None:
+    sender = _make_sender()
+    order: list[str] = []
+    attempts = {"n": 0}
+
+    @asynccontextmanager
+    async def _fake_listen(_channel: str) -> Any:
+        attempts["n"] += 1
+        order.append(f"listen_{attempts['n']}")
+
+        async def _gen() -> Any:
+            if attempts["n"] == 1:
+                # First connection drops immediately.
+                raise RuntimeError("stream lost")
+                yield  # pragma: no cover
+            # Second connection: stop the loop after mini-backfill ran.
+            raise asyncio.CancelledError
+            yield  # pragma: no cover
+
+        gen = _gen()
+        try:
+            yield gen
+        finally:
+            with __import__("contextlib").suppress(Exception):
+                await gen.aclose()
+
+    async def _fake_backfill() -> int:
+        order.append("startup_backfill")
+        return 0
+
+    async def _fake_mini() -> int:
+        order.append("mini_backfill")
+        return 0
+
+    with (
+        patch("polyecho.push.sender.pg_listen_iter", _fake_listen),
+        patch.object(sender, "run_backfill", _fake_backfill),
+        patch.object(sender, "run_mini_backfill", _fake_mini),
+        patch("polyecho.push.sender.asyncio.sleep", return_value=None),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await sender.run()
+
+    # 1st conn: LISTEN then startup backfill; drop → reconnect; 2nd conn:
+    # LISTEN then *mini*-backfill BEFORE the (cancelled) listen loop.
+    assert order == [
+        "listen_1",
+        "startup_backfill",
+        "listen_2",
+        "mini_backfill",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# P1-8: the daily summary counts ONLY today's (settings.tz) filled trades.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_daily_summary_filters_today_only() -> None:
+    """The aggregate query carries an ``opened_at >= start-of-today`` bound
+    (in addition to ``fill_status == 'filled'``) so the number matches the
+    "今日" label — previously it summed ALL-time trades.
+    """
+    captured: dict[str, str] = {}
+
+    class _CapSession:
+        async def execute(self, stmt: Any) -> Any:
+            captured["sql"] = str(stmt.compile(
+                compile_kwargs={"literal_binds": False}
+            )).lower()
+            return _FakeResult([(0, 0)])
+
+    @asynccontextmanager
+    async def _scope() -> Any:
+        yield _CapSession()
+
+    settings = MagicMock()
+    settings.tz = "Asia/Taipei"
+    settings.vapid_private_key.get_secret_value.return_value = "p"
+    with patch("polyecho.push.sender.get_settings", return_value=settings):
+        from polyecho.push.sender import WebPushSender
+
+        sender = WebPushSender()
+
+    with (
+        patch("polyecho.push.sender.session_scope", _scope),
+        patch("polyecho.push.sender.emit_event", return_value=1),
+    ):
+        await sender.emit_daily_pnl_summary()
+
+    sql = captured["sql"]
+    assert "fill_status" in sql
+    # The today bound is present (opened_at compared to a lower bound).
+    assert "opened_at" in sql and ">=" in sql
+
+
+def test_start_of_today_is_tz_aware_local_midnight() -> None:
+    """``_start_of_today`` returns the UTC instant of local midnight."""
+    from datetime import UTC
+
+    from polyecho.push.sender import _start_of_today
+
+    bound = _start_of_today("Asia/Taipei")
+    assert bound.tzinfo is not None
+    # Asia/Taipei is UTC+8 with no DST → local midnight == 16:00 UTC prev day.
+    assert bound.astimezone(UTC).hour == 16
+    # Bad tz string falls back to UTC midnight (no crash).
+    utc_bound = _start_of_today("Not/AZone")
+    assert utc_bound.hour == 0 and utc_bound.tzinfo is not None
+
+
+# ---------------------------------------------------------------------------
+# I4: 401/403 halt delivery (PushConfigError, NOT silently "ok"); 413 is a
+# distinct content_error (stamped, never a real delivery); 404/410 still
+# delete; 2xx still stamps; 5xx still unstamped-retry (regression coverage
+# for the latter three is above — here the new I4 cases).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.asyncio
+async def test_vapid_auth_status_halts_delivery(
+    status: int, _patched_scope: Any
+) -> None:
+    """401/403 raises PushConfigError (halts) and does NOT stamp the event
+    nor return a silent "ok"."""
+    from polyecho.push.sender import PushConfigError
+
+    ev = _FakeEvent(1, {"data": {}, "push": {"title": "t", "body": "b"}})
+    sub = _FakeSub("https://push.example/badvapid")
+    session = _FakeSession({1: ev}, [sub])
+    sender = _make_sender()
+
+    with (
+        patch("polyecho.push.sender.session_scope", _patched_scope(session)),
+        patch(
+            "polyecho.push.sender.webpush",
+            side_effect=_webpush_exc(status),
+        ),
+        patch(
+            "polyecho.push.sender.build_vapid_claims",
+            return_value={"sub": "x"},
+        ),
+    ):
+        # _safe_deliver must NOT swallow PushConfigError (it must halt).
+        with pytest.raises(PushConfigError):
+            await sender._safe_deliver(1)
+
+    assert ev.pushed_at is None  # never stamped — not a real delivery
+    assert session.deleted_subs == []  # 401/403 is not "gone"
+
+
+@pytest.mark.asyncio
+async def test_413_is_distinct_content_error_stamped_not_delivery(
+    _patched_scope: Any,
+) -> None:
+    """413 stamps the event (so it is not retried forever) but is a distinct
+    outcome — it must NOT be counted as a real delivery (no last_used_at)."""
+    ev = _FakeEvent(2, {"data": {}, "push": {"title": "t", "body": "b" * 5}})
+    sub = _FakeSub("https://push.example/toolarge")
+    session = _FakeSession({2: ev}, [sub])
+    sender = _make_sender()
+
+    with (
+        patch("polyecho.push.sender.session_scope", _patched_scope(session)),
+        patch(
+            "polyecho.push.sender.webpush",
+            side_effect=_webpush_exc(413),
+        ),
+        patch(
+            "polyecho.push.sender.build_vapid_claims",
+            return_value={"sub": "x"},
+        ),
+    ):
+        await sender._safe_deliver(2)
+
+    # Stamped so it is not retried forever (distinct from 5xx transient)...
+    assert ev.pushed_at is not None
+    # ...but never a real delivery: last_used_at NOT stamped, not deleted.
+    assert session.updated_last_used == []
+    assert session.deleted_subs == []
+
+
+# ---------------------------------------------------------------------------
+# I6: per-event fan-out is concurrent but bounded by the semaphore (a slow
+# subscription does not head-of-line block the others, and at most
+# _FANOUT_CONCURRENCY webpush threads run at once).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fanout_is_bounded_by_semaphore(_patched_scope: Any) -> None:
+    from polyecho.push import sender as smod
+
+    n_subs = smod._FANOUT_CONCURRENCY * 3
+    ev = _FakeEvent(5, {"data": {}, "push": {"title": "t", "body": "b"}})
+    subs = [_FakeSub(f"https://push.example/{i}") for i in range(n_subs)]
+    session = _FakeSession({5: ev}, subs)
+    sender = _make_sender()
+
+    concurrent = 0
+    peak = 0
+
+    def _blocking(_sub: Any, _data: str) -> None:
+        nonlocal concurrent, peak
+        concurrent += 1
+        peak = max(peak, concurrent)
+        # Yield the GIL so other threads pile up if unbounded.
+        import time
+
+        time.sleep(0.005)
+        concurrent -= 1
+
+    with (
+        patch("polyecho.push.sender.session_scope", _patched_scope(session)),
+        patch.object(sender, "_webpush_blocking", _blocking),
+    ):
+        await sender._safe_deliver(5)
+
+    # All delivered, event stamped...
+    assert ev.pushed_at is not None
+    assert len(session.updated_last_used) == n_subs
+    # ...and never more than the cap ran concurrently (proves the bound;
+    # also proves it WAS concurrent — serial would peak at 1).
+    assert peak <= smod._FANOUT_CONCURRENCY
+    assert peak > 1
