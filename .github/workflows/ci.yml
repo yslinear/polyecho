@@ -100,7 +100,15 @@ jobs:
           COVERAGE_FILE: .coverage.core
         run: |
           set -euo pipefail
-          uv run pytest --cov --cov-report= -p no:cacheprovider packages/core
+          # --cov-fail-under=0 neutralises the pyproject `addopts`
+          # whole-namespace 70% gate that this invocation would otherwise
+          # INHERIT: running only `packages/core` measures ~66% of the
+          # packages/*/src union, so pytest would exit 1 here under
+          # `set -e` BEFORE the real gate runs (gap #9). This first command
+          # only COLLECTS core coverage into .coverage.core; the
+          # authoritative core-ONLY >=80 floor is the `coverage report
+          # --include=... --fail-under=80` immediately below.
+          uv run pytest --cov --cov-report= --cov-fail-under=0 -p no:cacheprovider packages/core
           uv run coverage report \
             --data-file=.coverage.core \
             --include='*/packages/core/src/polyecho/core/*' \
