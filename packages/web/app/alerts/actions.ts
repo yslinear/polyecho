@@ -8,10 +8,16 @@
  *  - getVapidPublicKey                -> read-only; PUBLIC key only, NEVER
  *    touches the VAPID private key (that lives in p5-core's env, not the DB).
  *  - createPendingAction              -> DANGEROUS request (status
- *    `awaiting_confirm`, 300s TTL). Creating the row does NOT execute it.
- *  - confirmPendingAction             -> DANGEROUS confirm. 5s UI countdown
- *    gate (client) THEN passphrase. Web OWNS verification: it hashes with
- *    PBKDF2-HMAC-SHA256 and only on success flips status -> `confirmed`.
+ *    `awaiting_confirm`, 300s TTL). Creating the row does NOT execute it
+ *    and writes NO passphrase material (`confirm_passphrase_hash` stays
+ *    NULL — it is unused now).
+ *  - confirmPendingAction             -> DANGEROUS confirm. SERVER-SIDE 5s
+ *    min-age gate (NOT the client countdown) THEN passphrase verified
+ *    against the operator-provisioned `settings.danger_passphrase_hash`.
+ *    Web OWNS verification: it reproduces the FROZEN canonical
+ *    `pbkdf2$<iters>$<b64salt>$<b64hash>` PBKDF2-HMAC-SHA256 format
+ *    byte-for-byte and only on success flips status -> `confirmed`. If the
+ *    settings hash is absent it FAILS CLOSED (never auto-provisions).
  *    *** p5-core only EXECUTES `confirmed` rows and does NOT re-verify the
  *    passphrase. *** The Python `shared.pending_actions` helpers are for
  *    CLI/Python-initiated flows only.
@@ -32,8 +38,12 @@ import {
   settings,
   events,
 } from "@/lib/db/schema";
-import { VAPID_PUBLIC_KEY, coerceStringSetting } from "@/lib/settings-keys";
-import { hashPassphrase, verifyPassphrase } from "@/lib/passphrase";
+import {
+  VAPID_PUBLIC_KEY,
+  DANGER_PASSPHRASE_HASH_KEY,
+  coerceStringSetting,
+} from "@/lib/settings-keys";
+import { verifyPassphrase } from "@/lib/passphrase";
 
 /**
  * Frozen Phase-5 Wave-1 contract mirror (packages/shared
@@ -212,7 +222,15 @@ export async function unsubscribePush(
 
 export type PendingActionType = "manual_sell" | "emergency_liquidate";
 
+/** Default TTL — a pending row auto-expires 300s after creation. */
 const PENDING_TTL_SECONDS = 300;
+
+/**
+ * SERVER-SIDE minimum age before a pending row may be confirmed. Mirrors
+ * the frozen Python gate constant `MIN_CONFIRM_AGE_SECONDS = 5`. Enforced
+ * here against the DB `created_at` — we do NOT trust the client countdown.
+ */
+const MIN_CONFIRM_AGE_SECONDS = 5;
 
 export interface CreatePendingResult {
   ok: boolean;
@@ -223,6 +241,9 @@ export interface CreatePendingResult {
 /**
  * createPendingAction — insert an `awaiting_confirm` row with a 300s TTL.
  * Creating the row does NOT execute anything; confirmation is required.
+ * It writes NO passphrase material: `confirm_passphrase_hash` is left out
+ * of the insert so it stays NULL (it is unused — the danger passphrase is
+ * the operator-provisioned `settings.danger_passphrase_hash`).
  */
 export async function createPendingAction(
   actionType: PendingActionType,
@@ -267,10 +288,20 @@ export interface ConfirmPendingResult {
 }
 
 /**
- * confirmPendingAction — verify the passphrase (constant-time) and flip the
- * row to `confirmed`. Wrong passphrase -> error, row is NOT consumed (TTL
- * handles expiry). Expired -> rejected. Web owns verification; p5-core
- * executes `confirmed` rows without re-verifying.
+ * confirmPendingAction — gate then verify, constant-time, then flip the row
+ * to `confirmed`. The gates, in order (all FAIL CLOSED):
+ *
+ *  (a) row must exist, be `awaiting_confirm`, and not past `expires_at`;
+ *  (b) SERVER-SIDE min-age: reject if `now - created_at < 5s` (we do NOT
+ *      trust the client countdown — the DB `created_at` is authoritative);
+ *  (c) read `settings.danger_passphrase_hash`. If absent -> reject with a
+ *      clear "set it via the CLI" message. NEVER auto-provision;
+ *  (d) verify the submitted passphrase against that stored FROZEN canonical
+ *      `pbkdf2$<iters>$<b64salt>$<b64hash>` string (constant-time; rejects
+ *      sub-100000-iter / tampered strings). The web NEVER writes the hash;
+ *  (e) only on success flip status -> `confirmed`. Wrong passphrase -> the
+ *      row is NOT consumed (TTL handles expiry). p5-core executes
+ *      `confirmed` rows without re-verifying.
  */
 export async function confirmPendingAction(
   id: string,
@@ -281,12 +312,13 @@ export async function confirmPendingAction(
   if (!pid) return { ok: false, message: "缺少操作識別碼。" };
   if (pass.length < 1) return { ok: false, message: "請輸入確認通行碼。" };
 
+  // (a) load the row.
   const [row] = await db
     .select({
       id: pendingActions.id,
       status: pendingActions.status,
       expires_at: pendingActions.expires_at,
-      confirm_passphrase_hash: pendingActions.confirm_passphrase_hash,
+      created_at: pendingActions.created_at,
     })
     .from(pendingActions)
     .where(eq(pendingActions.id, pid))
@@ -294,33 +326,58 @@ export async function confirmPendingAction(
 
   if (!row) return { ok: false, message: "找不到此操作，可能已逾時清除。" };
   if (row.status !== "awaiting_confirm") {
-    return { ok: false, message: `此操作已是「${row.status}」狀態，無法重複確認。` };
+    return {
+      ok: false,
+      message: `此操作已是「${row.status}」狀態，無法重複確認。`,
+    };
   }
   if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
     return { ok: false, message: "此操作已逾時，請重新建立。" };
   }
 
-  // First confirm sets the per-row hash; subsequent attempts verify against it.
-  let storedHash = row.confirm_passphrase_hash;
-  if (!storedHash) {
-    storedHash = await hashPassphrase(pass);
-    await db
-      .update(pendingActions)
-      .set({ confirm_passphrase_hash: storedHash })
-      .where(
-        and(
-          eq(pendingActions.id, pid),
-          eq(pendingActions.status, "awaiting_confirm")
-        )
-      );
+  // (b) SERVER-SIDE minimum-age gate — authoritative against created_at, NOT
+  // the client countdown. A missing/unparseable created_at fails closed.
+  const createdMs = row.created_at
+    ? new Date(row.created_at).getTime()
+    : Number.NaN;
+  if (!Number.isFinite(createdMs)) {
+    return { ok: false, message: "此操作建立時間異常，請重新建立。" };
+  }
+  const ageMs = Date.now() - createdMs;
+  if (ageMs < MIN_CONFIRM_AGE_SECONDS * 1000) {
+    const waitS = Math.ceil(
+      (MIN_CONFIRM_AGE_SECONDS * 1000 - ageMs) / 1000
+    );
+    return {
+      ok: false,
+      message: `為避免誤觸，請於建立後至少 ${MIN_CONFIRM_AGE_SECONDS} 秒再確認（尚需 ${waitS} 秒）。`,
+    };
   }
 
+  // (c) read the operator-provisioned danger passphrase hash. FAIL CLOSED if
+  // it has not been provisioned — never auto-provision / derive it here.
+  const [hashRow] = await db
+    .select({ value: settings.value })
+    .from(settings)
+    .where(eq(settings.key, DANGER_PASSPHRASE_HASH_KEY))
+    .limit(1);
+  const storedHash = coerceStringSetting(hashRow?.value).trim();
+  if (!storedHash) {
+    return {
+      ok: false,
+      message:
+        "危險操作密碼尚未設定，請先用 CLI `polyecho account set-danger-passphrase` 佈建後再試。",
+    };
+  }
+
+  // (d) constant-time verify against the FROZEN canonical stored string.
   const valid = await verifyPassphrase(pass, storedHash);
   if (!valid) {
     // Do NOT consume the row — let the TTL expire it.
     return { ok: false, message: "通行碼錯誤。請重試（操作仍待確認）。" };
   }
 
+  // (e) success — flip to confirmed. We NEVER write the passphrase hash.
   await db
     .update(pendingActions)
     .set({ status: "confirmed" })

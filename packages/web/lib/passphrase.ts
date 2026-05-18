@@ -1,36 +1,64 @@
 /**
- * Passphrase hashing for the 危險操作二次確認 flow (PRD §5.7 危险 tier).
+ * Danger-tier passphrase verification for the 危險操作二次確認 flow
+ * (PRD §5.7 危险 tier) — P0 security Wave-2 web consumer.
  *
- * Self-describing hash format stored in pending_actions.confirm_passphrase_hash:
+ * FROZEN canonical hash string (Python side is authoritative, the operator
+ * provisions `settings.danger_passphrase_hash` via the CLI
+ * `polyecho account set-danger-passphrase`; the web NEVER writes/derives it):
  *
- *     pbkdf2$<iterations>$<saltBase64>$<hashBase64>
+ *     pbkdf2$<iterations>$<b64_salt>$<b64_hash>
  *
- * so verification needs nothing but the stored string (the iteration count
- * and salt travel with it — future-proof if POLYECHO_KEY_KDF_ITERATIONS
- * changes between create and confirm).
+ *   - exactly 4 `$`-separated fields; field 0 is the literal `pbkdf2`
+ *   - <iterations> = decimal ASCII of the clamped KDF iteration count
+ *     max(POLYECHO_KEY_KDF_ITERATIONS, MIN_KDF_ITERATIONS) where the floor
+ *     MIN_KDF_ITERATIONS = 100_000
+ *   - <b64_salt>  = standard Base64 (RFC 4648 `+/` alphabet, `=` padding)
+ *     of the random 16-byte salt
+ *   - <b64_hash>  = standard Base64 of the 32-byte PBKDF2 output
+ *   - KDF = PBKDF2-HMAC-SHA256, password = UTF-8 bytes of the passphrase
+ *     (NO unicode normalization), dkLen = 32
  *
- * Algorithm: PBKDF2-HMAC-SHA256, 32-byte derived key, per-row 16-byte random
- * salt. Iterations come from env POLYECHO_KEY_KDF_ITERATIONS (default 600000).
- * Verification is constant-time via crypto.timingSafeEqual.
+ * Verification reads the embedded iterations + salt from the stored string
+ * and MUST reject any string whose iterations < MIN_KDF_ITERATIONS. The
+ * comparison is constant-time via crypto.timingSafeEqual. This module is the
+ * sole web verifier; p5-core only EXECUTES rows already in status
+ * `confirmed` and does NOT re-verify the passphrase.
  *
- * WEB OWNS VERIFICATION. p5-core only ever EXECUTES rows already in status
- * `confirmed` and does NOT re-verify the passphrase. The Python
- * `shared.pending_actions` helpers are for CLI/Python-initiated flows only;
- * this module is the sole verifier for web-initiated dangerous actions.
+ * Node `crypto` mapping to the frozen format (byte-for-byte):
+ *   - `pbkdf2(Buffer.from(passphrase, "utf8"), salt, iterations, 32, "sha256")`
+ *     == Python `hashlib.pbkdf2_hmac("sha256", passphrase.encode(), salt,
+ *        iterations, dklen=32)`
+ *   - `Buffer.from(salt|hash).toString("base64")` is RFC 4648 standard
+ *     Base64 with `+/` and `=` padding == Python `base64.b64encode(...)`
+ *   - `Buffer.from(field, "base64")` round-trips the standard alphabet ==
+ *     Python `base64.b64decode(...)`
  */
 
 import { pbkdf2, randomBytes, timingSafeEqual } from "node:crypto";
 
-const KEYLEN = 32;
-const DIGEST = "sha256";
+const KEYLEN = 32; // dkLen — 32-byte PBKDF2 output (== Python dklen=32)
+const SALTLEN = 16; // 16-byte random salt (== Python os.urandom(16))
+const DIGEST = "sha256"; // PBKDF2-HMAC-SHA256
 const DEFAULT_ITERATIONS = 600_000;
 
-/** Resolve the KDF iteration count from env, with a safe floor. */
+/**
+ * Hard iteration floor — mirrors the Python `MIN_KDF_ITERATIONS = 100_000`.
+ * Both the (rarely used, test-only) producer AND the verify path clamp /
+ * reject below this value so a downgraded stored string can never confirm.
+ */
+export const MIN_KDF_ITERATIONS = 100_000;
+
+/**
+ * Resolve the KDF iteration count from env, clamped to the security floor:
+ * `max(POLYECHO_KEY_KDF_ITERATIONS, MIN_KDF_ITERATIONS)`. Invalid / unset
+ * env falls back to the OWASP default (already well above the floor).
+ */
 export function kdfIterations(): number {
   const raw = process.env.POLYECHO_KEY_KDF_ITERATIONS;
   const n = raw ? Number.parseInt(raw, 10) : NaN;
-  if (!Number.isFinite(n) || n < 1) return DEFAULT_ITERATIONS;
-  return n;
+  const base =
+    !Number.isFinite(n) || n < 1 ? DEFAULT_ITERATIONS : n;
+  return Math.max(base, MIN_KDF_ITERATIONS);
 }
 
 function pbkdf2Async(
@@ -38,27 +66,48 @@ function pbkdf2Async(
   salt: Buffer,
   iterations: number
 ): Promise<Buffer> {
+  // Password = UTF-8 bytes of the passphrase, NO normalization — identical
+  // to Python `passphrase.encode()`.
+  const pw = Buffer.from(passphrase, "utf8");
   return new Promise((resolve, reject) => {
-    pbkdf2(passphrase, salt, iterations, KEYLEN, DIGEST, (err, derived) => {
+    pbkdf2(pw, salt, iterations, KEYLEN, DIGEST, (err, derived) => {
       if (err) reject(err);
       else resolve(derived);
     });
   });
 }
 
-/** Hash a passphrase into the self-describing `pbkdf2$iter$salt$hash` string. */
+/**
+ * Produce a canonical `pbkdf2$iter$saltb64$hashb64` string.
+ *
+ * The web NEVER persists a danger-passphrase hash in production (the
+ * operator provisions it via the CLI). This helper exists ONLY so tests can
+ * synthesise a Python-format string to exercise the verify path. It still
+ * clamps iterations to the MIN_KDF_ITERATIONS floor so a test can never
+ * accidentally mint a sub-floor string that the verifier must reject.
+ */
 export async function hashPassphrase(passphrase: string): Promise<string> {
-  const iterations = kdfIterations();
-  const salt = randomBytes(16);
+  const iterations = kdfIterations(); // already clamped to the floor
+  const salt = randomBytes(SALTLEN);
   const derived = await pbkdf2Async(passphrase, salt, iterations);
+  // toString("base64") == RFC 4648 standard Base64 (`+/`, `=` padding) ==
+  // Python base64.b64encode(...).decode().
   return `pbkdf2$${iterations}$${salt.toString("base64")}$${derived.toString(
     "base64"
   )}`;
 }
 
 /**
- * Constant-time verify. Returns false (never throws) on any malformed stored
- * value so a corrupt row can never be confirmed by accident.
+ * Constant-time verify against a FROZEN canonical stored string. Returns
+ * false (never throws) on ANY malformed / downgraded stored value so a
+ * corrupt or sub-floor row can never be confirmed by accident:
+ *
+ *   - not exactly 4 `$`-fields, or field 0 != "pbkdf2"            -> false
+ *   - iterations not a finite integer, or < MIN_KDF_ITERATIONS    -> false
+ *     (the frozen iteration-floor rejection — tampered/downgraded)
+ *   - salt / hash not decodable standard Base64                   -> false
+ *   - decoded salt empty, or decoded hash != 32 bytes             -> false
+ *   - derived != stored                                           -> false
  */
 export async function verifyPassphrase(
   passphrase: string,
@@ -67,8 +116,14 @@ export async function verifyPassphrase(
   if (!stored) return false;
   const parts = stored.split("$");
   if (parts.length !== 4 || parts[0] !== "pbkdf2") return false;
+
   const iterations = Number.parseInt(parts[1], 10);
-  if (!Number.isFinite(iterations) || iterations < 1) return false;
+  if (!Number.isFinite(iterations) || !Number.isInteger(iterations)) {
+    return false;
+  }
+  // FROZEN iteration-floor rejection: reject any string whose embedded
+  // iteration count is below the MIN_KDF_ITERATIONS security floor.
+  if (iterations < MIN_KDF_ITERATIONS) return false;
 
   let salt: Buffer;
   let expected: Buffer;

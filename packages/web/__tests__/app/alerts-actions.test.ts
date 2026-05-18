@@ -9,14 +9,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  *  - subscribePush UPSERTs on the UNIQUE endpoint (insert ->
  *    onConflictDoUpdate) and rejects incomplete subscriptions.
  *  - createPendingAction inserts awaiting_confirm with a ~300s TTL.
- *  - confirmPendingAction: correct passphrase confirms, wrong rejects
- *    WITHOUT consuming the row, expired is rejected, and the stored hash is
- *    the self-describing pbkdf2$iter$salt$hash format + timing-safe.
+ *  - createPendingAction does NOT write confirm_passphrase_hash (NULL).
+ *  - confirmPendingAction: fail-closed when settings.danger_passphrase_hash
+ *    is unset; SERVER-SIDE 5s min-age gate vs created_at (not the client
+ *    countdown); verifies a Python-format pbkdf2$... hash (positive +
+ *    wrong-pass), rejects without consuming the row, expired rejected.
  *
- * Drizzle is fully mocked; crypto is real (fast at low iterations via env).
+ * Drizzle is fully mocked; crypto is real (clamped to the 100000 floor).
  */
 
-process.env.POLYECHO_KEY_KDF_ITERATIONS = "1000"; // keep tests fast
+process.env.POLYECHO_KEY_KDF_ITERATIONS = "100000"; // clamped floor; fast enough
 
 // Real schema table objects: used for insert-target identity in the mock
 // and to assert the events row goes to the `events` table.
@@ -50,9 +52,21 @@ const updateSet = vi.fn(() => ({ where: updateWhere }));
 const update = vi.fn(() => ({ set: updateSet }));
 
 // select(...).from(...).where(...).limit(...) | .orderBy(...)
+//
+// `selectResult` is the default single result. `selectQueue`, when
+// non-empty, is consumed one entry per `.limit()` call — used by
+// confirmPendingAction which does TWO selects (pending row, THEN the
+// settings.danger_passphrase_hash row).
 let selectResult: unknown[] = [];
-const limit = vi.fn(() => Promise.resolve(selectResult));
-const orderBy = vi.fn(() => Promise.resolve(selectResult));
+let selectQueue: unknown[][] | null = null;
+const nextSelect = () => {
+  if (selectQueue && selectQueue.length > 0) {
+    return Promise.resolve(selectQueue.shift() as unknown[]);
+  }
+  return Promise.resolve(selectResult);
+};
+const limit = vi.fn(() => nextSelect());
+const orderBy = vi.fn(() => nextSelect());
 const where = vi.fn(() => ({ limit, orderBy }));
 const from = vi.fn(() => ({ where }));
 const select = vi.fn(() => ({ from }));
@@ -90,6 +104,7 @@ beforeEach(() => {
   updateWhere.mockClear().mockResolvedValue(undefined);
   select.mockClear();
   selectResult = [];
+  selectQueue = null;
 });
 
 describe("getVapidPublicKey", () => {
@@ -161,6 +176,9 @@ describe("createPendingAction", () => {
     const exp = (row.expires_at as Date).getTime();
     expect(exp).toBeGreaterThanOrEqual(before + 299_000);
     expect(exp).toBeLessThanOrEqual(Date.now() + 301_000);
+    // P0-1: NO passphrase material is written — confirm_passphrase_hash
+    // must NOT be in the insert values (stays NULL, it is unused).
+    expect("confirm_passphrase_hash" in row).toBe(false);
   });
 
   it("rejects an unknown action type", async () => {
@@ -235,48 +253,125 @@ describe("createPendingAction", () => {
 
 describe("confirmPendingAction", () => {
   const future = () => new Date(Date.now() + 60_000);
+  // created_at old enough to clear the 5s server-side min-age gate.
+  const aged = () => new Date(Date.now() - 10_000);
+  const noStatusFlip = () =>
+    updateSet.mock.calls.filter(
+      (c) => (c[0] as Record<string, unknown>).status === "confirmed"
+    );
 
-  it("confirms with the correct passphrase and stores a self-describing hash", async () => {
-    // First select: the awaiting row with NO hash yet.
-    selectResult = [
-      {
-        id: "pa-1",
-        status: "awaiting_confirm",
-        expires_at: future(),
-        confirm_passphrase_hash: null,
-      },
+  it("FAILS CLOSED when settings.danger_passphrase_hash is unset", async () => {
+    selectQueue = [
+      // (1) pending row — aged, awaiting, not expired.
+      [
+        {
+          id: "pa-1",
+          status: "awaiting_confirm",
+          expires_at: future(),
+          created_at: aged(),
+        },
+      ],
+      // (2) settings.danger_passphrase_hash lookup -> NOT provisioned.
+      [],
+    ];
+    const res = await confirmPendingAction("pa-1", "anything");
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain("set-danger-passphrase");
+    // Never auto-provision, never flip status.
+    expect(noStatusFlip()).toHaveLength(0);
+  });
+
+  it("rejects within 5s of creation (SERVER-SIDE, not client countdown)", async () => {
+    selectQueue = [
+      [
+        {
+          id: "pa-1",
+          status: "awaiting_confirm",
+          expires_at: future(),
+          created_at: new Date(Date.now() - 1_000), // only 1s old
+        },
+      ],
+      // Hash IS provisioned — proving the rejection is the age gate, not
+      // fail-closed. The settings select should not even be the decider.
+      [{ value: "pbkdf2$100000$AAAA$AAAA" }],
+    ];
+    const res = await confirmPendingAction("pa-1", "whatever");
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/秒/);
+    expect(noStatusFlip()).toHaveLength(0);
+  });
+
+  it("verifies a Python-format pbkdf2 hash and flips to confirmed", async () => {
+    const { hashPassphrase } = await import("@/lib/passphrase");
+    const stored = await hashPassphrase("correct horse"); // canonical format
+    selectQueue = [
+      [
+        {
+          id: "pa-1",
+          status: "awaiting_confirm",
+          expires_at: future(),
+          created_at: aged(),
+        },
+      ],
+      // settings row — bare-string jsonb shape (operator-provisioned).
+      [{ value: stored }],
     ];
     const res = await confirmPendingAction("pa-1", "correct horse");
     expect(res.ok).toBe(true);
-    // update called twice: once to set the hash, once to set status=confirmed.
-    expect(update).toHaveBeenCalledTimes(2);
-    const hashSet = updateSet.mock.calls[0][0] as Record<string, string>;
-    expect(hashSet.confirm_passphrase_hash).toMatch(
-      /^pbkdf2\$\d+\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$/
-    );
-    const statusSet = updateSet.mock.calls[1][0] as Record<string, string>;
-    expect(statusSet.status).toBe("confirmed");
+    // Exactly ONE update: status -> confirmed. NO hash is ever written.
+    expect(update).toHaveBeenCalledTimes(1);
+    const set0 = updateSet.mock.calls[0][0] as Record<string, unknown>;
+    expect(set0.status).toBe("confirmed");
+    expect("confirm_passphrase_hash" in set0).toBe(false);
   });
 
-  it("rejects the wrong passphrase WITHOUT consuming the row", async () => {
-    // Pre-existing hash for passphrase "right".
+  it("rejects the WRONG passphrase WITHOUT consuming the row", async () => {
     const { hashPassphrase } = await import("@/lib/passphrase");
     const stored = await hashPassphrase("right");
-    selectResult = [
-      {
-        id: "pa-1",
-        status: "awaiting_confirm",
-        expires_at: future(),
-        confirm_passphrase_hash: stored,
-      },
+    selectQueue = [
+      [
+        {
+          id: "pa-1",
+          status: "awaiting_confirm",
+          expires_at: future(),
+          created_at: aged(),
+        },
+      ],
+      [{ value: stored }],
     ];
     const res = await confirmPendingAction("pa-1", "wrong");
     expect(res.ok).toBe(false);
-    // No status flip — the row is NOT consumed (TTL handles expiry).
-    const flips = updateSet.mock.calls.filter(
-      (c) => (c[0] as Record<string, unknown>).status === "confirmed"
+    expect(noStatusFlip()).toHaveLength(0);
+  });
+
+  it("rejects a stored hash whose iterations are below the 100000 floor", async () => {
+    const { pbkdf2Sync, randomBytes } = await import("node:crypto");
+    const salt = randomBytes(16);
+    const dk = pbkdf2Sync(
+      Buffer.from("pw", "utf8"),
+      salt,
+      99_999,
+      32,
+      "sha256"
     );
-    expect(flips).toHaveLength(0);
+    const tampered = `pbkdf2$99999$${salt.toString(
+      "base64"
+    )}$${dk.toString("base64")}`;
+    selectQueue = [
+      [
+        {
+          id: "pa-1",
+          status: "awaiting_confirm",
+          expires_at: future(),
+          created_at: aged(),
+        },
+      ],
+      [{ value: tampered }],
+    ];
+    // Even the correct passphrase must NOT confirm a sub-floor hash.
+    const res = await confirmPendingAction("pa-1", "pw");
+    expect(res.ok).toBe(false);
+    expect(noStatusFlip()).toHaveLength(0);
   });
 
   it("rejects an expired row", async () => {
@@ -285,7 +380,7 @@ describe("confirmPendingAction", () => {
         id: "pa-1",
         status: "awaiting_confirm",
         expires_at: new Date(Date.now() - 1000),
-        confirm_passphrase_hash: null,
+        created_at: aged(),
       },
     ];
     const res = await confirmPendingAction("pa-1", "x");
@@ -299,7 +394,7 @@ describe("confirmPendingAction", () => {
         id: "pa-1",
         status: "confirmed",
         expires_at: future(),
-        confirm_passphrase_hash: null,
+        created_at: aged(),
       },
     ];
     const res = await confirmPendingAction("pa-1", "x");

@@ -19,6 +19,15 @@ export const GLOBAL_PAUSED_KEY = "global_paused";
 /** §5.8 Web Push VAPID public key (base64url). Public — safe for the client. */
 export const VAPID_PUBLIC_KEY = "vapid_public_key";
 
+/**
+ * §5.7 危險操作二次確認 — the operator-provisioned danger-tier passphrase
+ * hash. Canonical FROZEN string `pbkdf2$<iters>$<b64salt>$<b64hash>` written
+ * ONLY by the Python CLI (`polyecho account set-danger-passphrase`). The web
+ * NEVER writes/derives this; it only READS it to verify a submitted
+ * passphrase. Absence = fail-closed (no auto-provision).
+ */
+export const DANGER_PASSPHRASE_HASH_KEY = "danger_passphrase_hash";
+
 export type RiskMode = "normal" | "conservative";
 
 /** Normalise stored jsonb (string | {value} | null) to a plain string. */
