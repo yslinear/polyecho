@@ -196,9 +196,16 @@ def replicability_score(
     burstiness_factor = _clamp(1.0 - burstiness, 0.0, 1.0)
 
     # 4. Time-overlap with follower's Asia/Taipei waking hours.
-    if active_hours:
-        overlap = len(set(active_hours) & _FOLLOWER_ACTIVE_HOURS_UTC)
-        time_overlap = overlap / len(active_hours)
+    # R10 I1: ``active_hours`` is a SET of distinct UTC hour-of-day
+    # buckets conceptually, but a caller may pass a non-deduplicated
+    # list (e.g. one entry per active day).  Using the raw ``len()`` as
+    # the denominator inflated it and deflated the score.  Deduplicate
+    # both the numerator set and the denominator so the ratio is the
+    # true fraction of distinct active hours that overlap.
+    active_hours_set = set(active_hours)
+    if active_hours_set:
+        overlap = len(active_hours_set & _FOLLOWER_ACTIVE_HOURS_UTC)
+        time_overlap = overlap / len(active_hours_set)
     else:
         time_overlap = 0.0
 

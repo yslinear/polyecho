@@ -137,35 +137,36 @@ def detect_risk_flags(
         if r.condition_id:
             redeem_times[r.condition_id].append(r.timestamp)
 
+    # R10 I3: count wins and total at the SAME granularity (per
+    # CONDITION).  The OLD code added ``near_res_total += 1`` per
+    # condition-with-near-res-buys but ``near_res_total += len(sells)``
+    # per SELL trade — a mixed per-condition / per-trade denominator that
+    # made ``near_res_wr`` meaningless and corrupted ``insider_suspect``.
+    # Now: each condition that had ANY near-resolution trade activity
+    # counts once toward the total; it counts as a "win" if it had a
+    # near-resolution BUY (proxy: a redeemed position the wallet held
+    # into resolution).  Conditions whose only near-resolution activity
+    # was a SELL count toward the total but NOT as a win.
     for cid, rtimes in redeem_times.items():
         # Earliest redeem timestamp as proxy for resolution
         resolution_ts = min(rtimes)
         window_start = resolution_ts - timedelta(hours=_INSIDER_NEAR_RESOLUTION_HOURS)
-        # Trades in the window before resolution
-        buys_in_window = [
-            r
-            for r in trades
-            if r.condition_id == cid
+        has_near_res_buy = any(
+            r.condition_id == cid
             and r.side == "BUY"
             and window_start <= r.timestamp <= resolution_ts
-        ]
-        if buys_in_window:
-            near_res_total += 1
-            near_res_wins += 1  # They redeemed = they won
-
-    # Also count SELL trades as potential losses in the near-res window
-    for cid in redeem_times:
-        resolution_ts = min(redeem_times[cid])
-        window_start = resolution_ts - timedelta(hours=_INSIDER_NEAR_RESOLUTION_HOURS)
-        sells_near_res = [
-            r
             for r in trades
-            if r.condition_id == cid
+        )
+        has_near_res_sell = any(
+            r.condition_id == cid
             and r.side == "SELL"
             and window_start <= r.timestamp <= resolution_ts
-        ]
-        if sells_near_res:
-            near_res_total += len(sells_near_res)
+            for r in trades
+        )
+        if has_near_res_buy or has_near_res_sell:
+            near_res_total += 1
+            if has_near_res_buy:
+                near_res_wins += 1  # held into resolution & redeemed = won
 
     near_res_wr = (
         near_res_wins / near_res_total if near_res_total > 0 else 0.0

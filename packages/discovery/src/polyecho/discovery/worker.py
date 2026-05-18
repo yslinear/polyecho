@@ -45,6 +45,8 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from polyecho.discovery._perf import (
     DISCOVERY_CYCLE_TARGET_SECONDS,
@@ -343,15 +345,29 @@ async def _upsert_candidate(
     Uses raw INSERT … ON CONFLICT for PostgreSQL; falls back to SELECT + add
     for SQLite (tests with in-memory DB).
 
-    Concurrency (P1-9c)
-    -------------------
-    The prior-score read, the upward-crossing decision, the row write AND
-    the CANDIDATE_HIGH_SCORE emit are all performed inside ONE transaction
-    while holding a ``SELECT … FOR UPDATE`` row lock on the candidate.
-    Two concurrent runs for the same wallet therefore serialise: the
-    second blocks on the locked row until the first commits, then re-reads
-    ``prev_score`` (now ≥ threshold) and does NOT re-emit.  The event fires
-    exactly once per upward crossing.  (On SQLite ``FOR UPDATE`` is a
+    Concurrency (P1-9c — R10 C1/C2 hardened)
+    ----------------------------------------
+    The prior-score read, the upward-crossing decision and BOTH row
+    writes happen inside ONE transaction while holding a
+    ``SELECT … FOR UPDATE`` row lock on the candidate.  Two concurrent
+    same-wallet runs serialise on that lock: the second blocks until the
+    first commits, then re-reads ``prev_score`` (now ≥ threshold) and the
+    upward crossing is False.
+
+    R10 C1 — the ``candidate_score_history`` row is written with a real
+    ``INSERT … ON CONFLICT (wallet_address, date) DO UPDATE`` (dialect-
+    aware: ``postgresql``/``sqlite``), so even if two same-wallet+same-UTC
+    -day runs were NOT serialised by the candidate lock (e.g. a brand-new
+    wallet where ``FOR UPDATE`` has no row to lock yet), the history write
+    is atomic at the DB and can never raise a duplicate-key error or
+    create a duplicate row.
+
+    R10 C2 — ``_safe_emit_high_score`` is NO LONGER awaited while the
+    txn + ``FOR UPDATE`` lock are held.  The *decision* (crossed_high) is
+    taken inside the locked txn; the emit is performed AFTER
+    ``session_scope`` exits/commits and the row lock is released, so a
+    NOTIFY/push hang can never hold the lock and stall every concurrent
+    same-wallet ``_process_wallet``.  (On SQLite ``FOR UPDATE`` is a
     no-op, which is fine — tests don't exercise true row contention.)
     """
     # P1-9a: key score-history by the UTC calendar day, NOT the server's
@@ -426,46 +442,74 @@ async def _upsert_candidate(
             if user_status == "rejected":
                 existing.user_status = "rejected"
 
-        # ── CandidateScoreHistory append/upsert ───────────────────────────────
-        hist_result = await session.execute(
-            select(CandidateScoreHistory).where(
-                CandidateScoreHistory.wallet_address == wallet,
-                CandidateScoreHistory.date == today,
-            )
+        # ── CandidateScoreHistory upsert — R10 C1 (atomic ON CONFLICT) ────────
+        # The OLD code did an UNLOCKED ``SELECT … then session.add(...)``:
+        # two concurrent same-wallet+same-UTC-day runs could both observe
+        # ``hist is None`` (the candidate FOR UPDATE lock does NOT cover a
+        # *different* table's row, and for a brand-new wallet there is no
+        # candidate row to lock at all) → duplicate-key error or a
+        # duplicate history row.  Fix: a real, dialect-aware
+        # ``INSERT … ON CONFLICT (wallet_address, date) DO UPDATE`` makes
+        # the write atomic at the database — exactly one row per
+        # (wallet, UTC day) regardless of concurrency.
+        hist_values = {
+            "wallet_address": wallet,
+            "date": today,
+            "total_score": f_score,
+            "stats": stats_30d,
+        }
+        dialect_name = (
+            session.bind.dialect.name if session.bind is not None else "postgresql"
         )
-        hist: CandidateScoreHistory | None = hist_result.scalar_one_or_none()
-        if hist is None:
-            session.add(
-                CandidateScoreHistory(
-                    wallet_address=wallet,
-                    date=today,
-                    total_score=f_score,
-                    stats=stats_30d,
+        if dialect_name == "sqlite":
+            sqlite_hist = sqlite_insert(CandidateScoreHistory).values(**hist_values)
+            await session.execute(
+                sqlite_hist.on_conflict_do_update(
+                    index_elements=["wallet_address", "date"],
+                    set_={
+                        "total_score": sqlite_hist.excluded.total_score,
+                        "stats": sqlite_hist.excluded.stats,
+                    },
                 )
             )
         else:
-            hist.total_score = f_score
-            hist.stats = stats_30d
-
-        # ── CANDIDATE_HIGH_SCORE emit — INSIDE the locked transaction ─────────
-        # P1-9c: emitting here (while the FOR UPDATE row lock is still
-        # held, BEFORE session_scope() commits) makes the
-        # read→decide→emit sequence atomic.  A concurrent same-wallet run
-        # is blocked on the row lock until this transaction commits; it
-        # then re-reads ``prev_score`` (now ≥ threshold) and the upward
-        # crossing is False, so the event fires EXACTLY ONCE per crossing.
-        # Once per UPWARD threshold crossing only, and never for an
-        # auto-rejected (insider-suspect) candidate.  ``_safe_emit_high_score``
-        # is best-effort: a NOTIFY hiccup is logged & swallowed and does
-        # NOT roll back the upsert (mirrors core's safe_emit discipline).
-        if crossed_high and user_status != "rejected":
-            await _safe_emit_high_score(
-                wallet=wallet,
-                display_name=display_name,
-                f_score=f_score,
-                p_score=p_score,
-                r_score=r_score,
+            pg_hist = pg_insert(CandidateScoreHistory).values(**hist_values)
+            await session.execute(
+                pg_hist.on_conflict_do_update(
+                    index_elements=["wallet_address", "date"],
+                    set_={
+                        "total_score": pg_hist.excluded.total_score,
+                        "stats": pg_hist.excluded.stats,
+                    },
+                )
             )
+
+        # R10 C2: decide the emit INSIDE the locked txn (atomic
+        # read→decide), but DO NOT await it here — emitting while the
+        # FOR UPDATE lock is held means a NOTIFY/push hang would pin the
+        # lock and stall every concurrent same-wallet _process_wallet.
+        # The actual emit happens AFTER session_scope() exits/commits and
+        # the row lock is released (see below).  Serialisation is still
+        # guaranteed: a concurrent same-wallet run blocks on the candidate
+        # FOR UPDATE row lock until THIS txn commits, then re-reads
+        # prev_score (now ≥ threshold) so crossed_high is False — the
+        # event still fires EXACTLY ONCE per upward crossing.
+        should_emit_high_score = crossed_high and user_status != "rejected"
+
+    # ── CANDIDATE_HIGH_SCORE emit — AFTER the txn commits & lock released ──
+    # R10 C2: the FOR UPDATE row lock is dropped the moment session_scope()
+    # exited above.  ``_safe_emit_high_score`` is best-effort (a NOTIFY
+    # hiccup is logged & swallowed); it can no longer hold the lock or
+    # block a concurrent same-wallet run no matter how long the push
+    # backend takes.
+    if should_emit_high_score:
+        await _safe_emit_high_score(
+            wallet=wallet,
+            display_name=display_name,
+            f_score=f_score,
+            p_score=p_score,
+            r_score=r_score,
+        )
 
     logger.info(
         "upserted candidate",
@@ -577,10 +621,16 @@ class DiscoveryWorker:
         now = datetime.now(tz=UTC)
         act_7d = _window_activity(all_activity, days=7, reference=now)
         act_30d = _window_activity(all_activity, days=30, reference=now)
+        # R10 I4: the 90d slice was passing RAW unwindowed activity while
+        # 7d/30d are _window_activity-sliced.  ``get_user_activity`` is
+        # bounded but a live source can still return >90d of history; an
+        # unsliced denominator understated ``trades_per_day`` for the 90d
+        # window.  Slice it the same way as 7d/30d for a consistent rate.
+        act_90d = _window_activity(all_activity, days=90, reference=now)
 
         stats_7d = _compute_stats(act_7d, window_days=7)
         stats_30d = _compute_stats(act_30d, window_days=30)
-        stats_90d = _compute_stats(all_activity, window_days=90)
+        stats_90d = _compute_stats(act_90d, window_days=90)
 
         freq_30d = compute_frequency_stats(act_30d, window_days=30)
         freq_7d = compute_frequency_stats(act_7d, window_days=7)

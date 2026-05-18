@@ -771,22 +771,33 @@ class TestScoreHistoryPersistence:
 
         from polyecho.discovery.frequency import StrategyType
         from polyecho.discovery.worker import _upsert_candidate
-        from polyecho.shared.models import CandidateScoreHistory
 
-        today = _dt.date.today()
+        # R10 I5: production keys history by ``datetime.now(tz=UTC).date()``
+        # (see worker._upsert_candidate ``today``).  The OLD test used the
+        # process-LOCAL ``date.today()`` which differs from the UTC date in
+        # a non-UTC CI runner near midnight → spurious failure.  Match
+        # production exactly: use the UTC calendar date.
+        today = _dt.datetime.now(tz=_dt.UTC).date()
+
+        executed: list[Any] = []
 
         async def _run() -> None:
             with patch("polyecho.discovery.worker.session_scope") as mock_scope:
                 mock_session = AsyncMock()
 
-                # First execute: CandidateLeader not found
-                # Second execute: CandidateScoreHistory not found
-                mock_session.execute = AsyncMock(
-                    side_effect=[
-                        MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
-                        MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
-                    ]
-                )
+                # R10 C1: the history row is now written via an atomic
+                # ``INSERT … ON CONFLICT (wallet_address, date) DO UPDATE``
+                # (``session.execute``), NOT ``session.add`` of an ORM
+                # object.  execute #1 = candidate SELECT … FOR UPDATE
+                # (no existing row); execute #2 = the history ON CONFLICT
+                # statement we capture & assert on.
+                async def _exec(stmt: Any) -> MagicMock:
+                    executed.append(stmt)
+                    return MagicMock(
+                        scalar_one_or_none=MagicMock(return_value=None)
+                    )
+
+                mock_session.execute = AsyncMock(side_effect=_exec)
                 mock_scope.return_value.__aenter__ = AsyncMock(return_value=mock_session)
                 mock_scope.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -821,13 +832,25 @@ class TestScoreHistoryPersistence:
                     last_active_at=None,
                 )
 
-                hist_rows = [obj for obj in added if isinstance(obj, CandidateScoreHistory)]
-                assert len(hist_rows) == 1
-                assert hist_rows[0].wallet_address == W_SWING
-                assert hist_rows[0].date == today
-                assert hist_rows[0].total_score == pytest.approx(32.5)
-
         asyncio.get_event_loop().run_until_complete(_run())
+
+        # No ORM CandidateScoreHistory object is added any more (R10 C1).
+        # Exactly two statements executed: candidate SELECT … FOR UPDATE,
+        # then the history INSERT … ON CONFLICT … DO UPDATE.
+        assert len(executed) == 2
+        hist_stmt = executed[1]
+        compiled = hist_stmt.compile()
+        upper = str(compiled).upper()
+        assert "INSERT INTO CANDIDATE_SCORE_HISTORY" in upper
+        assert "ON CONFLICT" in upper
+        assert "DO UPDATE" in upper
+        # The conflict target is the (wallet_address, date) composite PK.
+        assert "WALLET_ADDRESS" in upper and "DATE" in upper
+        # Bound parameters carry the exact values production keyed by.
+        params = compiled.params
+        assert params["wallet_address"] == W_SWING
+        assert params["date"] == today
+        assert params["total_score"] == pytest.approx(32.5)
 
 
 # ---------------------------------------------------------------------------
@@ -1066,19 +1089,28 @@ class TestRiskFlagBoundaries:
         assert "insider_suspect" in detect_risk_flags(stats, act, [])
 
     def test_insider_near_resolution_loss_suppresses_flag(self) -> None:
-        """LOCK-IN of intended conservative policy (riskflags docstring).
+        """LOCK-IN of the conservative policy under R10 I3 SYMMETRIC
+        per-condition near-resolution counting.
 
-        A near-resolution losing SELL on the same condition drags
-        near_res_wr below the 0.80 gate, so insider_suspect is *not*
-        raised.  insider_suspect triggers an irreversible auto-reject, so
-        the heuristic deliberately favours false negatives over false
-        positives.  This test documents and pins that behaviour.
+        R10 I3: ``near_res_wins`` and ``near_res_total`` are now both
+        counted per-CONDITION (the old code added wins per-condition but
+        total per-SELL-trade — a meaningless mixed-granularity ratio).
+        Under the corrected symmetric rule, a near-resolution losing SELL
+        on its OWN condition (no near-res BUY there) counts as a separate
+        non-win condition and drags ``near_res_wr`` below the 0.80 gate,
+        so insider_suspect is *not* raised.  insider_suspect triggers an
+        irreversible auto-reject, so the heuristic still deliberately
+        favours false negatives; this pins that behaviour under the
+        fixed, consistent denominator.
         """
         base = datetime(2026, 1, 1, tzinfo=UTC)
-        cond = "0xcond_ins2"
+        cond_win = "0xcond_ins2_win"
+        cond_loss = "0xcond_ins2_loss"
+        # Condition A: 5 near-resolution BUYs then a REDEEM → a "win"
+        # condition (held into resolution, redeemed).
         act: list[ActivityRecord] = [
             ActivityRecord(
-                wallet=W_INSIDER, activity_type="TRADE", condition_id=cond,
+                wallet=W_INSIDER, activity_type="TRADE", condition_id=cond_win,
                 side="BUY", size=2000.0, price=0.05, usdc_size=8000.0,
                 timestamp=base + timedelta(hours=i), raw={},
             )
@@ -1086,16 +1118,26 @@ class TestRiskFlagBoundaries:
         ]
         act.append(
             ActivityRecord(
-                wallet=W_INSIDER, activity_type="TRADE", condition_id=cond,
+                wallet=W_INSIDER, activity_type="REDEEM", condition_id=cond_win,
+                side=None, size=1e4, price=None, usdc_size=1e4,
+                timestamp=base + timedelta(hours=20), raw={},
+            )
+        )
+        # Condition B: only a near-resolution SELL (no BUY) before its
+        # own resolution → counts toward the total but NOT as a win, so
+        # near_res_wr = 1/2 = 0.5 < 0.80.
+        act.append(
+            ActivityRecord(
+                wallet=W_INSIDER, activity_type="TRADE", condition_id=cond_loss,
                 side="SELL", size=100.0, price=0.9, usdc_size=5000.0,
-                timestamp=base + timedelta(hours=18), raw={},
+                timestamp=base + timedelta(hours=30), raw={},
             )
         )
         act.append(
             ActivityRecord(
-                wallet=W_INSIDER, activity_type="REDEEM", condition_id=cond,
+                wallet=W_INSIDER, activity_type="REDEEM", condition_id=cond_loss,
                 side=None, size=1e4, price=None, usdc_size=1e4,
-                timestamp=base + timedelta(hours=20), raw={},
+                timestamp=base + timedelta(hours=40), raw={},
             )
         )
         stats = {
@@ -1711,13 +1753,13 @@ class TestP19aUtcDateKeying:
     def _capture_history_date(self, tz: str) -> Any:
         """Run _upsert_candidate under ``TZ=tz`` and return the date the
         CandidateScoreHistory row was created with."""
+        import datetime as _dt
         import os
         import time
 
         from polyecho.discovery.worker import _upsert_candidate
-        from polyecho.shared.models import CandidateScoreHistory as CSH
 
-        added: list[Any] = []
+        executed: list[Any] = []
         prev_tz = os.environ.get("TZ")
         os.environ["TZ"] = tz
         if hasattr(time, "tzset"):
@@ -1726,19 +1768,20 @@ class TestP19aUtcDateKeying:
             async def _run() -> None:
                 with patch("polyecho.discovery.worker.session_scope") as ms:
                     sess = AsyncMock()
-                    sess.execute = AsyncMock(
-                        side_effect=[
-                            MagicMock(
-                                scalar_one_or_none=MagicMock(return_value=None)
-                            ),
-                            MagicMock(
-                                scalar_one_or_none=MagicMock(return_value=None)
-                            ),
-                        ]
-                    )
+
+                    # R10 C1: the history row is written via an atomic
+                    # ON CONFLICT statement (execute #2), no longer
+                    # ``session.add``.  Capture the executed statements.
+                    async def _exec(stmt: Any) -> MagicMock:
+                        executed.append(stmt)
+                        return MagicMock(
+                            scalar_one_or_none=MagicMock(return_value=None)
+                        )
+
+                    sess.execute = AsyncMock(side_effect=_exec)
                     ms.return_value.__aenter__ = AsyncMock(return_value=sess)
                     ms.return_value.__aexit__ = AsyncMock(return_value=False)
-                    sess.add = lambda o: added.append(o)
+                    sess.add = MagicMock()
 
                     await _upsert_candidate(
                         W_SWING, "leaderboard", display_name="X",
@@ -1758,9 +1801,18 @@ class TestP19aUtcDateKeying:
             if hasattr(time, "tzset"):
                 time.tzset()
 
-        hist = [o for o in added if isinstance(o, CSH)]
-        assert hist, "no CandidateScoreHistory row was added"
-        return hist[0].date
+        # execute #1 = candidate SELECT … FOR UPDATE; execute #2 = the
+        # history INSERT … ON CONFLICT.  Pull the bound ``date`` value
+        # straight out of the history statement's parameters so the
+        # assertion checks the EXACT date production keyed the row by.
+        assert len(executed) == 2, "expected candidate SELECT + history upsert"
+        hist_stmt = executed[1]
+        params = hist_stmt.compile().params
+        hist_date = params["date"]
+        assert isinstance(hist_date, _dt.date), (
+            f"history date param is not a date: {hist_date!r}"
+        )
+        return hist_date
 
     def test_history_date_is_utc_under_non_utc_tz(self) -> None:
         # Pacific/Kiritimati is UTC+14: its local date can be a day AHEAD
@@ -2196,3 +2248,320 @@ class TestI7BurstinessDefinitionConsistent:
         # state it is a clipped coefficient of variation.
         assert "coefficient of variation" in doc.lower()
         assert "not" in doc.lower() and "goh" in doc.lower()
+
+
+# ===========================================================================
+# 20-agent review (R10) remediation — Wave E-discovery
+# ===========================================================================
+
+
+class TestR10I1TimeOverlapDedup:
+    """R10 I1 — ``time_overlap`` denominator must use DISTINCT active
+    hours.  A non-deduped ``active_hours`` list must NOT inflate the
+    denominator and deflate the replicability score.
+    """
+
+    def test_duplicate_active_hours_do_not_deflate_score(self) -> None:
+        # 4 distinct hours {0,1,2,3} all inside the follower window
+        # (00–14 UTC) → time_overlap must be 1.0 regardless of how many
+        # times each hour is repeated in the input list.
+        deduped = {
+            "median_gap_minutes": 60.0,
+            "burstiness": 0.0,
+            "active_hours_utc": [0, 1, 2, 3],
+            "concurrent_positions_avg": 1.0,
+        }
+        non_deduped = dict(deduped)
+        non_deduped["active_hours_utc"] = [0, 0, 0, 1, 1, 2, 2, 2, 2, 3]
+
+        s_dedup = replicability_score(deduped, follower_capital_usd=1000.0)
+        s_nondedup = replicability_score(non_deduped, follower_capital_usd=1000.0)
+
+        # Old code: 4/10 = 0.4 overlap → score deflated.  Fixed: both
+        # collapse to the 4 distinct hours → identical, non-deflated.
+        assert s_dedup == s_nondedup
+        assert s_dedup > 0.0
+
+    def test_partial_overlap_uses_distinct_denominator(self) -> None:
+        # Distinct hours {0, 1, 20, 21}: 2 of 4 inside the 00–14 window.
+        fs = {
+            "median_gap_minutes": 60.0,
+            "burstiness": 0.0,
+            "active_hours_utc": [0, 0, 1, 20, 20, 20, 21],
+            "concurrent_positions_avg": 1.0,
+        }
+        # freq=1.0, capital=1.0, burst=1.0, overlap=2/4=0.5 → 50.0
+        assert replicability_score(fs, 1000.0) == pytest.approx(50.0)
+
+
+class TestR10I3NearResolutionSymmetricCounting:
+    """R10 I3 — near-resolution win-rate must count wins and total at
+    the SAME granularity (per-condition).  The old code added wins
+    per-condition but total per-SELL-trade.
+    """
+
+    def test_multiple_near_res_sells_one_condition_count_once(self) -> None:
+        """Many losing SELLs on ONE condition must count that condition
+        ONCE toward the total (per-condition), not once per SELL trade
+        (which made the denominator explode and could never flag)."""
+        from polyecho.discovery import riskflags as rf
+
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        cond = "0xsym_cond"
+        # 5 near-resolution BUYs + REDEEM → exactly ONE win-condition,
+        # so near_res_total=1, near_res_wins=1 → wr = 1.0 ≥ 0.80.
+        act: list[ActivityRecord] = [
+            ActivityRecord(
+                wallet=W_INSIDER, activity_type="TRADE", condition_id=cond,
+                side="BUY", size=2000.0, price=0.05, usdc_size=8000.0,
+                timestamp=base + timedelta(hours=i), raw={},
+            )
+            for i in range(5)
+        ]
+        # 3 SELLs on the SAME condition in the near-res window.  Old
+        # code: near_res_total += 3 → wr = 1/4 = 0.25 (never flags).
+        # Fixed: same condition already counted; still 1/1 = 1.0.
+        for h in (15, 16, 17):
+            act.append(
+                ActivityRecord(
+                    wallet=W_INSIDER, activity_type="TRADE",
+                    condition_id=cond, side="SELL", size=10.0,
+                    price=0.9, usdc_size=6000.0,
+                    timestamp=base + timedelta(hours=h), raw={},
+                )
+            )
+        act.append(
+            ActivityRecord(
+                wallet=W_INSIDER, activity_type="REDEEM", condition_id=cond,
+                side=None, size=1e4, price=None, usdc_size=1e4,
+                timestamp=base + timedelta(hours=20), raw={},
+            )
+        )
+        stats = {
+            "pnl_usd": 5e4, "win_rate": 0.95,
+            "total_trades": 8, "trades_per_day": 1.0,
+        }
+        flags = rf.detect_risk_flags(stats, act, [])
+        # Symmetric per-condition: wr = 1/1 = 1.0 ≥ 0.80 → flagged.
+        assert "insider_suspect" in flags
+
+
+class TestR10I4NinetyDayWindowing:
+    """R10 I4 — the 90d stats must be computed on a 90d-WINDOWED slice,
+    not the raw unwindowed activity (which understates trades_per_day if
+    the datasource returns >90d).
+    """
+
+    def test_stats_90d_windowed_in_process_wallet(self) -> None:
+        from polyecho.discovery import worker as wk
+
+        captured: dict[str, Any] = {}
+
+        async def _fake_upsert(*a: Any, **kw: Any) -> None:
+            captured["stats_90d"] = kw["stats_90d"]
+            captured["stats_30d"] = kw["stats_30d"]
+
+        now = datetime.now(tz=UTC)
+        # 10 trades inside the last 90d + 40 trades 200 days ago (must be
+        # excluded from the 90d window).
+        recent = [
+            _make_record(side="BUY", usdc_size=100.0,
+                         ts=now - timedelta(days=d), condition_id=f"r{d}")
+            for d in range(10)
+        ]
+        ancient = [
+            _make_record(side="BUY", usdc_size=100.0,
+                         ts=now - timedelta(days=200 + d), condition_id=f"a{d}")
+            for d in range(40)
+        ]
+
+        class _DS:
+            async def get_user_activity(
+                self, w: str, *, activity_type: str, limit: Any = None,
+                start: Any = None,
+            ) -> list[ActivityRecord]:
+                if activity_type == "TRADE":
+                    return recent + ancient
+                return []
+
+            async def get_positions(
+                self, w: str, *, size_threshold: float = 0.0,
+            ) -> list[PositionRecord]:
+                return []
+
+        async def _run() -> None:
+            with patch.object(wk, "_upsert_candidate", _fake_upsert):
+                worker = DiscoveryWorker(_DS())  # type: ignore[arg-type]
+                await worker._process_wallet(W_SWING, "leaderboard")
+
+        asyncio.get_event_loop().run_until_complete(_run())
+
+        # Only the 10 recent trades fall inside the 90d window; the 40
+        # ancient ones must be excluded.  trades_per_day = 10/90.
+        assert captured["stats_90d"]["total_trades"] == 10
+        assert captured["stats_90d"]["trades_per_day"] == pytest.approx(
+            10 / 90, rel=1e-3
+        )
+
+
+class TestR10C1C2HistoryRaceAndLockRelease:
+    """R10 C1 — concurrent same-wallet+same-UTC-day runs must yield
+    EXACTLY ONE history row (atomic ON CONFLICT), and R10 C2 — the
+    CANDIDATE_HIGH_SCORE emit must happen AFTER the txn/lock is released.
+    """
+
+    _FS = FrequencyStats(
+        trades_per_day=2.0, active_days=25, median_gap_minutes=120.0,
+        avg_hold_hours=36.0, hold_to_resolution_pct=10.0,
+        concurrent_positions_avg=2.0, concurrent_positions_max=5,
+        burstiness=0.2, active_hours_utc=[0, 1, 2, 3],
+    )
+
+    def test_history_write_is_on_conflict_upsert(self) -> None:
+        """The history write must be a single INSERT … ON CONFLICT
+        (wallet_address, date) DO UPDATE — atomic under concurrency, no
+        unlocked SELECT-then-add."""
+        from polyecho.discovery.worker import _upsert_candidate
+
+        executed: list[Any] = []
+
+        async def _run() -> None:
+            with patch("polyecho.discovery.worker.session_scope") as ms:
+                sess = AsyncMock()
+
+                async def _exec(stmt: Any) -> MagicMock:
+                    executed.append(stmt)
+                    return MagicMock(
+                        scalar_one_or_none=MagicMock(return_value=None)
+                    )
+
+                sess.execute = AsyncMock(side_effect=_exec)
+                ms.return_value.__aenter__ = AsyncMock(return_value=sess)
+                ms.return_value.__aexit__ = AsyncMock(return_value=False)
+                sess.add = MagicMock()
+
+                await _upsert_candidate(
+                    W_SWING, "leaderboard", display_name="X",
+                    stats_7d={}, stats_30d={"pnl_usd": 1.0}, stats_90d={},
+                    freq_stats_30d=self._FS,
+                    strategy_type=StrategyType.SWING,
+                    p_score=10.0, r_score=10.0, f_score=5.0,
+                    risk_flags=[], last_active_at=None,
+                )
+
+        asyncio.get_event_loop().run_until_complete(_run())
+
+        # No ORM row added for history; it is an executed ON CONFLICT.
+        assert len(executed) == 2
+        compiled = str(executed[1].compile()).upper()
+        assert "ON CONFLICT" in compiled
+        assert "DO UPDATE" in compiled
+        assert "CANDIDATE_SCORE_HISTORY" in compiled
+
+    def test_concurrent_same_wallet_one_history_upsert_one_emit(self) -> None:
+        """Two concurrent same-wallet runs crossing the threshold: the
+        history upsert is idempotent (ON CONFLICT, so no dup-key even
+        without serialisation) AND the emit fires exactly once AND every
+        emit happens strictly AFTER its txn's lock was released."""
+        from polyecho.discovery import worker as worker_mod
+        from polyecho.discovery.worker import _upsert_candidate
+
+        row_lock = asyncio.Lock()
+        shared: dict[str, Any] = {"total_score": None}
+        emit_spy = AsyncMock()
+        # Records, in order, events: ("lock"/"unlock"/"emit").
+        timeline: list[str] = []
+        hist_upserts = {"n": 0}
+
+        async def _spy_emit(**_kw: Any) -> None:
+            timeline.append("emit")
+
+        def _fake_scope() -> Any:
+            cm = MagicMock()
+            sess = AsyncMock()
+            state = {"calls": 0, "locked": False}
+
+            async def _execute(stmt: Any) -> MagicMock:
+                state["calls"] += 1
+                if state["calls"] == 1:
+                    await row_lock.acquire()
+                    state["locked"] = True
+                    timeline.append("lock")
+                    score = shared["total_score"]
+                    existing = None
+                    if score is not None:
+                        existing = MagicMock()
+                        existing.sources = ["leaderboard"]
+                        existing.user_status = "new"
+                        existing.total_score = score
+                        existing.first_discovered_at = object()
+                    return MagicMock(
+                        scalar_one_or_none=MagicMock(return_value=existing)
+                    )
+                # Second execute = history ON CONFLICT upsert (idempotent
+                # — count it; it never raises a dup-key by construction).
+                hist_upserts["n"] += 1
+                return MagicMock(
+                    scalar_one_or_none=MagicMock(return_value=None)
+                )
+
+            def _add(obj: Any) -> None:
+                if type(obj).__name__ == "CandidateLeader":
+                    ts = getattr(obj, "total_score", None)
+                    if ts is not None:
+                        shared["total_score"] = float(ts)
+
+            sess.execute = AsyncMock(side_effect=_execute)
+            sess.add = _add
+
+            async def _aexit(*_a: Any) -> bool:
+                if state["locked"]:
+                    timeline.append("unlock")
+                    row_lock.release()
+                    state["locked"] = False
+                return False
+
+            cm.__aenter__ = AsyncMock(return_value=sess)
+            cm.__aexit__ = AsyncMock(side_effect=_aexit)
+            return cm
+
+        async def _one() -> None:
+            await _upsert_candidate(
+                W_SWING, "leaderboard", display_name="Swing",
+                stats_7d={}, stats_30d={"pnl_usd": 1.0}, stats_90d={},
+                freq_stats_30d=self._FS,
+                strategy_type=StrategyType.SWING,
+                p_score=90.0, r_score=80.0, f_score=85.0,  # crosses 70
+                risk_flags=[], last_active_at=None,
+            )
+
+        async def _run() -> None:
+            with (
+                patch.object(worker_mod, "session_scope", _fake_scope),
+                patch.object(
+                    worker_mod, "_safe_emit_high_score", _spy_emit
+                ),
+                patch.object(worker_mod, "emit_event", emit_spy),
+            ):
+                await asyncio.gather(_one(), _one())
+
+        asyncio.get_event_loop().run_until_complete(_run())
+
+        # Two runs → two idempotent history upserts (ON CONFLICT makes a
+        # duplicate a no-op UPDATE, never a dup-key error or dup row).
+        assert hist_upserts["n"] == 2
+        # Exactly one emit (second run sees prev_score ≥ threshold).
+        assert timeline.count("emit") == 1
+        # R10 C2: every emit must come strictly AFTER an unlock — never
+        # while a FOR UPDATE lock is held.  No "emit" may appear between
+        # a "lock" and its matching "unlock".
+        held = 0
+        for ev in timeline:
+            if ev == "lock":
+                held += 1
+            elif ev == "unlock":
+                held -= 1
+            elif ev == "emit":
+                assert held == 0, (
+                    f"emit happened while a row lock was held: {timeline}"
+                )
