@@ -7,10 +7,15 @@ Key design decisions
 --------------------
 * **JSON output** — every line is machine-parseable; works with journald,
   ``jq``, Loki, or any log aggregator.
-* **Secret redaction** — any log key whose name contains ``private_key``,
-  ``secret``, ``passphrase``, or ``signature`` has its value replaced with
-  ``"[REDACTED]"`` before the log line is emitted.  This is a defence-in-depth
-  measure in case a caller accidentally passes a sensitive value.
+* **Secret redaction** — a log key is redacted when its *name* matches the
+  secret pattern (``private_key``, ``secret``, ``passphrase``, ``password``,
+  ``api_key``, ``access_token`` / ``…_token``, a cryptographic ``signature``
+  / ``…_signature`` — but **NOT** ``signature_type``, which is a small EVM
+  enum int, never a secret), OR when a string *value* looks like a known
+  secret material (``BEGIN … PRIVATE KEY`` PEM blocks).  The matched value
+  is replaced with ``"[REDACTED]"`` before the line is emitted.  The pattern
+  is deliberately tight — over-redaction (e.g. nuking ``signature_type``)
+  loses operationally-useful, non-sensitive fields.
 * **Standard-library bridge** — ``logging.basicConfig`` is configured so that
   third-party libraries that use the stdlib ``logging`` module are also
   captured and formatted by structlog.
@@ -36,9 +41,34 @@ from typing import Any
 import structlog
 
 # Keys whose *values* must never appear in emitted logs.
+#
+# Tightened so ``signature_type`` (a 0–3 EVM signature-mode enum int, not a
+# secret) is NOT redacted while a real cryptographic ``signature`` /
+# ``…_signature`` / ``signature_hash`` still is.  Each alternative is
+# anchored to a word boundary; the ``signature`` alternative uses a
+# negative-lookahead so ``signature`` / ``order_signature`` redact but
+# ``signature_type`` (and ``signature_types``) do not.
 _REDACT_PATTERN: re.Pattern[str] = re.compile(
-    r"private_key|secret|passphrase|signature",
-    re.IGNORECASE,
+    r"""
+    (?:^|_)                       # start, or a word part after '_'
+    (?:
+        private_key
+      | secret
+      | passphrase
+      | password
+      | api_key
+      | (?:access_|refresh_|auth_|bearer_)?token
+      | signature(?!_type)        # 'signature' but NOT 'signature_type'
+    )
+    (?:$|_)                       # end, or continues with '_'
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# Best-effort *value* redaction: a string value carrying obvious secret
+# material (a PEM private-key block) is redacted regardless of its key name.
+_SECRET_VALUE_PATTERN: re.Pattern[str] = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
 )
 
 _REDACTED_PLACEHOLDER = "[REDACTED]"
@@ -51,11 +81,20 @@ def _redact_secrets(
 ) -> dict[str, Any]:
     """structlog processor that redacts sensitive key-value pairs.
 
-    Any key matching the ``_REDACT_PATTERN`` regex has its value replaced with
-    ``"[REDACTED]"``.  The ``event`` field itself is never redacted.
+    A value is replaced with ``"[REDACTED]"`` when **either** its key name
+    matches :data:`_REDACT_PATTERN` (e.g. ``private_key``, ``passphrase``,
+    ``…_signature`` — but *not* ``signature_type``) **or** the value is a
+    string carrying obvious secret material (a PEM ``PRIVATE KEY`` block,
+    via :data:`_SECRET_VALUE_PATTERN`).  The ``event`` field is never
+    redacted (it is the human log message, not a data field).
     """
     for key in list(event_dict.keys()):
-        if key != "event" and _REDACT_PATTERN.search(key):
+        if key == "event":
+            continue
+        value = event_dict[key]
+        if _REDACT_PATTERN.search(key) or (
+            isinstance(value, str) and _SECRET_VALUE_PATTERN.search(value)
+        ):
             event_dict[key] = _REDACTED_PLACEHOLDER
     return event_dict
 

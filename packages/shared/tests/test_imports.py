@@ -125,7 +125,16 @@ class TestSettings:
         get_settings.cache_clear()
         settings = get_settings()
 
-        assert settings.db_url == "postgresql+asyncpg://u:p@localhost/test"
+        # db_url / db_url_drizzle are SecretStr (DSN holds the password):
+        # the cleartext is only available via .get_secret_value(), and the
+        # secret must never appear in repr()/str() (never-logged contract).
+        assert (
+            settings.db_url.get_secret_value()
+            == "postgresql+asyncpg://u:p@localhost/test"
+        )
+        assert "u:p@localhost" not in repr(settings.db_url)
+        assert "u:p@localhost" not in str(settings.db_url)
+        assert "u:p@localhost" not in repr(settings)
         # P0-7: env asks for 1000 but Settings clamps UP to the OWASP
         # floor MIN_KDF_ITERATIONS (100_000) — a too-low value is never
         # honoured for key derivation.

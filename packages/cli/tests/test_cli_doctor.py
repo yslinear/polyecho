@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from pydantic import SecretStr
 from typer.testing import CliRunner
 
 import polyecho.cli.doctor as doctor_mod
@@ -37,7 +38,7 @@ class TestCheckConfig:
     def test_config_ok(self) -> None:
         """Settings load + all required URLs present -> ok=True."""
         fake_settings = MagicMock()
-        fake_settings.db_url = "postgresql+asyncpg://u:p@h:5432/db"
+        fake_settings.db_url = SecretStr("postgresql+asyncpg://u:p@h:5432/db")
         fake_settings.polymarket_clob_url = "https://clob.example"
         fake_settings.polymarket_data_api_url = "https://data.example"
         fake_settings.log_level = "INFO"
@@ -53,7 +54,7 @@ class TestCheckConfig:
     def test_config_missing_env_vars(self) -> None:
         """Empty required URLs -> ok=False and the var names are listed."""
         fake_settings = MagicMock()
-        fake_settings.db_url = ""
+        fake_settings.db_url = SecretStr("")
         fake_settings.polymarket_clob_url = ""
         fake_settings.polymarket_data_api_url = ""
         fake_settings.log_level = "INFO"

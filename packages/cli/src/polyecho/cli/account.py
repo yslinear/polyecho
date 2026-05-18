@@ -481,7 +481,9 @@ def balance(
 
     name_lower = name.lower()
 
-    async def _load() -> tuple[str, str | None, int] | None:
+    # signature_type is NULLable on the accounts model (3-way schema
+    # alignment: 0000_init.sql has no NOT NULL) → int | None here.
+    async def _load() -> tuple[str, str | None, int | None] | None:
         async with session_scope() as session:
             row = (
                 await session.execute(

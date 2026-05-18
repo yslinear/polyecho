@@ -73,7 +73,9 @@ def _check_config() -> _CheckResult:
 
     missing: list[str] = []
 
-    if not settings.db_url:
+    # db_url is a SecretStr (DSN holds the password) — unwrap to inspect.
+    db_url_value = settings.db_url.get_secret_value()
+    if not db_url_value:
         missing.append("POLYECHO_DB_URL")
     if not settings.polymarket_clob_url:
         missing.append("POLYECHO_POLYMARKET_CLOB_URL")
@@ -91,7 +93,7 @@ def _check_config() -> _CheckResult:
         "Config",
         ok=True,
         detail=(
-            f"DB driver={settings.db_url.split('+')[1].split('://')[0]}  "
+            f"DB driver={db_url_value.split('+')[1].split('://')[0]}  "
             f"log_level={settings.log_level}"
         ),
     )

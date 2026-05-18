@@ -11,7 +11,7 @@ Usage::
     from polyecho.shared.config import get_settings
 
     settings = get_settings()          # cached singleton
-    engine = create_async_engine(settings.db_url)
+    engine = create_async_engine(settings.db_url.get_secret_value())
 """
 
 from __future__ import annotations
@@ -53,13 +53,22 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Database
     # ------------------------------------------------------------------
-    db_url: str = Field(
-        default="postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho",
-        description="Async SQLAlchemy DB URL (asyncpg driver).",
+    # SecretStr: the DSN embeds the DB password, so it must never be logged
+    # or repr'd in clear. Read the value via ``.get_secret_value()``.
+    db_url: SecretStr = Field(
+        default=SecretStr(
+            "postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho"
+        ),
+        description="Async SQLAlchemy DB URL (asyncpg driver). Secret (DSN holds the password).",
     )
-    db_url_drizzle: str = Field(
-        default="postgresql://polyecho:polyecho@localhost:5432/polyecho",
-        description="Synchronous Postgres URL used by Drizzle ORM in the Next.js web package.",
+    db_url_drizzle: SecretStr = Field(
+        default=SecretStr(
+            "postgresql://polyecho:polyecho@localhost:5432/polyecho"
+        ),
+        description=(
+            "Synchronous Postgres URL used by Drizzle ORM in the Next.js web "
+            "package. Secret (DSN holds the password)."
+        ),
     )
 
     # ------------------------------------------------------------------

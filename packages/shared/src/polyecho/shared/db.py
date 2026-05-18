@@ -77,7 +77,7 @@ def get_engine() -> AsyncEngine:
     if _engine is None:
         settings = get_settings()
         _engine = create_async_engine(
-            settings.db_url,
+            settings.db_url.get_secret_value(),
             echo=False,
             pool_pre_ping=True,
             # pool_size / max_overflow tuning can be added per-service later.
@@ -149,21 +149,35 @@ async def session_scope() -> AsyncGenerator[AsyncSession, None]:
 # callers), so this uses a **dedicated** ``asyncpg`` connection created
 # *outside* the SQLAlchemy engine, exactly as PRD §4.1 prescribes.
 
+#: Upper bound on the in-memory NOTIFY buffer for :func:`pg_listen_iter`.
+#: Picked so a healthy burst is absorbed without an unbounded-growth memory
+#: risk if a consumer stalls; on overflow the OLDEST queued notification is
+#: dropped (with a structured warning) — see ``_on_notify`` for the rationale.
+_LISTEN_QUEUE_MAXSIZE = 1000
+
 
 def _asyncpg_dsn(db_url: str | None = None) -> str:
     """Return a libpq DSN usable by ``asyncpg.connect``.
 
-    ``Settings.db_url`` is a SQLAlchemy URL (``postgresql+asyncpg://…``).
-    asyncpg wants a plain ``postgresql://…`` DSN, so the ``+asyncpg`` (or any
-    other ``+driver``) suffix on the scheme is stripped.
+    ``Settings.db_url`` is a SQLAlchemy URL (``postgresql+asyncpg://…``)
+    wrapped in a :class:`~pydantic.SecretStr`; its value is unwrapped via
+    ``.get_secret_value()`` here (the single place the cleartext DSN is
+    materialised for asyncpg).  asyncpg wants a plain ``postgresql://…``
+    DSN, so the ``+asyncpg`` (or any other ``+driver``) suffix on the
+    scheme is stripped.
 
     Args:
-        db_url: Override URL; defaults to ``get_settings().db_url``.
+        db_url: Override URL (plain ``str``); defaults to the secret value
+            of ``get_settings().db_url``.
 
     Returns:
         A ``postgresql://…`` DSN string.
     """
-    url = db_url if db_url is not None else get_settings().db_url
+    url = (
+        db_url
+        if db_url is not None
+        else get_settings().db_url.get_secret_value()
+    )
     scheme, sep, rest = url.partition("://")
     if sep and "+" in scheme:
         scheme = scheme.split("+", 1)[0]
@@ -227,14 +241,40 @@ async def pg_listen_iter(
         An ``AsyncGenerator[Notification, None]``.
     """
     conn = await _connect_asyncpg(_asyncpg_dsn(db_url))
-    queue: asyncio.Queue[Notification] = asyncio.Queue()
+    # Bounded so a slow / stalled consumer cannot grow the queue without
+    # limit (unbounded asyncio.Queue → memory blow-up under a NOTIFY
+    # storm). 1000 buffers a healthy burst while capping worst-case memory.
+    queue: asyncio.Queue[Notification] = asyncio.Queue(
+        maxsize=_LISTEN_QUEUE_MAXSIZE
+    )
 
     def _on_notify(
         _conn: object, pid: int, chan: str, payload: str
     ) -> None:
-        # asyncpg invokes this from the connection's read loop; only a
-        # non-blocking put_nowait is safe here.
-        queue.put_nowait(Notification(pid=pid, channel=chan, payload=payload))
+        # asyncpg invokes this from the connection's single read loop, so
+        # this MUST be non-blocking — awaiting/blocking here would stall
+        # the whole connection (incl. its termination detection). On
+        # overflow we therefore DROP THE OLDEST notification (never block):
+        # NOTIFY is an *advisory* wake-up, and every consumer re-reconciles
+        # from its durable cursor (follow_relations.last_seen_ts, brief §7),
+        # so a dropped wake-up is recovered on the next real one — losing
+        # the newest (blocking) or stalling the socket would be worse.
+        note = Notification(pid=pid, channel=chan, payload=payload)
+        try:
+            queue.put_nowait(note)
+        except asyncio.QueueFull:
+            with contextlib.suppress(asyncio.QueueEmpty):
+                dropped = queue.get_nowait()
+                logger.warning(
+                    "pg_listen_queue_overflow_dropped_oldest",
+                    extra={
+                        "channel": chan,
+                        "maxsize": _LISTEN_QUEUE_MAXSIZE,
+                        "dropped_pid": dropped.pid,
+                    },
+                )
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(note)
 
     async def _stream() -> AsyncGenerator[Notification, None]:
         while True:
