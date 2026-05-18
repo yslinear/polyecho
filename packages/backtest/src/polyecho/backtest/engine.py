@@ -563,7 +563,25 @@ class BacktestEngine:
             # Charged on BOTH legs: the BUY open consumes extra capital, the
             # SELL close deducts from realised PnL.  A pure cost — never
             # improves PnL — so high fee_bps must monotonically reduce return.
-            fee_usd = compute_fee(copy_usdc, params.fee_bps)
+            #
+            # CRIT-2: the *fee notional* must stay consistent with the shares
+            # actually transacted on this leg.  For a BUY this is ``copy_usdc``
+            # (the opened notional).  For a SELL the gross PnL below is based on
+            # ``min(copy_shares, entry_shares)`` against the position's stored
+            # entry — i.e. at most the position's BUY notional.  Computing the
+            # SELL-leg fee on the freshly-recomputed SELL-side ``copy_usdc``
+            # (which is the leader's SELL notional × ratio and may exceed or
+            # undershoot the BUY notional on a partial close) made the fee
+            # inconsistent with the entry/shares.  The SELL-leg fee is
+            # therefore charged on the *stored* BUY notional, bounded by the
+            # SELL-side notional so a genuine partial close (leader SELL <
+            # leader BUY) is fee-charged only on the portion actually closed.
+            if side == "SELL" and cond_id in open_positions:
+                _stored_usdc = float(open_positions[cond_id]["copy_usdc"])
+                fee_notional = min(copy_usdc, _stored_usdc)
+            else:
+                fee_notional = copy_usdc
+            fee_usd = compute_fee(fee_notional, params.fee_bps)
 
             # ---- Capital check (only BUY consumes capital) -----------------
             if side == "BUY":
@@ -599,7 +617,16 @@ class BacktestEngine:
                 # the true cost of the round-trip.
                 gross_pnl = min(copy_shares, entry_shares) * (fill_price - entry_price)
                 pnl_usd = gross_pnl - fee_usd
-                capital_remaining += copy_usdc + pnl_usd
+                # CRIT-1: the *principal returned to capital* is the notional
+                # that was actually committed at BUY time — ``pos["copy_usdc"]``
+                # stored on the open position — NOT the freshly-recomputed
+                # SELL-side ``copy_usdc`` (= leader SELL notional × ratio).
+                # When the leader's SELL notional ≠ their BUY notional (a
+                # partial close, or simply a different SELL price) the SELL-side
+                # ``copy_usdc`` is the wrong principal and silently mis-states
+                # capital_remaining for the rest of the run.  Return the stored
+                # BUY notional plus this round-trip's net PnL.
+                capital_remaining += float(pos["copy_usdc"]) + pnl_usd
                 closed_at = trade.timestamp
 
                 # Update daily loss tracking (loss = negative pnl)
@@ -615,6 +642,20 @@ class BacktestEngine:
                 # Open new position. The BUY-leg fee is *already* deducted
                 # from capital_remaining above; recording it on the trade-log
                 # entry keeps total_fees_usd a faithful both-legs total.
+                #
+                # IMP-1: the BUY-leg fee is a *realised* capital outflow the
+                # moment the position opens, but ``_build_pnl_curve`` skips
+                # every entry whose ``pnl_usd == 0.0`` (and a freshly-opened
+                # BUY otherwise has pnl_usd == 0.0).  A BUY that is opened but
+                # never closed/MTM'd in-window therefore leaked its fee out of
+                # ``total_return_usd`` (return overstated by the BUY fee).
+                # Record the BUY fee as *negative PnL on the BUY entry* so the
+                # cumulative curve reflects the true capital change on the BUY
+                # date.  If/when the position is later closed by a SELL, only
+                # the SELL-leg fee is charged again — the round-trip's gross
+                # PnL is independent of this entry, so there is no double count
+                # (BUY fee here, SELL fee on the SELL entry).
+                pnl_usd = -fee_usd
                 open_positions[cond_id] = {
                     "shares": copy_shares,
                     "fill_price": fill_price,
@@ -1087,10 +1128,17 @@ class BacktestEngine:
         # Max drawdown
         max_dd = compute_max_drawdown(list(pnl_curve.values))
 
-        # Win rate: fraction of closed trades with positive PnL
+        # Win rate: fraction of *realised closed* trades with positive PnL.
+        # IMP-2: a SELL is a genuine realised round-trip; an MTM entry is an
+        # *unrealised* end-of-period mark.  Including MTM rows inflated the
+        # denominator (every still-open position counted as a "trade"),
+        # diluting / distorting win_rate.  Restrict the population to SELL
+        # only — BUY entries (now carrying ``-fee_usd`` PnL, IMP-1) and MTM
+        # entries are both excluded so win_rate reflects only realised
+        # closing trades.
         closed = [
             e for e in trade_log
-            if not e.get("skipped") and e.get("side") not in (None, "BUY")
+            if not e.get("skipped") and e.get("side") == "SELL"
             and e.get("pnl_usd") is not None
         ]
         if closed:

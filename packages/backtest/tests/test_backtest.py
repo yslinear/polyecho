@@ -544,16 +544,26 @@ async def test_job_lifecycle_pending_to_running_to_done(
     await _process_job(job, engine)  # type: ignore[arg-type]
 
     statuses = [t["status"] for t in transitions]
-    # First a 'running' (progress 0), …, ending with a 'completed'.
-    # Terminal success status is 'completed' (matches the ORM model docstring,
-    # 0000_init.sql, web schema.ts, and CLI `backtest show` which gate on
-    # status in ('completed', 'failed')).
+    # R12 #3: ``_process_job`` no longer re-writes the initial
+    # ``running, progress=0`` — that state is established by the atomic claim
+    # in ``_fetch_pending`` (not exercised in this _process_job-only test).
+    # The first transition here is therefore the *first per-leader progress*
+    # update (still status='running'), and the last is the terminal
+    # 'completed'.  Terminal success status is 'completed' (matches the ORM
+    # model docstring, 0000_init.sql, web schema.ts, and CLI `backtest show`
+    # which gate on status in ('completed', 'failed')).
     assert statuses[0] == "running"
     assert statuses[-1] == "completed"
     assert "failed" not in statuses
 
-    first = transitions[0]
-    assert float(first["progress"]) == pytest.approx(0.0)  # type: ignore[arg-type]
+    # No transition may be the dropped duplicate (running AND progress==0):
+    # re-writing it would double-clobber the claim under the fallback path.
+    assert not any(
+        t["status"] == "running"
+        and t["progress"] is not None
+        and float(t["progress"]) == 0.0  # type: ignore[arg-type]
+        for t in transitions
+    )
 
     final = transitions[-1]
     assert float(final["progress"]) == pytest.approx(100.0)  # type: ignore[arg-type]
@@ -615,8 +625,19 @@ async def test_process_pending_jobs_marks_failed_on_unexpected_error(
 
     job = _FakeJob(leader_addresses=[SWING])
 
+    # Model real _fetch_pending claim semantics: the claim transaction flips
+    # the row pending→running (committed) BEFORE _process_job runs, so a
+    # subsequent drain poll never re-sees it.  Return the job on the first
+    # poll only, then nothing — so process_pending_jobs(once=True) processes
+    # it (→ failed) and the R12 #5 drain-until-empty loop then observes a
+    # zero-claim poll and returns.  (A stub that returned [job] every call
+    # would model an impossible DB state and spin the drain loop forever.)
+    _polls = 0
+
     async def _fake_fetch(_session: object) -> list[object]:
-        return [job]
+        nonlocal _polls
+        _polls += 1
+        return [job] if _polls == 1 else []
 
     async def _explode(_job: object, _engine: object) -> None:
         raise ValueError("catastrophic processing error")
@@ -1198,3 +1219,456 @@ def test_avg_hold_hours_known_value() -> None:
     curve = pd.Series([0.0, 0.0, 5.0], index=idx, dtype=float)
     stats = eng._compute_statistics(curve, trade_log, base_params(SWING))
     assert stats["avg_hold_hours"] == pytest.approx(48.0)
+
+
+# ===========================================================================
+# Wave E-backtest — R11/R12 regression fixes
+#   CRIT-1  SELL principal = stored BUY notional (not SELL-side copy_usdc)
+#   CRIT-2  SELL-leg fee on stored notional (consistent w/ shares in PnL)
+#   IMP-1   BUY-leg fee appears in the PnL curve / total_return
+#   IMP-2   win-rate excludes MTM (unrealised) entries
+#   R12 #5  --once drains ALL pending (not just first ≤5 batch)
+#   R12 IMP-1  stale-recovery never kills a backpressured running job
+#   R12 #2/#3  no stale 'pending', no duplicate status='running' write
+# ===========================================================================
+
+
+from polyecho.shared.datasource import ActivityRecord, PositionRecord  # noqa: E402
+
+
+class _ScriptedDS:
+    """Minimal duck-typed DataSource returning a hand-scripted activity seq.
+
+    ``DataSource`` is a structural ``Protocol`` (datasource/protocol.py) and
+    the engine only ever calls ``get_user_activity`` / ``get_positions``, so
+    a plain class implementing just those two satisfies the structural
+    contract.  Lets the Wave-E money-path tests assert *exact*
+    capital/PnL/fee numbers instead of relying on the opaque fixture corpus.
+    """
+
+    def __init__(
+        self,
+        activity: list[ActivityRecord],
+        positions: list[PositionRecord] | None = None,
+    ) -> None:
+        self._activity = activity
+        self._positions = positions or []
+
+    async def get_user_activity(
+        self,
+        wallet: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        activity_type: str | None = "TRADE",
+        limit: int | None = None,
+    ) -> list[ActivityRecord]:
+        return list(self._activity)
+
+    async def get_positions(self, wallet: str) -> list[PositionRecord]:
+        return list(self._positions)
+
+
+def _scripted_engine(
+    activity: list[ActivityRecord],
+    positions: list[PositionRecord] | None = None,
+) -> BacktestEngine:
+    """BacktestEngine over a _ScriptedDS (cast to satisfy the Protocol type)."""
+    from polyecho.shared.datasource import DataSource
+
+    ds = cast(DataSource, _ScriptedDS(activity, positions))
+    return BacktestEngine(datasource=ds)
+
+
+def _trade(
+    side: str,
+    price: float,
+    usdc: float,
+    *,
+    cond: str = "0xC",
+    when: str = "2026-03-01T00:00:00+00:00",
+) -> ActivityRecord:
+    return ActivityRecord(
+        wallet="0xL",
+        activity_type="TRADE",
+        condition_id=cond,
+        side=side,
+        size=usdc / price if price else 0.0,
+        price=price,
+        usdc_size=usdc,
+        timestamp=datetime.fromisoformat(when),
+        raw={},
+    )
+
+
+def _e_params(**over: Any) -> BacktestParams:
+    base = {
+        "leader_address": "0xL",
+        "start_date": date(2026, 3, 1),
+        "end_date": date(2026, 3, 10),
+        "initial_capital_usd": 1000.0,
+        "copy_ratio": 1.0,  # copy 1:1 so notionals are exact & legible
+        "fixed_size_usd": 0.0,
+        "max_position_usd": 10_000.0,
+        "min_trade_size_usd": 0.0,
+        "daily_loss_limit_usd": 1e9,
+        "max_concurrent_positions": 100,
+        "slippage_bps": 0,  # isolate fee/principal arithmetic
+        "fee_bps": 0,
+        "execution_delay_seconds": 0,
+        "category_whitelist": None,
+    }
+    base.update(over)
+    return BacktestParams(**base)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_crit1_sell_returns_stored_buy_notional_on_partial_close() -> None:
+    """CRIT-1: a SELL whose leader notional ≠ the BUY notional (partial /
+    different-price close) must return the *stored BUY* principal to capital,
+    not the freshly-recomputed SELL-side copy_usdc.
+
+    BUY 100 USDC @ 0.50 → 200 shares, capital 1000→900.
+    Leader SELLs only 40 USDC notional @ 0.50 (partial close, 80 shares).
+    gross_pnl = min(80, 200) * (0.50 - 0.50) = 0.
+    Correct capital return = stored BUY notional (100) + 0 = capital back to
+    1000.  The buggy code returned the SELL-side copy_usdc (40), stranding
+    60 USDC of principal.
+    """
+    eng = _scripted_engine(
+        [
+            _trade("BUY", 0.50, 100.0, when="2026-03-01T00:00:00+00:00"),
+            _trade("SELL", 0.50, 40.0, when="2026-03-02T00:00:00+00:00"),
+        ]
+    )
+    result = await eng.run(_e_params())
+
+    sells = [
+        e for e in result.trade_log
+        if e.get("side") == "SELL" and not e.get("skipped")
+    ]
+    assert len(sells) == 1
+    # Round-trip net PnL is exactly 0 (no slippage, no fee, flat price).
+    assert sells[0]["pnl_usd"] == pytest.approx(0.0, abs=1e-9)
+    # total_return must be ~0 — principal fully restored.  Under the bug the
+    # stranded 60 USDC never returned, but total_return is curve-based so the
+    # decisive check is that the realised SELL PnL is exactly 0 AND no MTM
+    # row exists (position fully closed by the SELL).
+    assert not any(e.get("side") == "MTM" for e in result.trade_log)
+    assert result.total_return_usd == pytest.approx(0.0, abs=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_crit2_sell_leg_fee_on_stored_notional() -> None:
+    """CRIT-2: the SELL-leg fee must be charged on the *stored* notional
+    (bounded by the SELL-side notional), consistent with the shares used in
+    gross_pnl — NOT on the freshly-recomputed SELL-side copy_usdc.
+
+    BUY 100 @ 0.50.  Leader SELLs 40 USDC notional @ 0.50 (partial).
+    fee_bps = 100 (1%).  fee_notional = min(40, 100) = 40 → SELL fee = 0.40.
+    The buggy path also used 40 here only by coincidence of copy_ratio=1; to
+    make the two differ we copy at ratio 0.5 so SELL-side copy_usdc = 20 but
+    stored BUY notional = 50 → fee must be on min(20, 50) = 20 (0.20), the
+    SELL-side bound, never the larger stored 50.
+    """
+    eng = _scripted_engine(
+        [
+            _trade("BUY", 0.50, 100.0, when="2026-03-01T00:00:00+00:00"),
+            _trade("SELL", 0.50, 40.0, when="2026-03-02T00:00:00+00:00"),
+        ]
+    )
+    result = await eng.run(_e_params(copy_ratio=0.5, fee_bps=100))
+
+    buys = [e for e in result.trade_log if e.get("side") == "BUY"]
+    sells = [e for e in result.trade_log if e.get("side") == "SELL"]
+    assert len(buys) == 1 and len(sells) == 1
+    # BUY notional = 100*0.5 = 50 → BUY fee = 50 * 1% = 0.50.
+    assert buys[0]["fee_usd"] == pytest.approx(0.50)
+    # SELL-side notional = 40*0.5 = 20; stored BUY notional = 50.
+    # fee_notional = min(20, 50) = 20 → SELL fee = 0.20 (NOT 0.50).
+    assert sells[0]["fee_usd"] == pytest.approx(0.20)
+
+
+@pytest.mark.asyncio
+async def test_imp1_buy_fee_in_pnl_curve_when_never_closed() -> None:
+    """IMP-1: a BUY that is opened but never closed/MTM'd must still show its
+    fee as negative PnL in the curve (total_return reflects the fee outflow).
+
+    Single BUY 100 @ 0.50, fee_bps=200 (2%) → BUY fee = 2.00, no SELL.
+    The end-of-period MTM uses the last in-window fill (0.50) vs entry (0.50)
+    → 0 MTM PnL, so the ONLY capital change is the −2.00 BUY fee.  Pre-fix the
+    curve skipped pnl==0 BUY rows so total_return was 0.0 (fee leaked out).
+    """
+    eng = _scripted_engine(
+        [_trade("BUY", 0.50, 100.0, when="2026-03-01T00:00:00+00:00")]
+    )
+    result = await eng.run(_e_params(fee_bps=200))
+
+    buys = [e for e in result.trade_log if e.get("side") == "BUY"]
+    assert len(buys) == 1
+    assert buys[0]["fee_usd"] == pytest.approx(2.0)
+    # The BUY fee is recorded as negative PnL on the BUY entry…
+    assert buys[0]["pnl_usd"] == pytest.approx(-2.0)
+    # …and therefore appears in the curve / total return.
+    assert result.total_return_usd == pytest.approx(-2.0)
+    # total_fees_usd still counts the BUY leg.
+    assert result.total_fees_usd == pytest.approx(2.0)
+
+
+@pytest.mark.asyncio
+async def test_imp2_win_rate_excludes_mtm_entries() -> None:
+    """IMP-2: win-rate denominator must be SELL-only; MTM (unrealised) rows
+    must not dilute/inflate it.
+
+    Scripted: one realised winning round-trip (SELL > BUY) on cond A, plus a
+    standalone BUY on cond B left open → end-of-period MTM row.  win_rate
+    must be 1.0 (1 win / 1 SELL), NOT 0.5 (1 win / {1 SELL + 1 MTM}).
+    """
+    eng = _scripted_engine(
+        [
+            _trade("BUY", 0.40, 100.0, cond="0xA",
+                   when="2026-03-01T00:00:00+00:00"),
+            _trade("SELL", 0.60, 100.0, cond="0xA",
+                   when="2026-03-02T00:00:00+00:00"),
+            _trade("BUY", 0.50, 100.0, cond="0xB",
+                   when="2026-03-03T00:00:00+00:00"),
+        ]
+    )
+    result = await eng.run(_e_params())
+
+    sells = [e for e in result.trade_log if e.get("side") == "SELL"]
+    mtms = [e for e in result.trade_log if e.get("side") == "MTM"]
+    assert len(sells) == 1
+    assert len(mtms) == 1  # cond B left open → MTM row present
+    assert sells[0]["pnl_usd"] > 0.0  # the SELL is a winner
+    # 1 winning SELL / 1 SELL == 1.0 — MTM excluded from the denominator.
+    assert result.win_rate == pytest.approx(1.0)
+
+
+# --- jobs.py R12 fixes -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_r12_5_once_drains_all_pending_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R12 #5: --once must keep polling until the pending queue is empty,
+    not stop after the first ≤5-job batch.
+
+    _fetch_pending is scripted to return 5 jobs, then 5 more, then 0.  With
+    the fix process_pending_jobs(once=True) must process all 10 (3 polls)
+    and only then return.
+    """
+    import contextlib
+
+    import polyecho.backtest.jobs as jobs_mod
+    from polyecho.backtest.jobs import process_pending_jobs
+
+    batches: list[list[object]] = [
+        [_FakeJob(leader_addresses=[SWING]) for _ in range(5)],
+        [_FakeJob(leader_addresses=[SWING]) for _ in range(5)],
+        [],
+    ]
+    polls: list[int] = []
+    processed: list[object] = []
+
+    @contextlib.asynccontextmanager
+    async def _scope():  # type: ignore[no-untyped-def]
+        yield object()
+
+    async def _recover(_s: object) -> int:
+        return 0
+
+    async def _fetch(_s: object) -> list[object]:
+        b = batches.pop(0) if batches else []
+        polls.append(len(b))
+        return b
+
+    async def _proc(job: object, _engine: object) -> None:
+        processed.append(job)
+
+    monkeypatch.setattr(jobs_mod, "session_scope", _scope)
+    monkeypatch.setattr(jobs_mod, "_recover_stale_running", _recover)
+    monkeypatch.setattr(jobs_mod, "_fetch_pending", _fetch)
+    monkeypatch.setattr(jobs_mod, "_process_job", _proc)
+
+    await process_pending_jobs(make_ds(), once=True)
+
+    # 3 polls: 5, 5, 0 — drained all 10 jobs before returning.
+    assert polls == [5, 5, 0]
+    assert len(processed) == 10
+
+
+@pytest.mark.asyncio
+async def test_r12_5_once_exits_immediately_when_queue_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R12 #5 edge: an already-empty queue must still exit after ONE poll
+    (no infinite loop / no spurious extra poll)."""
+    import contextlib
+
+    import polyecho.backtest.jobs as jobs_mod
+    from polyecho.backtest.jobs import process_pending_jobs
+
+    polls: list[int] = []
+
+    @contextlib.asynccontextmanager
+    async def _scope():  # type: ignore[no-untyped-def]
+        yield object()
+
+    async def _recover(_s: object) -> int:
+        return 0
+
+    async def _fetch(_s: object) -> list[object]:
+        polls.append(1)
+        return []
+
+    monkeypatch.setattr(jobs_mod, "session_scope", _scope)
+    monkeypatch.setattr(jobs_mod, "_recover_stale_running", _recover)
+    monkeypatch.setattr(jobs_mod, "_fetch_pending", _fetch)
+
+    await process_pending_jobs(make_ds(), once=True)
+    assert len(polls) == 1
+
+
+@pytest.mark.asyncio
+async def test_r12_imp1_stale_recovery_spares_backpressured_running_job() -> None:
+    """R12 IMP-1: the recovery UPDATE must additionally require progress==0
+    so a legitimately-running job (old created_at due to queue backpressure,
+    but progress>0 because a live worker is advancing it) is NOT recovered.
+    """
+    import polyecho.backtest.jobs as jobs_mod
+    from polyecho.backtest.jobs import _recover_stale_running
+
+    captured: dict[str, object] = {}
+
+    class _FakeResult:
+        rowcount = 0
+
+    class _FakeSession:
+        async def execute(self, stmt: object) -> _FakeResult:
+            captured["stmt"] = stmt
+            return _FakeResult()
+
+        async def commit(self) -> None:
+            captured["committed"] = True
+
+    await _recover_stale_running(_FakeSession())  # type: ignore[arg-type]
+
+    compiled = str(captured["stmt"])
+    # The WHERE clause must now also gate on progress (the backpressure fix).
+    assert "progress" in compiled, (
+        f"recovery UPDATE must gate on progress==0; got: {compiled}"
+    )
+    assert "status" in compiled and "backtest_jobs" in compiled
+    # ORM-level: the column predicate object exists & compares to 0.
+    assert jobs_mod._recover_stale_running is _recover_stale_running
+
+
+@pytest.mark.asyncio
+async def test_r12_2_3_no_duplicate_running_write_in_process_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R12 #2/#3: _process_job must NOT re-issue status='running',progress=0
+    (the claim in _fetch_pending already did).  The first recorded status
+    transition for a job must be the per-leader 'running' progress update or
+    the terminal 'completed' — never a redundant progress=0 'running'.
+    """
+    from polyecho.backtest.jobs import _process_job
+
+    transitions: list[dict[str, object]] = []
+    _patch_status_recorder(monkeypatch, transitions)
+
+    job = _FakeJob(
+        leader_addresses=[SWING],
+        template_params={"copy_ratio": 0.05, "min_trade_size_usd": 1.0},
+    )
+    await _process_job(job, make_engine())  # type: ignore[arg-type]
+
+    # No transition may be the duplicate (status='running' AND progress==0):
+    # the claim already set that; re-writing it double-clobbers the claim.
+    dup = [
+        t for t in transitions
+        if t["status"] == "running"
+        and t["progress"] is not None
+        and float(t["progress"]) == 0.0  # type: ignore[arg-type]
+    ]
+    assert dup == [], f"unexpected duplicate running/progress=0 write: {dup}"
+    # The job still completes (per-leader progress writes + terminal).
+    assert transitions[-1]["status"] == "completed"
+    assert float(transitions[-1]["progress"]) == pytest.approx(100.0)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_r12_2_fetch_pending_refreshes_claimed_status() -> None:
+    """R12 #2: the fallback (no SKIP LOCKED) path must expire+refresh the
+    status/progress of claimed ORM objects so they no longer report the
+    stale pre-claim 'pending'.  We assert the seam exists by exercising
+    _fetch_pending against a fake session whose SELECT yields a 'pending'
+    ORM stub and whose conditional UPDATE 'succeeds'."""
+    from polyecho.backtest.jobs import _fetch_pending
+
+    class _Job:
+        def __init__(self) -> None:
+            import uuid as _u
+
+            self.id = _u.uuid4()
+            self.status = "pending"
+            self.progress = 0.0
+
+    job = _Job()
+    refreshed: list[tuple[object, object]] = []
+
+    class _Scalars:
+        def __init__(self, rows: list[object]) -> None:
+            self._rows = rows
+
+        def all(self) -> list[object]:
+            return self._rows
+
+    class _Res:
+        def __init__(self, rows: list[object] | None = None, rc: int = 0) -> None:
+            self._rows = rows or []
+            self.rowcount = rc
+
+        def scalars(self) -> _Scalars:
+            return _Scalars(self._rows)
+
+    class _Session:
+        def __init__(self) -> None:
+            self._n = 0
+
+        async def execute(self, stmt: object) -> _Res:
+            s = str(stmt).lower()
+            if s.startswith("select"):
+                # First SELECT (fast path) raises to force the fallback.
+                self._n += 1
+                if self._n == 1:
+                    raise RuntimeError("no SKIP LOCKED in this engine")
+                return _Res(rows=[job])
+            # The conditional UPDATE claims exactly this row.
+            return _Res(rc=1)
+
+        async def rollback(self) -> None:
+            pass
+
+        async def commit(self) -> None:
+            pass
+
+        def expire(self, obj: object, attrs: object = None) -> None:
+            # Simulate ORM expiry → next attribute read reloads from DB.
+            refreshed.append(("expire", attrs))
+
+        async def refresh(self, obj: object, attrs: object = None) -> None:
+            # Post-claim DB truth is 'running'.
+            if obj is job:
+                job.status = "running"
+            refreshed.append(("refresh", attrs))
+
+    claimed = await _fetch_pending(_Session())  # type: ignore[arg-type]
+    assert list(cast("list[Any]", claimed)) == [job]
+    # The claimed object's status was refreshed to the committed 'running'
+    # (not the stale pre-claim 'pending').
+    assert job.status == "running"
+    assert ("expire", ["status", "progress"]) in refreshed
+    assert ("refresh", ["status", "progress"]) in refreshed

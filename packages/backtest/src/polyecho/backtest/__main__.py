@@ -4,7 +4,11 @@ Starts the backtest job-queue worker (PRD §5.4).
 
 Usage:
     python -m polyecho.backtest               # loop forever, poll every 10 s
-    python -m polyecho.backtest --once        # process pending jobs then exit
+    python -m polyecho.backtest --once        # drain ALL pending jobs, then exit
+
+``--once`` keeps polling until the pending queue is fully empty (R12 #5 — it
+no longer stops after the first ≤5-job batch), then returns normally (exit 0;
+the ``--once`` exit-code contract is preserved).
 """
 
 from __future__ import annotations
@@ -32,7 +36,10 @@ async def main() -> None:
         "--once",
         action="store_true",
         default=False,
-        help="Process all currently pending jobs then exit (useful for CLI / one-shots).",
+        help=(
+            "Drain ALL currently-pending jobs (poll until the queue is empty) "
+            "then exit (useful for CLI / one-shots)."
+        ),
     )
     args = parser.parse_args()
 

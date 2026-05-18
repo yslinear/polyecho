@@ -123,9 +123,14 @@ async def _process_job(job: BacktestJob, engine: BacktestEngine) -> None:
 
     logger.info("jobs.start", extra={"job_id": str(job_id), "n_leaders": len(leaders)})
 
-    # Mark running
-    async with session_scope() as session:
-        await _set_status(session, job_id, "running", progress=0.0)
+    # R12 #3: the job arrives here ALREADY claimed — ``_fetch_pending`` flipped
+    # it to ``status='running', progress=0`` inside the claim transaction (that
+    # atomic compare-and-set IS the ownership handshake).  Re-issuing the same
+    # ``status='running', progress=0`` write here was a redundant second
+    # round-trip that clobbered the claim a worker had just committed; under
+    # the no-SKIP-LOCKED fallback it also masked a lost race (the row could
+    # have been re-claimed in between).  The claim already established the
+    # running state — go straight to per-leader processing.
 
     all_results: dict[str, Any] = {}
     n = len(leaders)
@@ -190,10 +195,43 @@ async def _recover_stale_running(session: AsyncSession) -> int:
     mid-run cursor column (schema is owned by Wave A / P1-11 and is
     out-of-scope here), and BacktestEngine.run() is deterministic and
     side-effect-free, so "resume" == a clean idempotent re-run of all
-    leaders.  ``created_at`` is the only available age signal; it is a safe
-    *lower bound* on how long the job has existed, so a job 'running' with
-    ``created_at`` older than the threshold is unambiguously stale (a fresh
-    job cannot be both newly-created AND older than the threshold).
+    leaders.
+
+    R12 IMP-1 — false-recovery of a *backpressured* running job.  There is
+    NO ``started_at`` column (the schema is E-schema-frozen and adding one is
+    explicitly out of scope), so ``created_at`` is the only timestamp.  But
+    ``created_at`` is the *enqueue* time, NOT the time the worker picked the
+    job up.  Under queue backpressure (many pending jobs, a job claimed long
+    after it was created) a job can be *legitimately running right now* yet
+    have ``created_at`` far older than the stale threshold — the old
+    condition (``status='running' AND created_at < cutoff``) would then
+    spuriously yank a healthy in-flight job back to 'pending' mid-run.
+
+    Without a new column the only crash-vs-alive signal available is
+    ``progress``: ``_process_job`` writes ``progress = (i+1)/n * 100`` after
+    *every* completed leader, so a job that has made ANY progress
+    (``progress > 0``) is provably owned by a live worker that is actively
+    advancing it — it must NOT be recovered regardless of ``created_at``.
+    The recovery condition is therefore tightened to::
+
+        status == 'running' AND progress == 0 AND created_at < cutoff
+
+    A genuinely-orphaned job (worker crashed/killed) is still recovered: it
+    sits at ``progress == 0`` (the claim sets progress=0 and the crash
+    happened before the first leader finished) with an old ``created_at``.
+
+    RESIDUAL LIMITATION (documented, accepted — no-schema-change constraint):
+    a worker that crashes *after* it has completed at least one leader
+    (``progress > 0``) on a multi-leader job is NOT auto-recovered by this
+    sweep — its row stays 'running' until an operator intervenes.  Fully
+    closing this gap requires a real ``started_at`` / heartbeat column,
+    which is E-schema-frozen and out of scope.  The chosen trade-off
+    deliberately favours *never killing a healthy backpressured job*
+    (a silent correctness/cost hazard — duplicate runs, doubled fees) over
+    auto-recovering the rarer mid-multi-leader crash (an availability
+    blip an operator can resolve).  ``_STALE_RUNNING_SECONDS`` (30 min) is
+    left unchanged: widening it would only enlarge the window in which the
+    progress==0 guard must hold and does not remove the backpressure race.
 
     The UPDATE is a single atomic statement guarded by
     ``status == 'running'`` so concurrent workers cannot both recover the
@@ -208,6 +246,10 @@ async def _recover_stale_running(session: AsyncSession) -> int:
         update(BacktestJob)
         .where(
             BacktestJob.status == "running",
+            # R12 IMP-1: progress==0 ⇒ no live worker has advanced this job;
+            # any progress>0 means a worker is actively running it (do NOT
+            # recover a backpressured-but-healthy in-flight job).
+            BacktestJob.progress == 0,
             BacktestJob.created_at < cutoff,
         )
         .values(status="pending", progress=0.0)
@@ -254,6 +296,22 @@ async def _fetch_pending(session: AsyncSession) -> list[BacktestJob]:
                 .values(status="running", progress=0.0)
             )
             await session.commit()
+            # R12 #2: the bulk UPDATE above mutated the rows in the DB but the
+            # in-memory ORM instances still carry the pre-claim
+            # ``status='pending'`` / ``progress`` values (the UPDATE went
+            # through a Core statement, not the ORM identity map; commit also
+            # expires nothing because expire_on_commit is off on this session
+            # factory).  Expire ONLY the two stale attributes (not the whole
+            # object) and re-`refresh` while the session is still open, so a
+            # later ``job.status`` read sees the committed ``'running'`` while
+            # the columns ``_process_job`` actually consumes (id,
+            # leader_addresses, template_params, dates) stay loaded — a blanket
+            # ``session.expire(j)`` would make those raise
+            # ``DetachedInstanceError`` once the session closes (jobs are
+            # processed AFTER the claim session is torn down).
+            for j in jobs:
+                session.expire(j, ["status", "progress"])
+                await session.refresh(j, ["status", "progress"])
         return jobs
     except Exception:
         # FOR UPDATE SKIP LOCKED may not be supported in all test DBs; fall
@@ -277,6 +335,16 @@ async def _fetch_pending(session: AsyncSession) -> list[BacktestJob]:
             if int(getattr(upd, "rowcount", 0) or 0) == 1:
                 claimed.append(job)
         await session.commit()
+        # R12 #2: same staleness as the fast path — the conditional UPDATE
+        # transitioned these rows to ``status='running'`` in the DB, but the
+        # returned ORM objects were SELECTed *before* the claim and still
+        # report ``status='pending'``.  Expire ONLY status/progress and
+        # refresh them while the session is open so a downstream ``.status``
+        # read reflects the committed claim without detaching the columns
+        # ``_process_job`` later consumes.
+        for job in claimed:
+            session.expire(job, ["status", "progress"])
+            await session.refresh(job, ["status", "progress"])
         return claimed
 
 
@@ -285,13 +353,26 @@ async def process_pending_jobs(datasource: DataSource, *, once: bool = False) ->
 
     Args:
         datasource: Configured DataSource (fixture or live).
-        once:       If True, process pending jobs then return immediately.
+        once:       If True, **drain all currently-pending jobs** (poll
+                    repeatedly until a poll claims zero pending rows) then
+                    return.  R12 #5: ``_fetch_pending`` claims at most 5 rows
+                    per call, so the old single-iteration ``once`` exited
+                    after the first ≤5 jobs while the CLI/help promised
+                    "process all pending then exit" — 6+ pending jobs needed
+                    several invocations.  We now keep polling until a poll
+                    finds nothing pending (and nothing newly recovered),
+                    matching operator expectation, while preserving the
+                    ``--once`` exit-code contract (returns normally → exit 0).
                     If False (default), loop forever polling every
                     _POLL_INTERVAL_SECONDS seconds.
     """
     engine = BacktestEngine(datasource=datasource)
 
     while True:
+        # Default to "no work this iteration" so a poll that raises before
+        # the claim still has a defined exit decision below (a failed poll in
+        # --once mode exits rather than spinning — the outer except logs it).
+        claimed_any = False
         try:
             # I5: recover orphaned 'running' jobs (crashed-worker leftovers)
             # at startup and on every poll BEFORE claiming new pending work,
@@ -306,6 +387,13 @@ async def process_pending_jobs(datasource: DataSource, *, once: bool = False) ->
                 jobs = await _fetch_pending(session)
                 # Detach jobs from session before using them in sub-tasks
                 job_snapshots = list(jobs)
+
+            # R12 #5: in --once (drain) mode, an iteration that claimed at
+            # least one job means there may be more pending rows beyond this
+            # ≤5 batch (or freshly recovered ones), so we must poll again
+            # before exiting.  Only an iteration that claimed *zero* jobs
+            # proves the pending queue is empty → safe to exit.
+            claimed_any = bool(job_snapshots)
 
             for job in job_snapshots:
                 try:
@@ -335,6 +423,15 @@ async def process_pending_jobs(datasource: DataSource, *, once: bool = False) ->
             logger.exception("jobs.poll_error")
 
         if once:
-            return
+            # R12 #5: drain semantics — exit only once a poll claimed zero
+            # jobs (queue provably empty).  If this iteration claimed work,
+            # loop again immediately (no inter-poll sleep) to pick up the
+            # next ≤5 batch / any rows recovered from stale 'running'.  This
+            # preserves the ``--once`` exit-code contract: the function
+            # returns normally (→ exit 0) once, and only once, the queue is
+            # fully drained.
+            if not claimed_any:
+                return
+            continue
 
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
