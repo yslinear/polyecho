@@ -17,6 +17,7 @@ import { ScoreBadge } from "@/components/score-badge";
 import { Pnl } from "@/components/pnl";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
+import { formatDateTime } from "@/lib/format";
 import { LeaderScoreChart } from "./leader-score-chart";
 
 // Reads the database on every request — never prerender at build time
@@ -41,9 +42,11 @@ function shortWallet(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
+// Canonical UTC-stable formatter (lib/format.ts) — identical output on the
+// server and the client, so no React hydration drift on timestamps.
 function fmtDate(d: Date | null | undefined): string {
   if (!d) return "Not recorded";
-  return new Date(d).toLocaleString("en-CA", { timeZoneName: "short" });
+  return formatDateTime(d);
 }
 
 const STATUS_VARIANT: Record<
