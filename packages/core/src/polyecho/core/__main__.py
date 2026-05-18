@@ -20,9 +20,15 @@ Modes:
     trades were detected across both detection paths + reconcile (the
     pipeline is broken — datasource/fixture/wiring), OR every detected
     trade errored.  See :meth:`TraderCore.degenerate_once_pass`.
-* default     — the supervised loop (asyncio TaskGroup: detection /
-  reconcile / redeem).  In fixture mode it runs one pass then idles
-  (restart-safe; reconcile is the durable backfill).
+* default     — the supervised loop (``polyecho.core.wiring.run_supervised``):
+  a startup on-chain reconcile (read-only, lock-independent), the
+  engine's own bounded pass (heartbeat + reconcile-cursor writers
+  injected ⇒ every cycle persists liveness + the restart-safe cursor),
+  then a parked TaskGroup running the REAL DB-backed RedeemWorker —
+  behind the UNCHANGED double live-lock (``POLYECHO_LIVE_TRADING`` AND
+  ``POLYECHO_AUTO_REDEEM``, both default OFF ⇒ logged dry-run, zero
+  on-chain) — plus the daily on-chain reconcile cadence.  In fixture
+  mode with locks off it places / moves / redeems NOTHING.
 
 Structured JSON logging is configured first; private keys / secrets are
 never logged (``polyecho.shared.logging`` redacts them defence-in-depth).
@@ -38,6 +44,11 @@ from decimal import Decimal
 
 from polyecho.core.evaluator import TemplateConfig
 from polyecho.core.trader import FollowSpec, TraderCore
+from polyecho.core.wiring import (
+    make_cursor_writer,
+    make_heartbeat_writer,
+    run_supervised,
+)
 from polyecho.shared.config import get_settings
 from polyecho.shared.copytrading import WalletBinding
 from polyecho.shared.logging import configure_logging
@@ -89,7 +100,16 @@ async def main(argv: list[str] | None = None) -> int:
             "live_trading": settings.live_trading,
         },
     )
-    core = TraderCore(follows=_demo_follows())
+    # C-wire: inject the REAL DB-backed liveness + reconcile-cursor
+    # writers (were injectable-and-not-injected ⇒ dormant in production).
+    # Both are best-effort: in fixture mode / no DB they log+continue, so
+    # the ``--once`` exit-code contract and dry-run semantics are
+    # unchanged (they place / move / persist nothing on-chain).
+    core = TraderCore(
+        follows=_demo_follows(),
+        heartbeat_writer=make_heartbeat_writer(),
+        cursor_writer=make_cursor_writer(),
+    )
 
     if once:
         stats = await core.run_once()
@@ -116,7 +136,13 @@ async def main(argv: list[str] | None = None) -> int:
             return 2
         return 0
 
-    await core.run()
+    # C-wire: the supervised path now ALSO drives a startup on-chain
+    # reconcile (read-only, lock-independent) and the REAL DB-backed
+    # RedeemWorker (behind the UNCHANGED double live-lock — locks off ⇒
+    # logged dry-run, zero on-chain) + the daily reconcile cadence.  The
+    # engine itself is untouched; ``run_supervised`` runs ``core.run_once``
+    # then parks alongside the redeem + reconcile tasks.
+    await run_supervised(core)
     return 0
 
 
