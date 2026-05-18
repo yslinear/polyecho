@@ -115,3 +115,13 @@ B 完 → C-redeem ‖ C-cli ‖ C-observability ‖ C-web-quality (並行；C-c
 C 完 → D(供應鏈/infra/P4)
 ```
 每個 wave 邊界：收斂→整合驗證→git-commit-expert 原子提交→push→CI 5/5→memory。錢路（B-core/C-redeem）額外要求保留並驗證 live-lock 不變式與 P0 fail-closed。
+
+---
+
+## 完成狀態（截至 2026-05-18，origin/main `11aa6aa`）
+
+- **Wave A–D**：✅ 完成，各自 CI 5/5 綠（細節見 git log）。
+- **Wave E（20-agent deep-review fix pass）**：✅ **完成，CI 5/5 綠**。8 套件 remediation + 1 個 gap#9 CI hotfix（共 9 commits，`d8fca64`→`98b8d1d`）。兩個卡死 worktree agent 各留的自殺式 hang 已根治：e-backtest 不真實 `_fetch_pending` stub（drain 無限迴圈，純測試假象，prod 無瑕）、**e-shared-sec 真 money-path 安全 DoS**（`decrypt_private_key` 把不可信 v1-header 迭代數在驗 AES-GCM tag 前餵 PBKDF2 → 已界限化 `[MIN_KDF_ITERATIONS, _MAX_DECRYPT_ITERATIONS=10_000_000]`，超界即 fast `InvalidTag`）。暖卷 `docker compose build`+`up -d`（不 `down -v`）+ DB 驗證全綠（14 表 / index_set bigint / attempts NOT NULL default 0 / ck_redeem_jobs_index_set / 暖資料存活 / 0 relation 錯誤）。
+- **前端設計 remediation**：✅ **完成,CI 5/5 綠**（5 個 `fix(web)` 原子 commits,`98b8d1d`→`11aa6aa`）。設計系統權威 = 倉庫根 `PRODUCT.md` + `DESIGN.md`（impeccable register=product）。5-agent 唯讀稽核確認設計系統 + token 基礎 + Settings Polymarket-proxy 控制項早先已就緒；本次為**範圍化 gap-fix 非重寫**：(1) 共用 primitive token 化（`pnlColor`/`ScoreBadge`/`DataTable`,score 加 High/Mid/Low 文字 tier）；(2) 四 money 表（trades/positions/accounts/leaders）統一單一 instrument idiom（sticky、右對齊 tabular-nums、honest empty、`rounded-lg`）；(3) backtest 三同構 ScenarioCard → 單一比較 Table（解除 identical-card-grid + hero-metric 禁令）；(4) discovery `[wallet]` 日期改 UTC-stable（消 hydration drift）；(5) alerts severity-filter 去 glassmorphism blur + em-dash。絕對禁令（em-dash / glassmorphism / identical-card-grid / hero-metric / tokens-only / color-never-sole-signal）全清；整合 web 驗證綠（363/363 + build）。
+
+教訓沉澱於 local memory [[polyecho-known-gaps]]（lessons #13 卡死 agent 自殺式 hang、#14 本機驗證須逐位元鏡像 CI `run:` block + `.env` 陷阱、#15 audit-before-redesign 勿重做已完成工作）。
