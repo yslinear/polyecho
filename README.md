@@ -24,22 +24,35 @@ Python 套件共用隱式命名空間套件 `polyecho`（PEP 420），並以 **u
 
 ## 運作方式
 
-```
-discovery ──► 領單者候選池 ──► (你在 web / CLI 中審閱)
-                     │
-                     ▼
-              回測某個領單者  ──► 以滑價/延遲建模的 PnL
-                     │
-                     ▼
-   trader-core 複製已跟單領單者的成交 ──► 受風控的訂單
-                     │
-   web 儀表板 (以唯讀為主)  +  每個事件皆有 web-push 警示
+```mermaid
+flowchart TD
+    D["discovery-worker<br/>排名領單者"] -->|"寫入"| CL[("candidate_leaders")]
+    CL -->|"你在 web / CLI 審閱並 promote"| FR[("follow_relations")]
+    CL -.->|"可選:跟單前先回測"| BT["backtest-worker<br/>滑價/延遲建模 PnL"]
+    FR -->|"trader-core 訂閱已跟單領單者的成交"| TC["trader-core<br/>分層 fail-closed 風控 → 單一 live 咽喉點"]
+    TC -->|"受風控的 CLOB 訂單"| PM["Polymarket CLOB"]
+    TC -->|"寫入事件"| EV[("events")]
+    EV --> PS["push-sender → Web Push 警示"]
+    TC -->|"my_trades / settings"| WEB["web 儀表板<br/>(localhost,唯讀為主)"]
 ```
 
 每個服務都**只透過 Postgres** 溝通 —— 沒有任何服務會對另一個服務開放連接埠。
 私鑰**只**存在於 `trader-core`；控制流程是透過將資料列寫入 `settings`
 資料表來達成（經由 CLI 或 web 的 `/settings` 頁面），絕不會以 RPC
 方式呼叫持有金鑰的程序。
+
+## 文件與詳細流程
+
+詳細的系統流程與架構圖解（服務拓撲、**錢包串接方式與簽章型別**、**回測流程**、**跟單流程與風控閘**、觀測性）以 Mermaid 繪製，集中於專案 **Wiki**，不在 README 內重述：
+
+- 線上瀏覽：[Wiki → Architecture](https://github.com/yslinear/polyecho/wiki/Architecture)
+- 隨碼版控：以 git submodule 掛載於 [`docs/wiki`](docs/wiki)；取得內容：
+
+  ```bash
+  git submodule update --init docs/wiki
+  ```
+
+完整產品規格見 [`docs/PRD.md`](docs/PRD.md)。
 
 ## 前置需求
 
