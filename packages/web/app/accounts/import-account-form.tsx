@@ -15,6 +15,21 @@
  *    clearly-labelled, explicitly-dangerous section — mirroring
  *    app/alerts/dangerous-action.tsx.
  *
+ * FIELD ORDER (informed, not a blind upfront pick): 帳戶名稱(選填) → EOA →
+ * (auto read-only balance of the EOA; for signature_type 0 this IS the
+ * account's value) → 簽章類型 (deliberately near the END) → Funder (only
+ * type≠0; also probed) → 私鑰 → 加密密語 → 危險操作密碼 → submit.
+ *
+ * The balance probe is a PURE PUBLIC READ (`probeBalance`): best-effort,
+ * debounced once per settled address, fail-soft, and NEVER blocks submit.
+ * Full multi-signature-type detection (incl. derived funders) is the CLI
+ * `polyecho account detect <EOA>` — this page only shows the balance of an
+ * address it actually has (the EOA, or an explicit operator funder).
+ *
+ * The client-side validation and the `importAccount` submit call (and its
+ * server-side gates) are UNCHANGED — this is purely input-order + an
+ * additive read-only balance display.
+ *
  * On success: sonner toast + router.refresh() so the read-only Server
  * Component re-reads the (now `ready`) row.
  */
@@ -22,7 +37,7 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { KeyRound, ShieldAlert } from "lucide-react";
+import { KeyRound, ShieldAlert, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,8 +49,103 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { t } from "@/lib/i18n";
-import { EVM_ADDRESS_RE, PRIVATE_KEY_RE } from "@/lib/format";
+import { EVM_ADDRESS_RE, PRIVATE_KEY_RE, formatUsd } from "@/lib/format";
 import { importAccount } from "./actions";
+import { probeBalance } from "./balance";
+
+/** Debounce (ms) so the probe fires once per SETTLED address, not per key. */
+const PROBE_DEBOUNCE_MS = 600;
+
+type ProbeState =
+  | { status: "idle" }
+  | { status: "probing" }
+  | { status: "done"; valueUsd: number | null; ok: boolean };
+
+/**
+ * useAddressBalance — fires the read-only `probeBalance` once the address
+ * has settled to a valid EVM shape (debounced). Stale results are dropped.
+ * `enabled` lets the caller suppress the funder probe for signature_type 0.
+ */
+function useAddressBalance(address: string, enabled: boolean): ProbeState {
+  const [state, setState] = React.useState<ProbeState>({ status: "idle" });
+
+  React.useEffect(() => {
+    const trimmed = address.trim();
+    if (!enabled || !EVM_ADDRESS_RE.test(trimmed)) {
+      setState({ status: "idle" });
+      return;
+    }
+
+    let cancelled = false;
+    const handle = setTimeout(() => {
+      setState({ status: "probing" });
+      probeBalance(trimmed)
+        .then((res) => {
+          if (cancelled) return;
+          setState({
+            status: "done",
+            valueUsd: res.valueUsd,
+            ok: res.ok,
+          });
+        })
+        .catch(() => {
+          // probeBalance never throws, but stay defensive: fail soft.
+          if (!cancelled) {
+            setState({ status: "done", valueUsd: null, ok: false });
+          }
+        });
+    }, PROBE_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [address, enabled]);
+
+  return state;
+}
+
+/** Inline, read-only balance line. Never blocks submit; fail-soft copy. */
+function BalanceLine({
+  state,
+  note,
+}: {
+  state: ProbeState;
+  note: string;
+}) {
+  if (state.status === "idle") return null;
+
+  if (state.status === "probing") {
+    return (
+      <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Loader2
+          className="h-3 w-3 animate-spin"
+          aria-hidden="true"
+        />
+        <span>{t("tables.accounts.import.balanceProbing")}</span>
+      </p>
+    );
+  }
+
+  // status === "done"
+  if (!state.ok || state.valueUsd === null) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        {t("tables.accounts.import.balanceFailed")}
+      </p>
+    );
+  }
+
+  return (
+    <p className="text-xs text-muted-foreground">
+      <span className="font-medium text-foreground">
+        {t("tables.accounts.import.balanceLabel")}：
+        {formatUsd(state.valueUsd)}
+      </span>
+      <span className="ml-1">{note}</span>
+    </p>
+  );
+}
 
 export function ImportAccountForm() {
   const router = useRouter();
@@ -50,6 +160,13 @@ export function ImportAccountForm() {
   const [pending, setPending] = React.useState(false);
 
   const isType0 = sigType === "0";
+
+  // Read-only, best-effort balance of the addresses we actually HAVE.
+  // EOA is always probed; for type 0 the EOA IS the funder (so its balance
+  // is the account value). Funder is probed only when an explicit one is
+  // required (type ≠ 0). Neither probe gates submit.
+  const eoaBalance = useAddressBalance(eoa, true);
+  const funderBalance = useAddressBalance(funder, !isType0);
 
   function clearSecrets() {
     setPrivateKey("");
@@ -148,6 +265,7 @@ export function ImportAccountForm() {
       </p>
 
       <div className="grid gap-4 sm:grid-cols-2">
+        {/* 1. 帳戶名稱（選填） */}
         <div className="space-y-1.5">
           <label htmlFor="ia-name" className="text-sm font-medium leading-none">
             {t("tables.accounts.import.nameLabel")}
@@ -163,6 +281,27 @@ export function ImportAccountForm() {
           />
         </div>
 
+        {/* 2. EOA 位址 + 3. (auto) read-only balance line */}
+        <div className="space-y-1.5">
+          <label htmlFor="ia-eoa" className="text-sm font-medium leading-none">
+            {t("tables.accounts.import.eoaLabel")}
+          </label>
+          <Input
+            id="ia-eoa"
+            value={eoa}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={t("tables.accounts.import.eoaPlaceholder")}
+            className="font-mono text-sm"
+            onChange={(e) => setEoa(e.target.value)}
+          />
+          <BalanceLine
+            state={eoaBalance}
+            note={t("tables.accounts.import.balanceEoaNote")}
+          />
+        </div>
+
+        {/* 4. 簽章類型 — deliberately near the END (informed choice) */}
         <div className="space-y-1.5">
           <label htmlFor="ia-sig" className="text-sm font-medium leading-none">
             {t("tables.accounts.import.sigTypeLabel")}
@@ -186,23 +325,12 @@ export function ImportAccountForm() {
               </SelectItem>
             </SelectContent>
           </Select>
+          <p className="text-xs text-muted-foreground">
+            {t("tables.accounts.import.sigTypeHint")}
+          </p>
         </div>
 
-        <div className="space-y-1.5">
-          <label htmlFor="ia-eoa" className="text-sm font-medium leading-none">
-            {t("tables.accounts.import.eoaLabel")}
-          </label>
-          <Input
-            id="ia-eoa"
-            value={eoa}
-            autoComplete="off"
-            spellCheck={false}
-            placeholder={t("tables.accounts.import.eoaPlaceholder")}
-            className="font-mono text-sm"
-            onChange={(e) => setEoa(e.target.value)}
-          />
-        </div>
-
+        {/* 5. Funder (only type ≠ 0) + its read-only balance */}
         <div className="space-y-1.5">
           <label
             htmlFor="ia-funder"
@@ -225,8 +353,15 @@ export function ImportAccountForm() {
               ? t("tables.accounts.import.funderHintType0")
               : t("tables.accounts.import.funderHintOther")}
           </p>
+          {!isType0 && (
+            <BalanceLine
+              state={funderBalance}
+              note={t("tables.accounts.import.balanceFunderNote")}
+            />
+          )}
         </div>
 
+        {/* 6. 私鑰 */}
         <div className="space-y-1.5">
           <label htmlFor="ia-pk" className="text-sm font-medium leading-none">
             {t("tables.accounts.import.privateKeyLabel")}
@@ -243,6 +378,7 @@ export function ImportAccountForm() {
           />
         </div>
 
+        {/* 7. 私鑰加密密語 */}
         <div className="space-y-1.5">
           <label
             htmlFor="ia-encpass"
@@ -261,6 +397,7 @@ export function ImportAccountForm() {
           />
         </div>
 
+        {/* 8. 危險操作確認密碼 */}
         <div className="space-y-1.5 sm:col-span-2">
           <label
             htmlFor="ia-dangerpass"
@@ -279,6 +416,11 @@ export function ImportAccountForm() {
           />
         </div>
       </div>
+
+      {/* Honest scope note: this page only balances the address it HAS. */}
+      <p className="text-xs text-muted-foreground">
+        {t("tables.accounts.import.balanceCliHint")}
+      </p>
 
       <div className="flex items-center gap-3">
         <Button

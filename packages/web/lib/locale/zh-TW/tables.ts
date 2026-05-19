@@ -82,13 +82,14 @@ export const tables = {
   },
   accounts: {
     title: "帳戶",
-    subtitleEmpty: "你從 CLI 註冊的 Polymarket 帳戶。",
+    subtitleEmpty: "你註冊的 Polymarket 帳戶（CLI 或下方 Web 匯入）。",
     subtitleCount: "{{count}} 個已註冊帳戶。",
-    cliOnlyBadge: "僅限 CLI",
-    cliOnlyTitle: "私鑰匯入僅限 CLI。",
+    cliOnlyBadge: "CLI / Web",
+    cliOnlyTitle: "建議用 CLI 匯入私鑰。",
     cliOnlyBody:
-      "在 trader-core 主機上執行 {{cmd}}。此儀表板為唯讀，絕不接受或顯示私鑰。",
-    emptyPrefix: "尚未註冊任何帳戶。請從 CLI 以 {{cmd}} 匯入。",
+      "建議在 trader-core 主機上執行 {{cmd}}。亦可用下方「從 Web 匯入私鑰」（操作員明確授權的覆寫，已記錄）：私鑰僅以 AES-256-GCM 加密儲存，永不顯示或記錄，並需通過危險操作確認密碼。",
+    emptyPrefix:
+      "尚未註冊任何帳戶。請用 CLI 執行 {{cmd}}，或用下方「從 Web 匯入私鑰」。",
     col: {
       name: "名稱",
       eoaAddress: "EOA 位址",
@@ -135,6 +136,20 @@ export const tables = {
       errDangerPass: "請輸入危險操作確認密碼。",
       errFunder: "type 1/2/3 需填入經鏈上驗證的 funder 位址。",
       errFailed: "匯入失敗，請重試。",
+      /** Signature type is deliberately one of the LAST steps — an
+       *  informed choice after the operator has seen the balances. */
+      sigTypeHint:
+        "請先確認上方 EOA（與 funder）餘額，再於此選擇簽章類型——這是知情後的選擇，而非預先盲選。",
+      /** Read-only, best-effort balance line for the address we ALREADY
+       *  have (EOA, or an explicit operator funder). It is NOT a full
+       *  detect — that stays the CLI `polyecho account detect`. */
+      balanceLabel: "Polymarket 倉位價值",
+      balanceProbing: "偵測中…",
+      balanceFailed: "偵測失敗，可改用 CLI polyecho account detect",
+      balanceEoaNote: "（簽章類型 0 時，此即帳戶價值：EOA 同時為 funder）",
+      balanceFunderNote: "（此為所填 funder 位址的倉位價值）",
+      balanceCliHint:
+        "本頁僅顯示所持位址（EOA 或操作員填入的 funder）的餘額。完整四種簽章類型偵測（含推導的 funder）請於 trader-core 主機執行 CLI：polyecho account detect <EOA>。",
     },
   },
   leaders: {
