@@ -71,7 +71,7 @@ cp .env.example .env
 docker compose -f infra/docker-compose.yml up -d
 
 # 3. 健康檢查 — 探測設定、DB、Polymarket 端點、RPC、proxy/VPN。
-docker compose -f infra/docker-compose.yml run --rm cli polyecho doctor
+docker compose -f infra/docker-compose.yml run --rm cli doctor
 
 # 4. 開啟儀表板（受版控的 compose 將其發布於 0.0.0.0:3006）。
 open http://127.0.0.1:3006   # 或 http://<host>:3006 / Tailscale
@@ -134,8 +134,13 @@ docker compose -f infra/docker-compose.yml down -v         # stop + wipe DB
 執行一個一次性容器）：
 
 ```bash
-docker compose -f infra/docker-compose.yml run --rm cli polyecho <command> [args]
+docker compose -f infra/docker-compose.yml run --rm cli <command> [args]
 ```
+
+> **注意：** 隨需執行的 `cli` 服務帶有 `profiles: [tools]`，因此一般的
+> `docker compose ... build` **不會**重建它。拉取變更後，請以
+> `docker compose -f infra/docker-compose.yml --profile tools build cli`
+> 明確重建，否則會使用到過時的 cli 映像檔。
 
 `polyecho --help` 與 `polyecho <group> --help` 會印出任一群組的完整用法。
 命令群組及其命令：
@@ -201,30 +206,30 @@ RPC 可達性，以及 proxy／VPN 對外連線。每當有狀況看起來不對
 **發掘並審閱領單者**
 
 ```bash
-docker compose -f infra/docker-compose.yml run --rm cli polyecho discovery run
+docker compose -f infra/docker-compose.yml run --rm cli discovery run
 # 在 http://<host>:3006/discovery 審閱候選者
-docker compose -f infra/docker-compose.yml run --rm cli polyecho discovery promote <wallet>
+docker compose -f infra/docker-compose.yml run --rm cli discovery promote <wallet>
 ```
 
 **在跟單前回測某個領單者**
 
 ```bash
-docker compose -f infra/docker-compose.yml run --rm cli polyecho backtest new --help
-docker compose -f infra/docker-compose.yml run --rm cli polyecho backtest list
-docker compose -f infra/docker-compose.yml run --rm cli polyecho backtest show <id>
+docker compose -f infra/docker-compose.yml run --rm cli backtest new --help
+docker compose -f infra/docker-compose.yml run --rm cli backtest list
+docker compose -f infra/docker-compose.yml run --rm cli backtest show <id>
 ```
 
 **匯入交易金鑰（僅限 CLI，靜態加密）**
 
 ```bash
-docker compose -f infra/docker-compose.yml run --rm cli polyecho account set-danger-passphrase
-docker compose -f infra/docker-compose.yml run --rm cli polyecho account import
+docker compose -f infra/docker-compose.yml run --rm cli account set-danger-passphrase
+docker compose -f infra/docker-compose.yml run --rm cli account import
 ```
 
 **啟用 web-push 警示**
 
 ```bash
-docker compose -f infra/docker-compose.yml run --rm cli polyecho push vapid-keygen
+docker compose -f infra/docker-compose.yml run --rm cli push vapid-keygen
 # 將金鑰放入 .env，然後執行：docker compose ... up -d --force-recreate push web
 ```
 
@@ -242,8 +247,8 @@ docker compose -f infra/docker-compose.yml run --rm cli polyecho push vapid-keyg
 3. 重新建立 stack 並武裝 trader-core：
    ```bash
    docker compose -f infra/docker-compose.yml up -d --force-recreate
-   docker compose -f infra/docker-compose.yml run --rm cli polyecho trader enable-live
-   docker compose -f infra/docker-compose.yml run --rm cli polyecho trader start <leader>
+   docker compose -f infra/docker-compose.yml run --rm cli trader enable-live
+   docker compose -f infra/docker-compose.yml run --rm cli trader start <leader>
    ```
 
 `polyecho trader pause-all` 是即時的全域緊急停止開關。`disable-live`
