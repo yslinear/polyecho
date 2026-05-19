@@ -12,6 +12,7 @@ import { and, isNull, isNotNull, desc } from "drizzle-orm";
 
 import { db } from "@/lib/db";
 import { myTrades } from "@/lib/db/schema";
+import { t } from "@/lib/i18n";
 import { PositionsTable } from "./positions-table";
 
 export const dynamic = "force-dynamic";
@@ -28,19 +29,20 @@ export default async function PositionsPage() {
   return (
     <div className="space-y-8">
       <header className="space-y-1.5">
-        <h1 className="text-2xl font-bold tracking-tight">Positions</h1>
+        <h1 className="text-2xl font-bold tracking-tight">
+          {t("tables.positions.title")}
+        </h1>
         <p className="text-sm text-muted-foreground">
           {rows.length === 0
-            ? "Open copy positions appear here in real time."
-            : `${rows.length} open position${rows.length === 1 ? "" : "s"}.`}
+            ? t("tables.positions.subtitleEmpty")
+            : t("tables.positions.subtitleCount", { count: rows.length })}
         </p>
       </header>
 
       {rows.length === 0 ? (
         <div className="rounded-lg border border-dashed py-16 text-center">
           <p className="text-sm text-muted-foreground">
-            No open positions. They appear here once trader-core opens a copy
-            trade for a followed leader.
+            {t("tables.positions.emptyTitle")}
           </p>
         </div>
       ) : (

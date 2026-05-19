@@ -16,6 +16,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { shortAddress, formatDateTime } from "@/lib/format";
+import { t } from "@/lib/i18n";
 import { skipReasonLabel, skipReasonVariant } from "@/lib/skip-reasons";
 
 export interface SkipRow {
@@ -37,19 +38,24 @@ export function SkipsTable({
   return (
     <section className="space-y-3">
       <div className="space-y-1">
-        <h2 className="text-base font-semibold">Recent skips</h2>
+        <h2 className="text-base font-semibold">
+          {t("tables.leaders.skips.heading")}
+        </h2>
         <p className="max-w-prose text-sm text-muted-foreground">
           {rows.length === 0
-            ? "Why copies were skipped will show here once trader-core evaluates a leader trade."
-            : `The ${rows.length === limit ? `last ${limit}` : rows.length} skip${rows.length === 1 ? "" : "s"}, newest first. Read-only.`}
+            ? t("tables.leaders.skips.subtitleEmpty")
+            : rows.length === limit
+              ? t("tables.leaders.skips.subtitleLast", { limit })
+              : t("tables.leaders.skips.subtitleCount", {
+                  count: rows.length,
+                })}
         </p>
       </div>
 
       {rows.length === 0 ? (
         <div className="rounded-lg border border-dashed py-12 text-center">
           <p className="text-sm text-muted-foreground">
-            No skips logged yet. trader-core records one row per skipped or
-            rejected copy with a reason from the taxonomy.
+            {t("tables.leaders.skips.emptyTitle")}
           </p>
         </div>
       ) : (
@@ -57,11 +63,21 @@ export function SkipsTable({
           <Table>
             <TableHeader className="sticky top-0 z-10 bg-muted">
               <TableRow className="hover:bg-transparent">
-                <TableHead>Reason</TableHead>
-                <TableHead>Leader</TableHead>
-                <TableHead>Condition</TableHead>
-                <TableHead>Detail</TableHead>
-                <TableHead className="text-right">When</TableHead>
+                <TableHead>
+                  {t("tables.leaders.skips.col.reason")}
+                </TableHead>
+                <TableHead>
+                  {t("tables.leaders.skips.col.leader")}
+                </TableHead>
+                <TableHead>
+                  {t("tables.leaders.skips.col.condition")}
+                </TableHead>
+                <TableHead>
+                  {t("tables.leaders.skips.col.detail")}
+                </TableHead>
+                <TableHead className="text-right">
+                  {t("tables.leaders.skips.col.when")}
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -81,19 +97,19 @@ export function SkipsTable({
                   >
                     {r.leader_address
                       ? shortAddress(r.leader_address)
-                      : "Not set"}
+                      : t("tables.common.notSet")}
                   </TableCell>
                   <TableCell
                     className="max-w-[200px] truncate font-mono text-xs"
                     title={r.condition_id ?? undefined}
                   >
-                    {r.condition_id ?? "Not set"}
+                    {r.condition_id ?? t("tables.common.notSet")}
                   </TableCell>
                   <TableCell
                     className="max-w-[280px] truncate text-sm text-muted-foreground"
                     title={r.detail ?? undefined}
                   >
-                    {r.detail ?? "Not set"}
+                    {r.detail ?? t("tables.common.notSet")}
                   </TableCell>
                   <TableCell className="whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground">
                     {formatDateTime(r.created_at)}

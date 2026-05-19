@@ -25,6 +25,7 @@ import {
   copySkips,
 } from "@/lib/db/schema";
 import { LiveTradingStatus } from "@/components/live-trading-status";
+import { t } from "@/lib/i18n";
 import { LeadersTable, type LeaderRow } from "./leaders-table";
 import { SkipsTable, type SkipRow } from "./skips-table";
 
@@ -74,11 +75,16 @@ export default async function LeadersPage() {
   return (
     <div className="space-y-8">
       <header className="space-y-1.5">
-        <h1 className="text-2xl font-bold tracking-tight">Leaders</h1>
+        <h1 className="text-2xl font-bold tracking-tight">
+          {t("tables.leaders.title")}
+        </h1>
         <p className="text-sm text-muted-foreground">
           {rows.length === 0
-            ? "Leaders you copy and the template each follow uses."
-            : `${rows.length} relationship${rows.length === 1 ? "" : "s"} · ${active} active.`}
+            ? t("tables.leaders.subtitleEmpty")
+            : t("tables.leaders.subtitleCount", {
+                count: rows.length,
+                active,
+              })}
         </p>
       </header>
 
@@ -89,13 +95,15 @@ export default async function LeadersPage() {
       {rows.length === 0 ? (
         <div className="rounded-lg border border-dashed py-16 text-center">
           <p className="text-sm text-muted-foreground">
-            Not following anyone yet. Promote a candidate from{" "}
-            <span className="font-medium text-foreground">Discovery</span>,
-            then start copying from the CLI with{" "}
+            {t("tables.leaders.emptyPrefix")}{" "}
+            <span className="font-medium text-foreground">
+              {t("tables.leaders.emptyDiscovery")}
+            </span>{" "}
+            {t("tables.leaders.emptyMiddle")}{" "}
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
               polyecho discovery promote &lt;wallet&gt;
-            </code>
-            .
+            </code>{" "}
+            {t("tables.leaders.emptySuffix")}
           </p>
         </div>
       ) : (

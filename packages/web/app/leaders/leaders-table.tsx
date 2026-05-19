@@ -28,6 +28,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { shortAddress, formatDateTime } from "@/lib/format";
+import { t } from "@/lib/i18n";
 import { setFollowStatus } from "./actions";
 
 export interface LeaderRow {
@@ -52,12 +53,12 @@ function RowAction({ row }: { row: LeaderRow }) {
       await setFollowStatus(row.id, next);
       toast.success(
         next === "paused"
-          ? "Leader paused. trader-core stops copying it."
-          : "Leader resumed. Copying continues on the next leader trade."
+          ? t("tables.leaders.pausedToast")
+          : t("tables.leaders.resumedToast")
       );
       router.refresh();
     } catch {
-      toast.error("Failed to update follow status");
+      toast.error(t("tables.leaders.updateError"));
     } finally {
       setPending(false);
     }
@@ -70,11 +71,15 @@ function RowAction({ row }: { row: LeaderRow }) {
       size="sm"
       className="h-8 text-xs"
       disabled={pending}
-      aria-label={`${isActive ? "Pause" : "Resume"} copying ${row.leader_address}`}
+      aria-label={
+        isActive
+          ? t("tables.leaders.pauseAria", { address: row.leader_address })
+          : t("tables.leaders.resumeAria", { address: row.leader_address })
+      }
       onClick={onToggle}
     >
       <Icon className="mr-1 h-3.5 w-3.5" aria-hidden="true" />
-      {isActive ? "Pause" : "Resume"}
+      {isActive ? t("tables.leaders.pause") : t("tables.leaders.resume")}
     </Button>
   );
 }
@@ -85,13 +90,19 @@ export function LeadersTable({ rows }: { rows: LeaderRow[] }) {
       <Table>
         <TableHeader className="sticky top-0 z-10 bg-muted">
           <TableRow className="hover:bg-transparent">
-            <TableHead>Leader</TableHead>
-            <TableHead>Account</TableHead>
-            <TableHead>Template</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead className="text-right">Last seen</TableHead>
-            <TableHead className="text-right">Followed</TableHead>
-            <TableHead className="text-right">Action</TableHead>
+            <TableHead>{t("tables.leaders.col.leader")}</TableHead>
+            <TableHead>{t("tables.leaders.col.account")}</TableHead>
+            <TableHead>{t("tables.leaders.col.template")}</TableHead>
+            <TableHead>{t("tables.leaders.col.status")}</TableHead>
+            <TableHead className="text-right">
+              {t("tables.leaders.col.lastSeen")}
+            </TableHead>
+            <TableHead className="text-right">
+              {t("tables.leaders.col.followed")}
+            </TableHead>
+            <TableHead className="text-right">
+              {t("tables.leaders.col.action")}
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -105,12 +116,16 @@ export function LeadersTable({ rows }: { rows: LeaderRow[] }) {
               </TableCell>
               <TableCell className="text-sm">
                 {r.account_name ?? (
-                  <span className="text-muted-foreground">Not set</span>
+                  <span className="text-muted-foreground">
+                    {t("tables.common.notSet")}
+                  </span>
                 )}
               </TableCell>
               <TableCell className="text-sm">
                 {r.template_name ?? (
-                  <span className="text-muted-foreground">Not set</span>
+                  <span className="text-muted-foreground">
+                    {t("tables.common.notSet")}
+                  </span>
                 )}
               </TableCell>
               <TableCell>
@@ -122,7 +137,9 @@ export function LeadersTable({ rows }: { rows: LeaderRow[] }) {
                 </Badge>
               </TableCell>
               <TableCell className="whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground">
-                {r.last_seen_ts ? formatDateTime(r.last_seen_ts) : "Not yet"}
+                {r.last_seen_ts
+                  ? formatDateTime(r.last_seen_ts)
+                  : t("tables.common.notYet")}
               </TableCell>
               <TableCell className="whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground">
                 {formatDateTime(r.created_at)}

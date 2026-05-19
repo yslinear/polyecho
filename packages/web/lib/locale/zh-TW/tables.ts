@@ -2,4 +2,120 @@
  *  `app/leaders` + their shared table components) zh-TW strings.
  *  Filled by the i18n swarm.
  *  Proper nouns stay English — see common.ts PROPER-NOUN POLICY. */
-export const tables = {} as const;
+export const tables = {
+  /** Cross-table cell fallbacks reused by every table in this group. */
+  common: {
+    notSet: "未設定",
+    notRecorded: "未記錄",
+    notYet: "尚未",
+  },
+  trades: {
+    title: "交易",
+    subtitleEmpty: "trader-core 執行的每一筆跟單交易都會記錄在這裡。",
+    subtitleCount: "已記錄 {{count}} 筆跟單交易。",
+    emptyTitle: "尚無跟單交易記錄。當 trader-core 為已跟隨的 Leader 執行一筆跟單後，就會出現在這裡。",
+    col: {
+      opened: "開倉時間",
+      leader: "Leader",
+      market: "Market",
+      side: "方向",
+      size: "數量",
+      price: "價格",
+      fill: "成交",
+      pnl: "PnL",
+    },
+    searchPlaceholder: "依 market 篩選…",
+    filter: {
+      fillStatus: "成交狀態",
+      filled: "已成交",
+      pending: "等待中",
+      partial: "部分成交",
+      rejected: "已拒絕",
+    },
+  },
+  positions: {
+    title: "持倉",
+    subtitleEmpty: "未平倉的跟單持倉會即時顯示在這裡。",
+    subtitleCount: "{{count}} 筆未平倉持倉。",
+    emptyTitle: "無未平倉持倉。當 trader-core 為已跟隨的 Leader 開立一筆跟單後，就會出現在這裡。",
+    col: {
+      market: "Market",
+      leader: "Leader",
+      side: "方向",
+      size: "數量",
+      entry: "進場價",
+      matched: "已撮合",
+      remaining: "剩餘",
+      fill: "成交",
+      pnl: "PnL",
+      opened: "開倉時間",
+    },
+    searchPlaceholder: "依 market 篩選…",
+    filter: {
+      fillStatus: "成交狀態",
+      filled: "已成交",
+      pending: "等待中",
+      partial: "部分成交",
+      rejected: "已拒絕",
+    },
+  },
+  accounts: {
+    title: "帳戶",
+    subtitleEmpty: "你從 CLI 註冊的 Polymarket 帳戶。",
+    subtitleCount: "{{count}} 個已註冊帳戶。",
+    cliOnlyBadge: "僅限 CLI",
+    cliOnlyTitle: "私鑰匯入僅限 CLI。",
+    cliOnlyBody:
+      "在 trader-core 主機上執行 {{cmd}}。此儀表板為唯讀，絕不接受或顯示私鑰。",
+    emptyPrefix: "尚未註冊任何帳戶。請從 CLI 以 {{cmd}} 匯入。",
+    col: {
+      name: "名稱",
+      eoaAddress: "EOA 位址",
+      signatureType: "簽章類型",
+      status: "狀態",
+    },
+    copied: "已複製",
+    copyAddress: "複製位址",
+  },
+  leaders: {
+    title: "Leaders",
+    subtitleEmpty: "你跟單的 Leader 以及各跟單所使用的範本。",
+    subtitleCount: "{{count}} 組跟單關係 · {{active}} 組進行中。",
+    emptyPrefix: "尚未跟隨任何人。請從",
+    emptyDiscovery: "探索",
+    emptyMiddle: "推薦一個候選者，再從 CLI 以",
+    emptySuffix: "開始跟單。",
+    col: {
+      leader: "Leader",
+      account: "帳戶",
+      template: "範本",
+      status: "狀態",
+      lastSeen: "最後出現",
+      followed: "跟單時間",
+      action: "操作",
+    },
+    pause: "暫停",
+    resume: "恢復",
+    pauseAria: "暫停跟單 {{address}}",
+    resumeAria: "恢復跟單 {{address}}",
+    pausedToast: "已暫停 Leader。trader-core 將停止對其跟單。",
+    resumedToast: "已恢復 Leader。下一筆 Leader 交易將繼續跟單。",
+    updateError: "更新跟單狀態失敗",
+    skips: {
+      heading: "近期略過",
+      subtitleEmpty:
+        "當 trader-core 評估一筆 Leader 交易後，略過跟單的原因會顯示在這裡。",
+      subtitleLast: "最近 {{limit}} 筆略過，由新到舊。唯讀。",
+      subtitleCount: "{{count}} 筆略過，由新到舊。唯讀。",
+      emptyTitle:
+        "尚無略過記錄。trader-core 會為每一筆被略過或拒絕的跟單記錄一列，並附上分類原因。",
+      col: {
+        reason: "原因",
+        leader: "Leader",
+        condition: "Condition",
+        detail: "詳情",
+        when: "時間",
+      },
+    },
+  },
+} as const;

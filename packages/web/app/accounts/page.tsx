@@ -20,6 +20,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { signatureTypeLabel } from "@/lib/format";
+import { t } from "@/lib/i18n";
 import { CopyAddress } from "./copy-address";
 
 export const dynamic = "force-dynamic";
@@ -63,39 +64,60 @@ export default async function AccountsPage() {
   return (
     <div className="space-y-8">
       <header className="space-y-1.5">
-        <h1 className="text-2xl font-bold tracking-tight">Accounts</h1>
+        <h1 className="text-2xl font-bold tracking-tight">
+          {t("tables.accounts.title")}
+        </h1>
         <p className="text-sm text-muted-foreground">
           {rows.length === 0
-            ? "Polymarket accounts you have registered from the CLI."
-            : `${rows.length} registered account${rows.length === 1 ? "" : "s"}.`}
+            ? t("tables.accounts.subtitleEmpty")
+            : t("tables.accounts.subtitleCount", { count: rows.length })}
         </p>
       </header>
 
       <div className="flex items-start gap-3 rounded-lg border border-border bg-muted px-4 py-3">
         <Badge variant="destructive" className="mt-0.5 shrink-0 text-xs">
-          CLI only
+          {t("tables.accounts.cliOnlyBadge")}
         </Badge>
         <p className="text-sm text-foreground">
           <strong className="font-semibold">
-            Private-key import is CLI-only.
+            {t("tables.accounts.cliOnlyTitle")}
           </strong>{" "}
-          Run{" "}
-          <code className="rounded bg-background px-1 py-0.5 font-mono text-xs">
-            polyecho account import &lt;eoa&gt;
-          </code>{" "}
-          on the trader-core host. This dashboard is read-only and never
-          accepts or displays private keys.
+          {t("tables.accounts.cliOnlyBody", { cmd: "[[CMD]]" })
+            .split("[[CMD]]")
+            .flatMap((part, i) =>
+              i === 0
+                ? [part]
+                : [
+                    <code
+                      key="cmd"
+                      className="rounded bg-background px-1 py-0.5 font-mono text-xs"
+                    >
+                      polyecho account import &lt;eoa&gt;
+                    </code>,
+                    part,
+                  ],
+            )}
         </p>
       </div>
 
       {rows.length === 0 ? (
         <div className="rounded-lg border border-dashed py-16 text-center">
           <p className="text-sm text-muted-foreground">
-            No accounts registered yet. Import one from the CLI with{" "}
-            <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
-              polyecho account import &lt;eoa&gt;
-            </code>
-            .
+            {t("tables.accounts.emptyPrefix", { cmd: "[[CMD]]" })
+              .split("[[CMD]]")
+              .flatMap((part, i) =>
+                i === 0
+                  ? [part]
+                  : [
+                      <code
+                        key="cmd"
+                        className="rounded bg-muted px-1 py-0.5 font-mono text-xs"
+                      >
+                        polyecho account import &lt;eoa&gt;
+                      </code>,
+                      part,
+                    ],
+              )}
           </p>
         </div>
       ) : (
@@ -103,10 +125,12 @@ export default async function AccountsPage() {
           <Table>
             <TableHeader className="sticky top-0 z-10 bg-muted">
               <TableRow className="hover:bg-transparent">
-                <TableHead>Name</TableHead>
-                <TableHead>EOA address</TableHead>
-                <TableHead>Signature type</TableHead>
-                <TableHead>Status</TableHead>
+                <TableHead>{t("tables.accounts.col.name")}</TableHead>
+                <TableHead>{t("tables.accounts.col.eoaAddress")}</TableHead>
+                <TableHead>
+                  {t("tables.accounts.col.signatureType")}
+                </TableHead>
+                <TableHead>{t("tables.accounts.col.status")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>

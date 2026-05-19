@@ -19,6 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Pnl } from "@/components/pnl";
 import { shortAddress, formatDateTime, toNum } from "@/lib/format";
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import type { MyTradeRow } from "./page";
 
@@ -92,7 +93,9 @@ function NumericCell({
   return (
     <div className="text-right tabular-nums text-sm">
       {n === null ? (
-        <span className="text-muted-foreground">Not recorded</span>
+        <span className="text-muted-foreground">
+          {t("tables.common.notRecorded")}
+        </span>
       ) : (
         format(n)
       )}
@@ -103,7 +106,7 @@ function NumericCell({
 const columns: ColumnDef<MyTradeRow, unknown>[] = [
   {
     accessorKey: "market_id",
-    header: "Market",
+    header: t("tables.positions.col.market"),
     cell: ({ getValue }) => {
       const v = getValue<string | null>();
       return v ? (
@@ -114,13 +117,15 @@ const columns: ColumnDef<MyTradeRow, unknown>[] = [
           {v}
         </span>
       ) : (
-        <span className="text-muted-foreground">Not set</span>
+        <span className="text-muted-foreground">
+          {t("tables.common.notSet")}
+        </span>
       );
     },
   },
   {
     accessorKey: "leader_address",
-    header: "Leader",
+    header: t("tables.positions.col.leader"),
     cell: ({ getValue }) => {
       const v = getValue<string | null>();
       return v ? (
@@ -128,16 +133,23 @@ const columns: ColumnDef<MyTradeRow, unknown>[] = [
           {shortAddress(v)}
         </span>
       ) : (
-        <span className="text-muted-foreground">Not set</span>
+        <span className="text-muted-foreground">
+          {t("tables.common.notSet")}
+        </span>
       );
     },
   },
   {
     accessorKey: "side",
-    header: "Side",
+    header: t("tables.positions.col.side"),
     cell: ({ getValue }) => {
       const v = getValue<string | null>();
-      if (!v) return <span className="text-muted-foreground">Not set</span>;
+      if (!v)
+        return (
+          <span className="text-muted-foreground">
+            {t("tables.common.notSet")}
+          </span>
+        );
       const buy = v.toUpperCase() === "BUY";
       return (
         <Badge variant={buy ? "default" : "secondary"} className="text-xs">
@@ -148,7 +160,7 @@ const columns: ColumnDef<MyTradeRow, unknown>[] = [
   },
   {
     accessorKey: "size",
-    header: sortableHeader("Size", { numeric: true }),
+    header: sortableHeader(t("tables.positions.col.size"), { numeric: true }),
     cell: ({ getValue }) => (
       <NumericCell
         value={getValue<string | null>()}
@@ -159,7 +171,7 @@ const columns: ColumnDef<MyTradeRow, unknown>[] = [
   },
   {
     accessorKey: "price",
-    header: sortableHeader("Entry", { numeric: true }),
+    header: sortableHeader(t("tables.positions.col.entry"), { numeric: true }),
     cell: ({ getValue }) => (
       <NumericCell
         value={getValue<string | null>()}
@@ -170,7 +182,9 @@ const columns: ColumnDef<MyTradeRow, unknown>[] = [
   },
   {
     accessorKey: "matched_qty",
-    header: sortableHeader("Matched", { numeric: true }),
+    header: sortableHeader(t("tables.positions.col.matched"), {
+      numeric: true,
+    }),
     cell: ({ getValue }) => (
       <NumericCell
         value={getValue<string | null>()}
@@ -181,7 +195,9 @@ const columns: ColumnDef<MyTradeRow, unknown>[] = [
   },
   {
     accessorKey: "remaining_qty",
-    header: sortableHeader("Remaining", { numeric: true }),
+    header: sortableHeader(t("tables.positions.col.remaining"), {
+      numeric: true,
+    }),
     cell: ({ getValue }) => (
       <NumericCell
         value={getValue<string | null>()}
@@ -192,7 +208,7 @@ const columns: ColumnDef<MyTradeRow, unknown>[] = [
   },
   {
     accessorKey: "fill_status",
-    header: "Fill",
+    header: t("tables.positions.col.fill"),
     cell: ({ getValue }) => {
       const v = getValue<string>();
       return (
@@ -207,13 +223,13 @@ const columns: ColumnDef<MyTradeRow, unknown>[] = [
   },
   {
     accessorKey: "pnl_usd",
-    header: sortableHeader("PnL", { numeric: true }),
+    header: sortableHeader(t("tables.positions.col.pnl"), { numeric: true }),
     cell: ({ getValue }) => {
       const v = getValue<string | null>();
       if (toNum(v) === null) {
         return (
           <div className="text-right text-sm text-muted-foreground">
-            Not recorded
+            {t("tables.common.notRecorded")}
           </div>
         );
       }
@@ -227,7 +243,9 @@ const columns: ColumnDef<MyTradeRow, unknown>[] = [
   },
   {
     accessorKey: "opened_at",
-    header: sortableHeader("Opened", { numeric: true }),
+    header: sortableHeader(t("tables.positions.col.opened"), {
+      numeric: true,
+    }),
     cell: ({ getValue }) => (
       <div className="whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground">
         {formatDateTime(getValue<Date | null>())}
@@ -250,16 +268,19 @@ export function PositionsTable({ data }: { data: MyTradeRow[] }) {
       columns={columns}
       data={data}
       searchKey="market_id"
-      searchPlaceholder="Filter by market…"
+      searchPlaceholder={t("tables.positions.searchPlaceholder")}
       facetedFilters={[
         {
           columnId: "fill_status",
-          title: "Fill Status",
+          title: t("tables.positions.filter.fillStatus"),
           options: [
-            { label: "Filled", value: "filled" },
-            { label: "Pending", value: "pending" },
-            { label: "Partial", value: "partial" },
-            { label: "Rejected", value: "rejected" },
+            { label: t("tables.positions.filter.filled"), value: "filled" },
+            { label: t("tables.positions.filter.pending"), value: "pending" },
+            { label: t("tables.positions.filter.partial"), value: "partial" },
+            {
+              label: t("tables.positions.filter.rejected"),
+              value: "rejected",
+            },
           ],
         },
       ]}

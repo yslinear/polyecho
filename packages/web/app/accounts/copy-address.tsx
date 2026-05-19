@@ -9,10 +9,16 @@ import * as React from "react";
 import { Check, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { shortAddress } from "@/lib/format";
+import { t } from "@/lib/i18n";
 
 interface CopyAddressProps {
   address: string;
 }
+
+const COPY_LABELS = {
+  copied: t("tables.accounts.copied"),
+  copy: t("tables.accounts.copyAddress"),
+} as const;
 
 export function CopyAddress({ address }: CopyAddressProps) {
   const [copied, setCopied] = React.useState(false);
@@ -38,7 +44,7 @@ export function CopyAddress({ address }: CopyAddressProps) {
         size="icon"
         className="h-6 w-6"
         onClick={handleCopy}
-        aria-label={copied ? "Copied" : "Copy address"}
+        aria-label={copied ? COPY_LABELS.copied : COPY_LABELS.copy}
       >
         {copied ? (
           <Check className="h-3 w-3 text-gain" />
