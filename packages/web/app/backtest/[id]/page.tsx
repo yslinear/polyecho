@@ -13,6 +13,7 @@ import { notFound } from "next/navigation";
 import { eq } from "drizzle-orm";
 import Link from "next/link";
 
+import { t } from "@/lib/i18n";
 import { db } from "@/lib/db";
 import { cn } from "@/lib/utils";
 import { formatUsd } from "@/lib/format";
@@ -52,11 +53,11 @@ const STATUS_VARIANT: Record<
 };
 
 const STATUS_LABEL: Record<string, string> = {
-  pending: "Queued",
-  queued: "Queued",
-  running: "Running",
-  completed: "Completed",
-  failed: "Failed",
+  pending: t("backtest.result.status.pending"),
+  queued: t("backtest.result.status.queued"),
+  running: t("backtest.result.status.running"),
+  completed: t("backtest.result.status.completed"),
+  failed: t("backtest.result.status.failed"),
 };
 
 // ---------------------------------------------------------------------------
@@ -165,19 +166,19 @@ export default async function BacktestResultPage({ params }: PageProps) {
         href="/backtest/new"
         className="text-sm text-muted-foreground hover:text-foreground underline underline-offset-2"
       >
-        ← New Backtest
+        {t("backtest.result.back")}
       </Link>
 
       {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold">Backtest Result</h1>
+          <h1 className="text-2xl font-bold">{t("backtest.result.title")}</h1>
           <p className="font-mono text-sm text-muted-foreground mt-0.5 break-all">
-            Job: {id}
+            {t("backtest.result.job", { id })}
           </p>
           {job.leader_addresses.length > 0 && (
             <p className="text-sm text-muted-foreground mt-0.5">
-              Leader:{" "}
+              {t("backtest.result.leader")}{" "}
               <Link
                 href={`/discovery/${job.leader_addresses[0]}`}
                 className="font-mono underline underline-offset-2 hover:text-primary"
@@ -198,30 +199,44 @@ export default async function BacktestResultPage({ params }: PageProps) {
       {/* Job metadata */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle>Job Parameters</CardTitle>
+          <CardTitle>{t("backtest.result.params.title")}</CardTitle>
         </CardHeader>
         <CardContent>
           <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-4">
             <div>
-              <dt className="text-xs text-muted-foreground">Period</dt>
+              <dt className="text-xs text-muted-foreground">
+                {t("backtest.result.params.period")}
+              </dt>
               <dd className="mt-1 font-mono text-xs tabular-nums">
                 {job.start_date} → {job.end_date}
               </dd>
             </div>
             <div>
-              <dt className="text-xs text-muted-foreground">Capital</dt>
+              <dt className="text-xs text-muted-foreground">
+                {t("backtest.result.params.capital")}
+              </dt>
               <dd className="mt-1 tabular-nums">
                 {formatUsd(job.initial_capital_usd)}
               </dd>
             </div>
             <div>
-              <dt className="text-xs text-muted-foreground">Slippage</dt>
-              <dd className="mt-1 tabular-nums">{job.slippage_bps} bps</dd>
+              <dt className="text-xs text-muted-foreground">
+                {t("backtest.result.params.slippage")}
+              </dt>
+              <dd className="mt-1 tabular-nums">
+                {t("backtest.result.params.slippageUnit", {
+                  value: job.slippage_bps ?? 0,
+                })}
+              </dd>
             </div>
             <div>
-              <dt className="text-xs text-muted-foreground">Delay</dt>
+              <dt className="text-xs text-muted-foreground">
+                {t("backtest.result.params.delay")}
+              </dt>
               <dd className="mt-1 tabular-nums">
-                {job.execution_delay_seconds} s
+                {t("backtest.result.params.delayUnit", {
+                  value: job.execution_delay_seconds ?? 0,
+                })}
               </dd>
             </div>
           </dl>
@@ -232,12 +247,13 @@ export default async function BacktestResultPage({ params }: PageProps) {
       {isPending && (
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-base">Queued</CardTitle>
+            <CardTitle className="text-base">
+              {t("backtest.result.pending.title")}
+            </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <p className="text-sm text-muted-foreground">
-              Queued. A backtest worker will process this. This page
-              refreshes every 10 seconds; you can also reload manually.
+              {t("backtest.result.pending.body")}
             </p>
             <div
               className="space-y-3"
@@ -256,7 +272,7 @@ export default async function BacktestResultPage({ params }: PageProps) {
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center justify-between text-base">
-              <span>Running</span>
+              <span>{t("backtest.result.running.title")}</span>
               <span className="text-sm font-normal tabular-nums text-muted-foreground">
                 {progress.toFixed(1)}%
               </span>
@@ -276,8 +292,7 @@ export default async function BacktestResultPage({ params }: PageProps) {
               />
             </div>
             <p className="text-xs text-muted-foreground">
-              This page refreshes every 10 seconds. You can also reload
-              manually.
+              {t("backtest.result.running.body")}
             </p>
             <div className="space-y-3" aria-hidden="true">
               <Skeleton className="h-4 w-3/4" />
@@ -292,16 +307,17 @@ export default async function BacktestResultPage({ params }: PageProps) {
       {job.status === "failed" && (
         <Card className="border-destructive">
           <CardHeader className="pb-3">
-            <CardTitle className="text-destructive">Backtest Failed</CardTitle>
+            <CardTitle className="text-destructive">
+              {t("backtest.result.failed.title")}
+            </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-sm text-muted-foreground">
-              The backtest engine returned an error. Check the Python
-              worker logs with{" "}
+              {t("backtest.result.failed.bodyPrefix")}
               <code className="rounded bg-muted px-1 text-xs">
                 polyecho logs backtest
               </code>
-              , then queue the job again.
+              {t("backtest.result.failed.bodySuffix")}
             </p>
             {result && (
               <pre className="overflow-x-auto rounded bg-muted p-3 text-xs">
@@ -323,11 +339,10 @@ export default async function BacktestResultPage({ params }: PageProps) {
           <div className="space-y-4">
             <div className="space-y-1">
               <h2 className="text-sm font-semibold text-foreground">
-                Scenario comparison
+                {t("backtest.result.scenario.title")}
               </h2>
               <p className="text-xs text-muted-foreground">
-                Best, base, and worst case under different slippage and
-                delay assumptions.
+                {t("backtest.result.scenario.desc")}
               </p>
             </div>
             <ScenarioComparison scenarios={result.scenarios} />
@@ -336,7 +351,7 @@ export default async function BacktestResultPage({ params }: PageProps) {
           {/* PnL curve — all 3 scenarios */}
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle>PnL Curves</CardTitle>
+              <CardTitle>{t("backtest.result.pnlCurves")}</CardTitle>
             </CardHeader>
             <CardContent>
               <BacktestPnlChart scenarios={result.scenarios} />
@@ -351,7 +366,7 @@ export default async function BacktestResultPage({ params }: PageProps) {
           <Separator />
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle>Stats</CardTitle>
+              <CardTitle>{t("backtest.result.statsTitle")}</CardTitle>
             </CardHeader>
             <CardContent>
               <StatsTable stats={result.stats} />
@@ -361,7 +376,7 @@ export default async function BacktestResultPage({ params }: PageProps) {
           {result.pnl_curve && result.pnl_curve.length > 0 && (
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle>PnL Curve</CardTitle>
+                <CardTitle>{t("backtest.result.pnlCurve")}</CardTitle>
               </CardHeader>
               <CardContent>
                 <BacktestPnlChart
@@ -402,34 +417,50 @@ function ScenarioComparison({ scenarios }: { scenarios: ScenarioResult[] }) {
     render: (s: ScenarioStats) => ReactNode;
   }[] = [
     {
-      label: "Total Return",
+      label: t("backtest.result.table.totalReturn"),
       render: (s) => <ReturnPct value={s.total_return_pct} />,
     },
     {
-      label: "Annualized",
+      label: t("backtest.result.table.annualized"),
       render: (s) => <ReturnPct value={s.annualized_return_pct} />,
     },
-    { label: "Sharpe", render: (s) => num2(s.sharpe) },
+    { label: t("backtest.result.table.sharpe"), render: (s) => num2(s.sharpe) },
     {
-      label: "Max Drawdown",
+      label: t("backtest.result.table.maxDrawdown"),
       render: (s) => <ReturnPct value={s.max_drawdown_pct} />,
     },
-    { label: "Win Rate", render: (s) => `${num2(s.win_rate_pct)}%` },
-    { label: "Avg Hold", render: (s) => `${num2(s.avg_hold_hours)} h` },
-    { label: "Trades", render: (s) => String(s.trades_total) },
-    { label: "Skipped", render: (s) => String(s.trades_skipped) },
+    {
+      label: t("backtest.result.table.winRate"),
+      render: (s) => `${num2(s.win_rate_pct)}%`,
+    },
+    {
+      label: t("backtest.result.table.avgHold"),
+      render: (s) =>
+        t("backtest.result.table.avgHoldUnit", { value: num2(s.avg_hold_hours) }),
+    },
+    {
+      label: t("backtest.result.table.trades"),
+      render: (s) => String(s.trades_total),
+    },
+    {
+      label: t("backtest.result.table.skipped"),
+      render: (s) => String(s.trades_skipped),
+    },
   ];
 
   return (
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>Metric</TableHead>
+          <TableHead>{t("backtest.result.table.metric")}</TableHead>
           {scenarios.map((s) => (
             <TableHead key={s.label} className="text-right">
-              <span className="capitalize">{s.label}</span>
+              <span>{t(`backtest.result.scenario.labels.${s.label}`)}</span>
               <span className="block text-xs font-normal tabular-nums text-muted-foreground">
-                {s.slippage_bps} bps / {s.delay_seconds} s
+                {t("backtest.result.scenario.paramsCol", {
+                  slippage: s.slippage_bps,
+                  delay: s.delay_seconds,
+                })}
               </span>
             </TableHead>
           ))}
@@ -466,22 +497,36 @@ function StatsTable({
   // stays a plain tabular figure (color would be a false signal).
   const rows: { label: string; value: ReactNode }[] = [
     {
-      label: "Total Return",
+      label: t("backtest.result.table.totalReturn"),
       value: <ReturnPct value={stats.total_return_pct} />,
     },
     {
-      label: "Annualized",
+      label: t("backtest.result.table.annualized"),
       value: <ReturnPct value={stats.annualized_return_pct} />,
     },
-    { label: "Sharpe", value: num2(stats.sharpe) },
+    { label: t("backtest.result.table.sharpe"), value: num2(stats.sharpe) },
     {
-      label: "Max Drawdown",
+      label: t("backtest.result.table.maxDrawdown"),
       value: <ReturnPct value={stats.max_drawdown_pct} />,
     },
-    { label: "Win Rate", value: `${num2(stats.win_rate_pct)}%` },
-    { label: "Avg Hold", value: `${num2(stats.avg_hold_hours)} h` },
-    { label: "Trades", value: String(stats.trades_total) },
-    { label: "Skipped", value: String(stats.trades_skipped) },
+    {
+      label: t("backtest.result.table.winRate"),
+      value: `${num2(stats.win_rate_pct)}%`,
+    },
+    {
+      label: t("backtest.result.table.avgHold"),
+      value: t("backtest.result.table.avgHoldUnit", {
+        value: num2(stats.avg_hold_hours),
+      }),
+    },
+    {
+      label: t("backtest.result.table.trades"),
+      value: String(stats.trades_total),
+    },
+    {
+      label: t("backtest.result.table.skipped"),
+      value: String(stats.trades_skipped),
+    },
   ];
 
   if (compact) {
@@ -501,8 +546,10 @@ function StatsTable({
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>Metric</TableHead>
-          <TableHead className="text-right">Value</TableHead>
+          <TableHead>{t("backtest.result.table.metric")}</TableHead>
+          <TableHead className="text-right">
+            {t("backtest.result.table.value")}
+          </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
