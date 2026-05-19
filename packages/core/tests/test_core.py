@@ -1189,77 +1189,59 @@ async def test_p1_12_detected_all_skipped_is_healthy() -> None:
 async def test_p1_12_main_once_degenerate_returns_nonzero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import polyecho.core.__main__ as main_mod
-    from polyecho.shared.config import get_settings
+    """P1-12: ``python -m polyecho.core --once`` exits 2 (degenerate)
+    when a follow IS configured but the pipeline detects nothing.
 
-    # 防再種 gate: in fixture mode the deployed trader-core entrypoint
-    # follows NO demo leader unless the operator opts in via
-    # POLYECHO_CORE_PERSIST_FIXTURE.  This test exercises the P1-12
-    # *configured-follows degenerate* branch, so it must opt in to keep
-    # the demo-follow pipeline active (mirrors the discovery
-    # POLYECHO_DISCOVERY_PERSIST_FIXTURE tests).  The asserted contract
-    # (configured follows + 0 detected ⇒ exit 2) is unchanged.
-    monkeypatch.setenv("POLYECHO_CORE_PERSIST_FIXTURE", "1")
-    get_settings.cache_clear()
-    try:
-        ghost = "0xghostleader000000000000000000000000000099"
-
-        def _ghost_follows() -> list[FollowSpec]:
-            return [
-                FollowSpec(
-                    account_id=ACCT,
-                    leader_address=ghost,
-                    template=_tpl(),
-                    binding=WalletBinding(
-                        signature_type=0,
-                        funder=ghost,
-                        wallet_mode="eoa",
-                        derived=False,
-                    ),
-                )
-            ]
-
-        monkeypatch.setattr(main_mod, "_demo_follows", _ghost_follows)
-        rc = await main_mod.main(["--once"])
-        assert rc == 2  # degenerate ⇒ documented non-zero exit
-    finally:
-        get_settings.cache_clear()
-
-
-async def test_core_persist_fixture_gate_disables_demo_follows(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """防再種: fixture datasource + no opt-in ⇒ trader-core does NOT
-    follow the synthetic demo leader, so no fake copy_fill / fill events
-    can pollute the operator DB.  ``--once`` is then a clean idle pass
-    (no follows configured ⇒ exit 0), never the degenerate path.
-
-    Mirrors discovery's ``POLYECHO_DISCOVERY_PERSIST_FIXTURE`` gate tests
-    (gate-closed by default; opt-in restores the demo pipeline).  The
-    app emits structured JSON logs to stdout (not via stdlib handlers),
-    so the gate's named warning is asserted through ``capsys``.
+    The deployed entrypoint NEVER fabricates follows (the old
+    ``_demo_follows`` generator was removed — 不再有任何產生假資料的邏輯,
+    so production ``main()`` always builds ``follows = []``).  To exercise
+    the *configured-follows degenerate* branch we inject the follow via
+    the entrypoint's own ``TraderCore`` construction seam: a thin wrapper
+    that drives the REAL ``TraderCore`` with one ghost follow (a leader
+    absent from the fixtures ⇒ 0 detections).  This runs the REAL
+    ``run_once`` + REAL ``degenerate_once_pass`` + REAL exit-code mapping
+    end-to-end — strictly stronger than the old factory monkeypatch — and
+    keeps the asserted contract (configured follows + 0 detected ⇒ exit
+    2) intact and meaningful.
     """
-    import json
-
     import polyecho.core.__main__ as main_mod
-    from polyecho.shared.config import get_settings
 
-    monkeypatch.delenv("POLYECHO_CORE_PERSIST_FIXTURE", raising=False)
-    get_settings.cache_clear()
-    try:
-        # _demo_follows() left intact (the real 0xswing1… fixture leader);
-        # the deployed gate must empty it because we did NOT opt in.
-        rc = await main_mod.main(["--once"])
-        assert rc == 0  # no follows configured ⇒ valid idle, not degenerate
-        events = {
-            json.loads(line).get("event")
-            for line in capsys.readouterr().out.splitlines()
-            if line.strip().startswith("{")
-        }
-        assert "fixture_datasource_demo_follows_disabled" in events
-    finally:
-        get_settings.cache_clear()
+    ghost = "0xghostleader000000000000000000000000000099"
+
+    def _ghost_follows() -> list[FollowSpec]:
+        return [
+            FollowSpec(
+                account_id=ACCT,
+                leader_address=ghost,
+                template=_tpl(),
+                binding=WalletBinding(
+                    signature_type=0,
+                    funder=ghost,
+                    wallet_mode="eoa",
+                    derived=False,
+                ),
+            )
+        ]
+
+    # The real engine class (already imported at module top); the
+    # entrypoint resolves it via ``main_mod.TraderCore`` so patching that
+    # name is sufficient — we do NOT read ``main_mod.TraderCore`` (mypy
+    # no-implicit-reexport) to capture the original.
+    real_trader_core = TraderCore
+
+    def _configured_trader_core(
+        *, follows: list[FollowSpec], **kw: Any
+    ) -> TraderCore:
+        # The entrypoint passes follows=[]; substitute a configured ghost
+        # follow so the REAL engine runs the degenerate path. All other
+        # ctor kwargs (the real injected heartbeat/cursor writers) pass
+        # through unchanged.
+        assert follows == []  # proof main() itself fabricates NO follows
+        return real_trader_core(follows=_ghost_follows(), **kw)
+
+    monkeypatch.setattr(main_mod, "TraderCore", _configured_trader_core)
+    rc = await main_mod.main(["--once"])
+    assert rc == 2  # configured follow + 0 detected ⇒ documented exit 2
 
 
 # --- P1-13: TradeDeduplicator._locks is bounded (no memory leak) ----------

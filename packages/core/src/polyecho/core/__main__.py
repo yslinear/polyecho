@@ -39,10 +39,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-import uuid
-from decimal import Decimal
 
-from polyecho.core.evaluator import TemplateConfig
 from polyecho.core.trader import FollowSpec, TraderCore
 from polyecho.core.wiring import (
     make_cursor_writer,
@@ -50,41 +47,9 @@ from polyecho.core.wiring import (
     run_supervised,
 )
 from polyecho.shared.config import get_settings
-from polyecho.shared.copytrading import WalletBinding
-from polyecho.shared.datasource.factory import get_datasource
-from polyecho.shared.datasource.fixture import FixtureDataSource
 from polyecho.shared.logging import configure_logging
 
 logger = logging.getLogger(__name__)
-
-
-def _demo_follows() -> list[FollowSpec]:
-    """Fixture follow relations so ``--once`` exercises the full pipeline.
-
-    Uses a leader present in the bundled activity fixtures.  EOA binding
-    (signature_type 0) so no derivation/RPC is needed; the live lock keeps
-    this a pure dry-run regardless.
-    """
-    leader = "0xswing1000000000000000000000000000000001"
-    acct = uuid.uuid5(uuid.NAMESPACE_DNS, "polyecho.core.demo")
-    return [
-        FollowSpec(
-            account_id=acct,
-            leader_address=leader,
-            template=TemplateConfig(
-                copy_ratio=Decimal("0.01"),
-                max_position_usd=Decimal("50"),
-                min_trade_size_usd=Decimal("1"),
-                max_concurrent_positions=10,
-            ),
-            binding=WalletBinding(
-                signature_type=0,
-                funder=leader,
-                wallet_mode="eoa",
-                derived=False,
-            ),
-        )
-    ]
 
 
 async def main(argv: list[str] | None = None) -> int:
@@ -108,35 +73,15 @@ async def main(argv: list[str] | None = None) -> int:
     # the ``--once`` exit-code contract and dry-run semantics are
     # unchanged (they place / move / persist nothing on-chain).
     #
-    # 防再種 — fixture mode must NOT drive synthetic copy activity into
-    # the operator DB.  Mirrors ``discovery.__main__``: key on the
-    # *resolved datasource object* (not the settings string) so a
-    # live-like fake is never mis-gated.  A real ``FixtureDataSource``
-    # with no opt-in (``POLYECHO_CORE_PERSIST_FIXTURE``) means the demo
-    # fixture leader is NOT followed, so no synthetic ``copy_fill`` /
-    # fill / risk events are ever generated to pollute the operator DB.
+    # 防再種 — trader-core NEVER fabricates follow relations.  There is no
+    # demo/fixture follow generator: a deployment follows ONLY the
+    # operator-configured leaders (none here ⇒ empty).  This guarantees
+    # no synthetic ``copy_fill`` / fill / risk events can ever be
+    # generated into the operator DB from a bundled fixture leader.
     # ``degenerate_once_pass`` treats "no follows configured" as a valid
     # idle pass (exit 0), so the ``--once`` / CI-smoke contract is
     # preserved; the fixture DATASOURCE read path itself is untouched.
-    follows = _demo_follows()
-    if (
-        isinstance(get_datasource(), FixtureDataSource)
-        and not settings.core_persist_fixture
-    ):
-        follows = []
-        logger.warning(
-            "fixture_datasource_demo_follows_disabled",
-            extra={
-                "reason": (
-                    "POLYECHO_DATASOURCE=fixture and "
-                    "POLYECHO_CORE_PERSIST_FIXTURE not set — trader-core "
-                    "will NOT follow the demo fixture leader, so no "
-                    "synthetic copy events pollute the operator DB (set "
-                    "POLYECHO_CORE_PERSIST_FIXTURE=1 to restore the demo "
-                    "pipeline)."
-                ),
-            },
-        )
+    follows: list[FollowSpec] = []
     core = TraderCore(
         follows=follows,
         heartbeat_writer=make_heartbeat_writer(),

@@ -12,7 +12,6 @@ default (no flags)
     Scheduled loop:
     - Daily tasks at startup, then every 24 h.
     - Hourly tasks at startup, then every 1 h.
-    - Weekly seed sync at startup, then every 7 days.
     Uses simple asyncio scheduling; no extra dependencies.
 
 Structured logging
@@ -54,13 +53,12 @@ logger = logging.getLogger(__name__)
 
 _DAILY_INTERVAL = timedelta(hours=24)
 _HOURLY_INTERVAL = timedelta(hours=1)
-_WEEKLY_INTERVAL = timedelta(days=7)
 
 # I1 fix — error backoff, DISTINCT from the normal cadence.
 #
 # Previously, ANY unhandled exception in a task (empty DB at startup,
 # network not ready, transient DB hiccup) caused the loop to sleep the
-# FULL ``interval`` (up to 7 days for the weekly task) before retrying —
+# FULL ``interval`` (up to 24 h for the daily task) before retrying —
 # discovery would go dark for a day after a single startup blip.
 #
 # Now a failed iteration sleeps a SHORT ``retry_sleep`` instead: start at
@@ -73,7 +71,7 @@ _RETRY_SLEEP_MAX = timedelta(hours=1)
 
 # Idle keepalive cadence (false-stale fix).
 #
-# The daily/hourly/weekly cadence loops emit a ``discovery_heartbeat`` only
+# The daily/hourly cadence loops emit a ``discovery_heartbeat`` only
 # once per *completed pass*.  The daily loop then ``asyncio.sleep``s ~24 h
 # until its next run, so between two daily passes the worker writes NO
 # heartbeat for a whole day even though it is perfectly healthy.  ``/status``
@@ -198,7 +196,7 @@ async def _run_once(worker: DiscoveryWorker) -> None:
 
 
 async def _scheduled_loop(worker: DiscoveryWorker) -> None:
-    """Run daily, hourly, and weekly tasks on their respective cadences.
+    """Run daily and hourly tasks on their respective cadences.
 
     Tasks are staggered slightly to avoid thundering-herd on startup.
     Each task loop is independent; an exception in one does not stop others.
@@ -223,7 +221,7 @@ async def _scheduled_loop(worker: DiscoveryWorker) -> None:
                     retry_sleep,
                 )
                 # Short, capped exponential backoff — NOT the full
-                # interval (would dark-out discovery for up to a day/week
+                # interval (would dark-out discovery for up to a day
                 # after a single startup blip).
                 await asyncio.sleep(retry_sleep.total_seconds())
                 retry_sleep = min(retry_sleep * 2, _RETRY_SLEEP_MAX)
@@ -243,9 +241,6 @@ async def _scheduled_loop(worker: DiscoveryWorker) -> None:
     hourly_task = asyncio.create_task(
         _loop(worker.run_hourly, _HOURLY_INTERVAL, "hourly"), name="discovery-hourly"
     )
-    weekly_task = asyncio.create_task(
-        _loop(worker.run_weekly, _WEEKLY_INTERVAL, "weekly"), name="discovery-weekly"
-    )
     # Idle keepalive (false-stale fix): an independent ~90 s heartbeat task
     # so a worker sleeping ~24 h between daily passes keeps reporting
     # liveness and is NOT false-flagged 逾時/stale by ``/status``.  It is a
@@ -259,13 +254,12 @@ async def _scheduled_loop(worker: DiscoveryWorker) -> None:
 
     try:
         await asyncio.gather(
-            daily_task, hourly_task, weekly_task, keepalive_task
+            daily_task, hourly_task, keepalive_task
         )
     except asyncio.CancelledError:
         logger.info("scheduled loop cancelled, shutting down")
         daily_task.cancel()
         hourly_task.cancel()
-        weekly_task.cancel()
         keepalive_task.cancel()
         raise
 
@@ -291,7 +285,8 @@ async def main(*, once: bool = False) -> None:
     # no ``__aenter__``/``__aexit__``), so the fixture path is preserved
     # byte-for-byte while the live path now actually runs.
     async with datasource_lifecycle(get_datasource()) as ds:
-        # 防再種 — fixture mode must NOT auto-seed the operator DB.
+        # 防再種 — fixture mode must NOT auto-seed the operator DB, with
+        # NO opt-in to bypass it (不再有任何產生假資料的邏輯).
         #
         # In ``POLYECHO_DATASOURCE=fixture`` the worker would rank the
         # *synthetic* fixture leaderboard (demo wallets like
@@ -301,34 +296,29 @@ async def main(*, once: bool = False) -> None:
         # this: we key on the *resolved datasource object* (not just the
         # settings string) so a live-like fake (lifecycle tests patch
         # ``get_datasource``) is correctly NOT treated as fixture, while a
-        # real ``FixtureDataSource`` closes the worker's persistence gate
-        # UNLESS the operator explicitly opts in via
-        # ``POLYECHO_DISCOVERY_PERSIST_FIXTURE=1``.  The fixture DATASOURCE
-        # mechanism itself is untouched (still the default safe/test read
-        # path); only the DB *write* is suppressed.  The gate defaults
-        # OPEN and is flipped ONLY here, so every test that drives the
-        # worker / upsert helpers directly keeps exercising persistence.
-        from polyecho.shared.config import get_settings
-
-        persist_fixture = get_settings().discovery_persist_fixture
-        if isinstance(ds, FixtureDataSource) and not persist_fixture:
+        # real ``FixtureDataSource`` UNCONDITIONALLY closes the worker's
+        # persistence gate — there is no operator opt-in to write fixture
+        # data to the DB.  The fixture DATASOURCE mechanism itself is
+        # untouched (still the default safe/test read path); only the DB
+        # *write* is suppressed.  The gate defaults OPEN and is flipped
+        # ONLY here, so every test that drives the worker / upsert helpers
+        # directly keeps exercising persistence.
+        if isinstance(ds, FixtureDataSource):
             set_persistence_enabled(False)
             logger.warning(
                 "fixture_datasource_persistence_disabled",
                 extra={
                     "reason": (
-                        "POLYECHO_DATASOURCE=fixture and "
-                        "POLYECHO_DISCOVERY_PERSIST_FIXTURE not set — "
-                        "discovery will rank the fixture leaderboard but "
-                        "will NOT write candidate_leaders to the DB "
-                        "(set POLYECHO_DISCOVERY_PERSIST_FIXTURE=1 to "
-                        "opt in)."
+                        "POLYECHO_DATASOURCE=fixture — discovery will "
+                        "rank the fixture leaderboard but will NEVER "
+                        "write candidate_leaders to the DB (synthetic "
+                        "fixture data can never persist; no opt-in)."
                     ),
                 },
             )
         else:
-            # Explicit: live datasource, or fixture-with-opt-in → the
-            # worker persists normally (gate stays at its open default).
+            # Explicit: live datasource → the worker persists normally
+            # (gate stays at its open default).
             set_persistence_enabled(True)
 
         worker = DiscoveryWorker(ds)

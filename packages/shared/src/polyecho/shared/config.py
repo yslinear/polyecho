@@ -172,34 +172,12 @@ class Settings(BaseSettings):
             "'live' calls the Polymarket Data API at polymarket_data_api_url."
         ),
     )
-    discovery_persist_fixture: bool = Field(
-        default=False,
-        description=(
-            "Opt-in: when False (the default) and the discovery worker is "
-            "running on the FIXTURE datasource, the deployed discovery "
-            "entrypoint does NOT persist its synthetic fixture-ranked "
-            "candidate_leaders into the operator DB — fixture mode stays a "
-            "pure no-side-effect demo/test path and never auto-seeds the "
-            "live operator DB with fake leaders.  Set to True (env "
-            "POLYECHO_DISCOVERY_PERSIST_FIXTURE=1) only if you deliberately "
-            "want the fixture leaderboard written to the DB (e.g. seeding a "
-            "local demo).  No effect under the 'live' datasource."
-        ),
-    )
-    core_persist_fixture: bool = Field(
-        default=False,
-        description=(
-            "Opt-in: when False (the default) and trader-core is running on "
-            "the FIXTURE datasource, the deployed trader-core entrypoint does "
-            "NOT follow the synthetic demo fixture leader, so no synthetic "
-            "copy_fill / fill / risk events are ever generated into the "
-            "operator DB — fixture mode stays a pure no-side-effect demo/test "
-            "path and never auto-pollutes the live operator DB with fake "
-            "copy activity.  Set to True (env POLYECHO_CORE_PERSIST_FIXTURE=1) "
-            "only if you deliberately want the demo fixture pipeline exercised "
-            "(e.g. a local demo).  No effect under the 'live' datasource."
-        ),
-    )
+    # NOTE: there is intentionally NO opt-in to persist fixture/synthetic
+    # data.  Fixture mode is UNCONDITIONALLY non-persisting (the discovery
+    # entrypoint closes the worker persistence gate on the FIXTURE
+    # datasource with no bypass, and trader-core never fabricates follows)
+    # so synthetic/fixture data can NEVER be written to the operator DB —
+    # 不再有任何產生假資料的邏輯.
 
     # ------------------------------------------------------------------
     # Live trading — Phase-4 HARD safety lock (brief §9; default OFF)

@@ -12,18 +12,16 @@ polyecho.discovery
 ├── frequency.py         FrequencyStats, StrategyType, compute/classify/detect_drift
 ├── scoring.py           profit_score, replicability_score, final_score
 ├── riskflags.py         detect_risk_flags (insider_suspect → auto-reject)
-├── worker.py            DiscoveryWorker (4 sources + DB persistence)
-└── smart_money_seed.json  Editable wallet seed list (weekly sync)
+└── worker.py            DiscoveryWorker (3 sources + DB persistence)
 ```
 
-## Four discovery sources (PRD §5.2)
+## Three discovery sources (PRD §5.2)
 
 | Source                    | Cadence | Method                                       |
 |---------------------------|---------|----------------------------------------------|
 | Leaderboard               | Daily   | `get_leaderboard(time_period="MONTH", limit=200)` |
 | Hot-market top holders    | Daily   | `get_markets_by_volume` → `get_market_top_holders` |
 | Large new positions       | Hourly  | Scan known wallet pool for usdc_size > $5K   |
-| Smart-money seed          | Weekly  | Read `smart_money_seed.json`                 |
 
 ## Scoring (PRD §5.2)
 
@@ -69,7 +67,7 @@ an `events` row (severity=warning) for the push-sender.
 # One-shot pass (CI / manual)
 python -m polyecho.discovery --once
 
-# Scheduled service (daily + hourly + weekly loops)
+# Scheduled service (daily + hourly loops)
 python -m polyecho.discovery
 ```
 
@@ -86,19 +84,6 @@ pytest tests/ -v
 Tests use `FixtureDataSource` and mock `session_scope` — no DB required.
 All six fixture archetypes are covered (swing, scalper, drifted, insider,
 score-history persistence, worker smoke test).
-
-## Smart-money seed
-
-Edit `src/polyecho/discovery/smart_money_seed.json` directly.
-Format:
-
-```json
-[
-  { "wallet": "0x...", "comment": "why you added this wallet" }
-]
-```
-
-The weekly `sync_smart_money_seed()` run picks up changes automatically.
 
 ## Dependencies
 

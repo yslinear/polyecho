@@ -3,7 +3,7 @@
 PRD references: §5.2 (discovery sources), §5.3 (frequency analysis),
                 §8.1 (risk flags / auto-reject).
 
-Four data sources with different refresh cadences:
+Three data sources with different refresh cadences:
 - Leaderboard (daily): top 200 by 30-day profit.
 - Hot-market top holders (daily): top-10 holders for each market with
   24h volume > $100K.
@@ -14,8 +14,10 @@ Four data sources with different refresh cadences:
   catching brand-new wallets globally needs a Polygon CTF Exchange
   event-log scan, which is deferred to Phase 4 (it shares the
   chain-listener infra and is out of scope here).
-- Known smart-money list (weekly, manual): wallets in
-  ``smart_money_seed.json`` alongside this module.
+
+All discovered wallets come from REAL on-chain / Data-API activity via
+the ``DataSource``; the worker never seeds itself from a bundled wallet
+list (no synthetic/fixture wallets are ever written to the operator DB).
 
 Persistence
 -----------
@@ -36,14 +38,12 @@ If ``insider_suspect`` appears in risk flags the record is saved with
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from datetime import date as date_type
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -79,8 +79,6 @@ from polyecho.shared.models import CandidateLeader, CandidateScoreHistory, Event
 
 logger = logging.getLogger(__name__)
 
-_SEED_PATH = Path(__file__).parent / "smart_money_seed.json"
-
 # --- Fixture-mode DB-persistence gate (防再種) -----------------------------
 #
 # WHY: in ``POLYECHO_DATASOURCE=fixture`` the worker ranks the *synthetic*
@@ -91,9 +89,9 @@ _SEED_PATH = Path(__file__).parent / "smart_money_seed.json"
 #
 # DESIGN: a process-wide boolean, default ``True`` so the gate is a NO-OP
 # unless something explicitly closes it.  ONLY the deployed entrypoint
-# (:func:`polyecho.discovery.__main__.main`) closes it — and only when the
-# *resolved* datasource is a ``FixtureDataSource`` AND the operator has not
-# opted in via ``POLYECHO_DISCOVERY_PERSIST_FIXTURE=1``.  Because the gate
+# (:func:`polyecho.discovery.__main__.main`) closes it — UNCONDITIONALLY
+# whenever the *resolved* datasource is a ``FixtureDataSource`` (there is
+# NO operator opt-in to write fixture data to the DB).  Because the gate
 # defaults open and is flipped ONLY by ``main()``, every test that drives
 # the worker / upsert helpers directly (their own mocked ``session_scope``,
 # never through ``main()``) is unaffected — the entire discovery suite
@@ -118,8 +116,8 @@ def persistence_enabled() -> bool:
     """Whether the discovery worker may write candidate rows to the DB.
 
     ``True`` by default (every direct test path); flipped to ``False`` by
-    the deployed entrypoint under fixture-datasource-without-opt-in so
-    fixture mode never auto-seeds the operator DB.
+    the deployed entrypoint whenever the resolved datasource is a
+    ``FixtureDataSource`` so fixture mode never auto-seeds the operator DB.
     """
     return _persist_enabled
 
@@ -1067,14 +1065,13 @@ class DiscoveryWorker:
         # work done since the previous one.
         #
         # Per-SOURCE counters (``hot_market_holders`` / ``leaderboard`` /
-        # ``large_new_positions`` / ``smart_money_seed``) are incremented
-        # once per wallet ``_process_wallet`` handles, keyed by its
-        # ``source``.  They surface in the F0 heartbeat ``counters``
-        # sub-dict (free-form; the web /status reader only consumes known
-        # keys, so adding keys is additive-safe) so a *dead source*
-        # (e.g. live hot-markets 404) shows ``hot_market_holders: 0``
-        # instead of the whole worker merely looking healthy off the
-        # other sources.
+        # ``large_new_positions``) are incremented once per wallet
+        # ``_process_wallet`` handles, keyed by its ``source``.  They
+        # surface in the F0 heartbeat ``counters`` sub-dict (free-form;
+        # the web /status reader only consumes known keys, so adding keys
+        # is additive-safe) so a *dead source* (e.g. live hot-markets
+        # 404) shows ``hot_market_holders: 0`` instead of the whole
+        # worker merely looking healthy off the other sources.
         self._pass_counters: dict[str, int] = {
             "scanned": 0,
             "scored": 0,
@@ -1082,7 +1079,6 @@ class DiscoveryWorker:
             "hot_market_holders": 0,
             "leaderboard": 0,
             "large_new_positions": 0,
-            "smart_money_seed": 0,
         }
         # The exact reset baseline drained per heartbeat — kept in one
         # place so the source keys can never drift out of sync with the
@@ -1656,41 +1652,6 @@ class DiscoveryWorker:
         logger.info("discover_large_new_positions: done")
 
     # ------------------------------------------------------------------
-    # Source 4: Smart-money seed (weekly, manual)
-    # ------------------------------------------------------------------
-
-    async def sync_smart_money_seed(self) -> None:
-        """Upsert wallets from the smart_money_seed.json seed file (PRD §5.2).
-
-        The seed file lives at ``packages/discovery/src/polyecho/discovery/
-        smart_money_seed.json``.  Operators edit it directly; this method
-        reads the current list and ensures all addresses exist in the DB.
-        """
-        logger.info("sync_smart_money_seed: start")
-
-        if not _SEED_PATH.exists():
-            logger.warning("smart_money_seed.json not found at %s", _SEED_PATH)
-            return
-
-        try:
-            entries = json.loads(_SEED_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            logger.exception("failed to parse smart_money_seed.json")
-            return
-
-        logger.info("sync_smart_money_seed: %d seed wallets", len(entries))
-
-        for entry in entries:
-            wallet = entry.get("wallet", "").strip().lower()
-            if not wallet or not wallet.startswith("0x"):
-                logger.warning("skipping invalid seed entry: %s", entry)
-                continue
-            comment = entry.get("comment", "")
-            await self._process_wallet(wallet, "smart_money_seed", display_name=comment or None)
-
-        logger.info("sync_smart_money_seed: done")
-
-    # ------------------------------------------------------------------
     # Orchestration helpers
     # ------------------------------------------------------------------
 
@@ -1741,11 +1702,3 @@ class DiscoveryWorker:
             await self.discover_large_new_positions()
         logger.info("run_hourly: complete")
         self._log_cycle_duration("hourly", elapsed[0])
-
-    async def run_weekly(self) -> None:
-        """Run the weekly seed sync (source 4, PRD §5.2)."""
-        logger.info("run_weekly: start")
-        with perf_timer() as elapsed:
-            await self.sync_smart_money_seed()
-        logger.info("run_weekly: complete")
-        self._log_cycle_duration("weekly", elapsed[0])

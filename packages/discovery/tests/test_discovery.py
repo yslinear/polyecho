@@ -1370,7 +1370,7 @@ class TestUpsertCandidateBehaviour:
                 sess.add = MagicMock()
 
                 await _upsert_candidate(
-                    W_SWING, "smart_money_seed", display_name=None,
+                    W_SWING, "large_new_positions", display_name=None,
                     stats_7d={}, stats_30d={"pnl_usd": 2.0}, stats_90d={},
                     freq_stats_30d=self._fs(),
                     strategy_type=StrategyType.SWING,
@@ -1381,7 +1381,7 @@ class TestUpsertCandidateBehaviour:
 
         asyncio.get_event_loop().run_until_complete(_run())
         # Source merged & deduplicated + sorted; first_discovered_at untouched.
-        assert existing.sources == ["leaderboard", "smart_money_seed"]
+        assert existing.sources == ["large_new_positions", "leaderboard"]
         assert existing.first_discovered_at is sentinel_first
         assert existing.total_score == pytest.approx(42.0)
         # Never auto-unrejects, but a clean record stays "new".
@@ -2117,7 +2117,6 @@ class TestI1RetrySleepDistinctFromInterval:
             worker = MagicMock()
             worker.run_daily = _flaky
             worker.run_hourly = AsyncMock(side_effect=asyncio.CancelledError)
-            worker.run_weekly = AsyncMock(side_effect=asyncio.CancelledError)
             with patch(
                 "polyecho.discovery.__main__.asyncio.sleep", _fake_sleep
             ):
@@ -2126,10 +2125,9 @@ class TestI1RetrySleepDistinctFromInterval:
 
         asyncio.get_event_loop().run_until_complete(_run())
         # The daily task hit RuntimeError and recorded the SHORT retry
-        # sleep; the full 24h/7d interval must never have been slept.
+        # sleep; the full 24h interval must never have been slept.
         assert m._RETRY_SLEEP_INITIAL.total_seconds() in sleeps
         assert m._DAILY_INTERVAL.total_seconds() not in sleeps
-        assert m._WEEKLY_INTERVAL.total_seconds() not in sleeps
 
     def test_retry_sleep_constants_are_short_and_capped(self) -> None:
         from polyecho.discovery import __main__ as m
@@ -2761,8 +2759,9 @@ class TestDiscoveryIdleKeepalive:
 class TestFixturePersistenceGate:
     """The deployed discovery entrypoint must NOT persist the synthetic
     fixture leaderboard into ``candidate_leaders`` in fixture-datasource
-    mode (default), so a live operator DB is never auto-polluted with fake
-    leaders — UNLESS ``POLYECHO_DISCOVERY_PERSIST_FIXTURE=1`` opts in.
+    mode, so a live operator DB is never auto-polluted with fake leaders.
+    This is UNCONDITIONAL — there is no opt-in to write fixture data
+    (不再有任何產生假資料的邏輯).
 
     The gate defaults OPEN and is flipped ONLY by ``__main__.main()``;
     every other test drives the worker/upsert helpers directly (their own
@@ -2975,7 +2974,6 @@ class TestFixturePersistenceGate:
                 {"POLYECHO_DATASOURCE": "fixture"},
                 clear=False,
             ):
-                os.environ.pop("POLYECHO_DISCOVERY_PERSIST_FIXTURE", None)
                 get_settings.cache_clear()
                 asyncio.get_event_loop().run_until_complete(_run())
         finally:
@@ -2990,44 +2988,12 @@ class TestFixturePersistenceGate:
         assert upsert_thin_writes["n"] == 0
         assert upsert_cand_writes["n"] == 0
 
-    def test_main_fixture_with_optin_keeps_persistence(self) -> None:
-        """Opt-in (``POLYECHO_DISCOVERY_PERSIST_FIXTURE=1``) restores
-        persistence even on the fixture datasource."""
-        import os
-
-        from polyecho.discovery import __main__ as m
-        from polyecho.discovery.worker import persistence_enabled
-        from polyecho.shared.config import get_settings
-        from polyecho.shared.datasource import FixtureDataSource
-
-        seen: dict[str, bool] = {}
-
-        async def _run_once_spy(worker: Any) -> None:
-            # Capture the gate state the deployed pass would actually use.
-            seen["enabled"] = persistence_enabled()
-
-        async def _run() -> None:
-            with patch.object(
-                m, "get_datasource", return_value=FixtureDataSource()
-            ), patch.object(m, "_run_once", _run_once_spy):
-                await m.main(once=True)
-
-        try:
-            with patch.dict(
-                os.environ,
-                {
-                    "POLYECHO_DATASOURCE": "fixture",
-                    "POLYECHO_DISCOVERY_PERSIST_FIXTURE": "1",
-                },
-                clear=False,
-            ):
-                get_settings.cache_clear()
-                asyncio.get_event_loop().run_until_complete(_run())
-        finally:
-            get_settings.cache_clear()
-            m.set_persistence_enabled(True)
-
-        assert seen.get("enabled") is True
+    # NOTE: ``test_main_fixture_with_optin_keeps_persistence`` was removed
+    # — the ``POLYECHO_DISCOVERY_PERSIST_FIXTURE`` opt-in it asserted no
+    # longer exists (不再有任何產生假資料的邏輯: fixture data can NEVER be
+    # persisted, with no bypass).  The unconditional gate-closed behaviour
+    # is covered by the gate-closed test above; the live-datasource path
+    # (gate stays open) is covered by the test below.
 
     def test_main_live_like_datasource_keeps_persistence(self) -> None:
         """A non-FixtureDataSource (live / live-like) must NEVER trip the
@@ -3596,7 +3562,6 @@ class TestPerSourceHeartbeatCounters:
             "hot_market_holders",
             "leaderboard",
             "large_new_positions",
-            "smart_money_seed",
         ):
             assert worker._pass_counters[key] == 0
 
@@ -3626,7 +3591,6 @@ class TestPerSourceHeartbeatCounters:
         assert worker._pass_counters["hot_market_holders"] == 2
         assert worker._pass_counters["leaderboard"] == 1
         assert worker._pass_counters["large_new_positions"] == 0
-        assert worker._pass_counters["smart_money_seed"] == 0
         # ``scanned`` still counts every attempt regardless of source.
         assert worker._pass_counters["scanned"] == 3
 
@@ -3650,6 +3614,5 @@ class TestPerSourceHeartbeatCounters:
             "hot_market_holders",
             "leaderboard",
             "large_new_positions",
-            "smart_money_seed",
         ):
             assert worker._pass_counters[key] == 0
