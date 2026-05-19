@@ -14,6 +14,7 @@
  */
 
 import { ShieldCheck, Lock } from "lucide-react";
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 export interface LiveTradingStatusProps {
@@ -34,18 +35,20 @@ export function LiveTradingStatus({
   className,
 }: LiveTradingStatusProps) {
   const locked = !acked;
-  const label = locked ? "LOCKED" : "UNLOCKED";
+  const label = locked
+    ? t("common.liveTrading.locked")
+    : t("common.liveTrading.unlocked");
   const Icon = locked ? Lock : ShieldCheck;
 
   const pill = (
     <span
       data-live-status={locked ? "locked" : "unlocked"}
       role="status"
-      aria-label={`Live trading ${label}`}
+      aria-label={t("common.liveTrading.pillLabel", { state: label })}
       title={
         locked
-          ? "Live trading is LOCKED. The binding switch is the host env POLYECHO_LIVE_TRADING (CLI only)."
-          : "Live trading acknowledged in the audit log. The binding switch is still the host env POLYECHO_LIVE_TRADING (CLI only)."
+          ? t("common.liveTrading.titleLocked")
+          : t("common.liveTrading.titleUnlocked")
       }
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-semibold tabular-nums",
@@ -56,7 +59,7 @@ export function LiveTradingStatus({
       )}
     >
       <Icon className="h-3.5 w-3.5" aria-hidden="true" />
-      Live {label}
+      {t("common.liveTrading.pillText", { state: label })}
     </span>
   );
 
@@ -68,14 +71,11 @@ export function LiveTradingStatus({
         {pill}
       </div>
       <p className="max-w-prose text-sm text-muted-foreground">
-        This is a read-only indicator. The binding live-money switch is the
-        host environment variable{" "}
+        {t("common.liveTrading.explainerBefore")}
         <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
           POLYECHO_LIVE_TRADING
-        </code>{" "}
-        read by trader-core, and it is changed on the CLI only (PRD §5.7
-        high-danger tier). The dashboard intentionally offers no control to
-        enable or disable live trading.
+        </code>
+        {t("common.liveTrading.explainerAfter")}
       </p>
     </div>
   );

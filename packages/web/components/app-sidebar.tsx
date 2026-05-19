@@ -73,7 +73,7 @@ export function AppSidebar() {
         <SidebarGroup>
           <SidebarGroupLabel>{t("sidebar.nav")}</SidebarGroupLabel>
           <SidebarGroupContent>
-            <SidebarMenu aria-label="Primary navigation">
+            <SidebarMenu aria-label={t("sidebar.navAria")}>
               {navItems.map(({ href, labelKey, icon: Icon }) => {
                 const isActive = isNavItemActive(pathname, href);
                 const label = t(labelKey);

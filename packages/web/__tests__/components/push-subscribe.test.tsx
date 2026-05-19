@@ -29,6 +29,16 @@ vi.mock("sonner", () => ({
 }));
 
 import { PushSubscribe } from "@/components/push-subscribe";
+import { t } from "@/lib/i18n";
+
+// Accessible names are derived from the i18n dictionary, not hardcoded:
+// the test asserts the opt-in/opt-out FLOW (permission → register →
+// subscribe → POST) and stays correct if a translation string changes.
+const ENABLE_ARIA = t("common.push.enableAria");
+const DISABLE_ARIA = t("common.push.disableAria");
+// A stable, translation-independent fragment of the iOS install hint:
+// "Safari" is a proper noun kept verbatim by the PROPER-NOUN POLICY.
+const IOS_HINT_FRAGMENT = "Safari";
 
 const realNavigator = global.navigator;
 
@@ -99,16 +109,18 @@ describe("PushSubscribe", () => {
     installPushEnv({ permission: "default" });
     render(<PushSubscribe vapidPublicKey="QUJD" />);
     expect(
-      await screen.findByRole("button", { name: "開啟此裝置的推播通知" })
+      await screen.findByRole("button", { name: ENABLE_ARIA })
     ).toBeInTheDocument();
-    expect(screen.getByText(/加入主畫面/)).toBeInTheDocument();
+    expect(
+      screen.getByText(new RegExp(IOS_HINT_FRAGMENT))
+    ).toBeInTheDocument();
   });
 
   it("requests permission only on click, registers /sw.js, then POSTs toJSON()", async () => {
     const { registration } = installPushEnv({ permission: "granted" });
     render(<PushSubscribe vapidPublicKey="QUJD" />);
     const btn = await screen.findByRole("button", {
-      name: "開啟此裝置的推播通知",
+      name: ENABLE_ARIA,
     });
     await userEvent.click(btn);
 
@@ -131,7 +143,7 @@ describe("PushSubscribe", () => {
     installPushEnv({ permission: "denied" });
     render(<PushSubscribe vapidPublicKey="QUJD" />);
     await userEvent.click(
-      await screen.findByRole("button", { name: "開啟此裝置的推播通知" })
+      await screen.findByRole("button", { name: ENABLE_ARIA })
     );
     await waitFor(() => expect(toastError).toHaveBeenCalled());
     expect(subscribePush).not.toHaveBeenCalled();
@@ -141,7 +153,7 @@ describe("PushSubscribe", () => {
     installPushEnv({ permission: "granted", existing: true });
     render(<PushSubscribe vapidPublicKey="QUJD" />);
     const off = await screen.findByRole("button", {
-      name: "關閉此裝置的推播通知",
+      name: DISABLE_ARIA,
     });
     await userEvent.click(off);
     await waitFor(() => expect(unsubscribePush).toHaveBeenCalledTimes(1));
@@ -151,7 +163,7 @@ describe("PushSubscribe", () => {
     installPushEnv({ permission: "granted" });
     render(<PushSubscribe vapidPublicKey="" />);
     await userEvent.click(
-      await screen.findByRole("button", { name: "開啟此裝置的推播通知" })
+      await screen.findByRole("button", { name: ENABLE_ARIA })
     );
     expect(toastError).toHaveBeenCalled();
     expect(subscribePush).not.toHaveBeenCalled();

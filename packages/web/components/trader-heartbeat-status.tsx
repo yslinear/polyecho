@@ -16,6 +16,7 @@
 
 import { Activity, AlertTriangle } from "lucide-react";
 
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/format";
 import {
@@ -42,11 +43,15 @@ export function TraderHeartbeatStatus({
 
   let label: string;
   if (running && heartbeat) {
-    label = `跟單引擎：運行中 · 最後心跳 ${formatRelativeTime(heartbeat.ts)}`;
+    label = t("common.heartbeat.running", {
+      time: formatRelativeTime(heartbeat.ts),
+    });
   } else if (liveness === "stale") {
-    label = `跟單引擎：停止 / 無心跳（> ${HEARTBEAT_STALE_MINUTES} 分鐘）`;
+    label = t("common.heartbeat.stale", {
+      minutes: HEARTBEAT_STALE_MINUTES,
+    });
   } else {
-    label = "跟單引擎：無心跳";
+    label = t("common.heartbeat.missing");
   }
 
   return (
@@ -56,8 +61,10 @@ export function TraderHeartbeatStatus({
       aria-label={label}
       title={
         running
-          ? "跟單引擎正在運行。此為唯讀指示，無啟停控制。"
-          : `跟單引擎無新心跳超過 ${HEARTBEAT_STALE_MINUTES} 分鐘。此為唯讀指示，無啟停控制。`
+          ? t("common.heartbeat.titleRunning")
+          : t("common.heartbeat.titleStale", {
+              minutes: HEARTBEAT_STALE_MINUTES,
+            })
       }
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium tabular-nums",

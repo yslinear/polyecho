@@ -1,6 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { ScoreBadge } from "@/components/score-badge";
+import { t } from "@/lib/i18n";
+
+// Tier labels are derived from the i18n dictionary, not hardcoded English:
+// the test asserts the tier↔token↔colour mapping (the load-bearing
+// behaviour) and stays correct if a translation string changes.
+const HIGH = t("common.scoreBadge.high");
+const MID = t("common.scoreBadge.mid");
+const LOW = t("common.scoreBadge.low");
+const NOT_SET = t("common.scoreBadge.notSet");
 
 describe("ScoreBadge", () => {
   it("renders the label and a one-decimal value", () => {
@@ -14,31 +23,31 @@ describe("ScoreBadge", () => {
     expect(screen.getByText("55.5")).toBeInTheDocument();
   });
 
-  it("uses the gain token + a 'High' text tier for high scores (>= 70)", () => {
+  it("uses the gain token + a High text tier for high scores (>= 70)", () => {
     const { container } = render(<ScoreBadge label="" value={85} />);
     expect(container.firstChild).toHaveClass("text-gain");
-    expect(screen.getByText("High")).toBeInTheDocument();
+    expect(screen.getByText(HIGH)).toBeInTheDocument();
   });
 
-  it("uses the muted token + a 'Mid' text tier for mid scores (40–69)", () => {
+  it("uses the muted token + a Mid text tier for mid scores (40–69)", () => {
     const { container } = render(<ScoreBadge label="" value={50} />);
     expect(container.firstChild).toHaveClass("text-muted-foreground");
-    expect(screen.getByText("Mid")).toBeInTheDocument();
+    expect(screen.getByText(MID)).toBeInTheDocument();
   });
 
-  it("uses the loss token + a 'Low' text tier for low scores (< 40)", () => {
+  it("uses the loss token + a Low text tier for low scores (< 40)", () => {
     const { container } = render(<ScoreBadge label="" value={12} />);
     expect(container.firstChild).toHaveClass("text-loss");
-    expect(screen.getByText("Low")).toBeInTheDocument();
+    expect(screen.getByText(LOW)).toBeInTheDocument();
   });
 
   it("boundary: exactly 70 is High (gain) and exactly 40 is Mid (muted)", () => {
     const { container: c70 } = render(<ScoreBadge label="" value={70} />);
     expect(c70.firstChild).toHaveClass("text-gain");
-    expect(screen.getByText("High")).toBeInTheDocument();
+    expect(screen.getByText(HIGH)).toBeInTheDocument();
     const { container: c40 } = render(<ScoreBadge label="" value={40} />);
     expect(c40.firstChild).toHaveClass("text-muted-foreground");
-    expect(screen.getByText("Mid")).toBeInTheDocument();
+    expect(screen.getByText(MID)).toBeInTheDocument();
   });
 
   it("renders a muted textual placeholder for null / undefined / NaN", () => {
@@ -46,7 +55,7 @@ describe("ScoreBadge", () => {
       <ScoreBadge label="" value={null} />
     );
     expect(cNull.firstChild).toHaveClass("bg-muted");
-    expect(screen.getAllByText("Not set").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(NOT_SET).length).toBeGreaterThan(0);
 
     const { container: cUndef } = render(
       <ScoreBadge label="" value={undefined} />

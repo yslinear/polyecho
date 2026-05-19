@@ -8,6 +8,7 @@
  * not a warning), --loss (Low < 40), --muted for null/undefined/NaN.
  */
 
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 interface ScoreBadgeProps {
@@ -19,10 +20,14 @@ interface ScoreBadgeProps {
 type Tier = { tone: string; tier: string };
 
 function scoreTier(v: number): Tier {
-  if (v >= 70) return { tone: "bg-gain/15 text-gain", tier: "High" };
+  if (v >= 70)
+    return { tone: "bg-gain/15 text-gain", tier: t("common.scoreBadge.high") };
   if (v >= 40)
-    return { tone: "bg-muted text-muted-foreground", tier: "Mid" };
-  return { tone: "bg-loss/15 text-loss", tier: "Low" };
+    return {
+      tone: "bg-muted text-muted-foreground",
+      tier: t("common.scoreBadge.mid"),
+    };
+  return { tone: "bg-loss/15 text-loss", tier: t("common.scoreBadge.low") };
 }
 
 export function ScoreBadge({ label, value, className }: ScoreBadgeProps) {
@@ -51,7 +56,7 @@ export function ScoreBadge({ label, value, className }: ScoreBadgeProps) {
           </span>
         </>
       ) : (
-        <span className="opacity-70">Not set</span>
+        <span className="opacity-70">{t("common.scoreBadge.notSet")}</span>
       )}
     </span>
   );

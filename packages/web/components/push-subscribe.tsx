@@ -25,6 +25,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { subscribePush, unsubscribePush } from "@/app/alerts/actions";
+import { t } from "@/lib/i18n";
 
 /**
  * base64url VAPID key -> Uint8Array for applicationServerKey.
@@ -47,7 +48,7 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
 
 /** Compact device label from the UA (best effort, never PII-heavy). */
 function deviceLabelFromUA(): string {
-  if (typeof navigator === "undefined") return "未知裝置";
+  if (typeof navigator === "undefined") return t("common.push.unknownDevice");
   const ua = navigator.userAgent;
   const os = /iPhone|iPad|iPod/.test(ua)
     ? "iOS"
@@ -57,14 +58,14 @@ function deviceLabelFromUA(): string {
         ? "macOS"
         : /Windows/.test(ua)
           ? "Windows"
-          : "其他";
+          : t("common.push.otherOs");
   const browser = /CriOS|Chrome/.test(ua)
     ? "Chrome"
     : /Firefox/.test(ua)
       ? "Firefox"
       : /Safari/.test(ua)
         ? "Safari"
-        : "瀏覽器";
+        : t("common.push.otherBrowser");
   return `${os} ${browser}`;
 }
 
@@ -109,14 +110,14 @@ export function PushSubscribe({ vapidPublicKey }: { vapidPublicKey: string }) {
 
   async function onSubscribe() {
     if (!vapidPublicKey) {
-      toast.error("尚未設定 VAPID 公鑰，請先在後端設定推播金鑰。");
+      toast.error(t("common.push.errNoVapid"));
       return;
     }
     setState("working");
     try {
       const permission = await Notification.requestPermission();
       if (permission !== "granted") {
-        toast.error("未授予通知權限，無法開啟推播。");
+        toast.error(t("common.push.errPermission"));
         setState("idle");
         return;
       }
@@ -149,7 +150,7 @@ export function PushSubscribe({ vapidPublicKey }: { vapidPublicKey: string }) {
       }
     } catch {
       setState("idle");
-      toast.error("訂閱推播失敗，請確認瀏覽器支援並重試。");
+      toast.error(t("common.push.errSubscribe"));
     }
   }
 
@@ -163,18 +164,17 @@ export function PushSubscribe({ vapidPublicKey }: { vapidPublicKey: string }) {
       if (ep) await unsubscribePush(ep);
       setEndpoint(null);
       setState("idle");
-      toast.success("已關閉此裝置的推播通知。");
+      toast.success(t("common.push.okUnsubscribe"));
     } catch {
       setState("subscribed");
-      toast.error("取消訂閱失敗，請重試。");
+      toast.error(t("common.push.errUnsubscribe"));
     }
   }
 
   if (state === "unsupported") {
     return (
       <p className="max-w-prose text-sm text-muted-foreground">
-        此瀏覽器不支援 Web Push。請改用支援的瀏覽器，iPhone 需先將本站
-        以 Safari『加入主畫面』安裝為 App（iOS 16.4 以上）。
+        {t("common.push.unsupported")}
       </p>
     );
   }
@@ -191,20 +191,20 @@ export function PushSubscribe({ vapidPublicKey }: { vapidPublicKey: string }) {
             size="sm"
             disabled={busy}
             onClick={onUnsubscribe}
-            aria-label="關閉此裝置的推播通知"
+            aria-label={t("common.push.disableAria")}
           >
             <BellOff className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
-            {busy ? "處理中…" : "關閉推播"}
+            {busy ? t("common.push.working") : t("common.push.disable")}
           </Button>
         ) : (
           <Button
             size="sm"
             disabled={busy}
             onClick={onSubscribe}
-            aria-label="開啟此裝置的推播通知"
+            aria-label={t("common.push.enableAria")}
           >
             <Bell className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
-            {busy ? "處理中…" : "開啟推播通知"}
+            {busy ? t("common.push.working") : t("common.push.enable")}
           </Button>
         )}
         <span
@@ -212,7 +212,9 @@ export function PushSubscribe({ vapidPublicKey }: { vapidPublicKey: string }) {
           aria-live="polite"
           role="status"
         >
-          {isSubscribed ? "此裝置已訂閱警示推播。" : "尚未在此裝置開啟推播。"}
+          {isSubscribed
+            ? t("common.push.subscribed")
+            : t("common.push.notSubscribed")}
         </span>
       </div>
 
@@ -221,10 +223,7 @@ export function PushSubscribe({ vapidPublicKey }: { vapidPublicKey: string }) {
           className="mt-0.5 h-3.5 w-3.5 shrink-0"
           aria-hidden="true"
         />
-        <span>
-          iPhone 使用者：先用 Safari 開啟本站，點分享後選『加入主畫面』，
-          從主畫面圖示開啟 App 再開啟推播（iOS 16.4 以上才支援）。
-        </span>
+        <span>{t("common.push.iosHint")}</span>
       </p>
     </div>
   );

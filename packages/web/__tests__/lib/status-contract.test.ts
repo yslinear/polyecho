@@ -18,6 +18,21 @@ import {
   probePresentation,
   integrationNoData,
 } from "@/lib/status";
+import { t } from "@/lib/i18n";
+
+// `lib/status.tsx` renders verdict labels through the i18n dictionary.
+// Expected labels are derived from the SAME `status.verdict.*` keys the
+// presentation map uses, so this CROSS-STACK contract still pins the
+// running/stale/missing + ok/down behaviour while being robust to
+// translation (the variant/token/icon channels are the colour-blind-safe
+// invariants and remain asserted verbatim).
+const L_RUNNING = t("status.verdict.running");
+const L_STALE = t("status.verdict.stale", {
+  minutes: HEARTBEAT_STALE_MINUTES,
+});
+const L_NO_DATA = t("status.verdict.noData");
+const L_OK = t("status.verdict.ok");
+const L_DOWN = t("status.verdict.down");
 
 /**
  * CROSS-STACK contract guard for the /status `settings` rows — the sibling
@@ -145,7 +160,7 @@ describe("cross-stack: per-worker heartbeat -> running/stale/missing", () => {
       expect(liveness, key).toBe("running");
       const p = workerPresentation(liveness);
       expect(p.token).toBe("running");
-      expect(p.label).toBe("Running");
+      expect(p.label).toBe(L_RUNNING);
       expect(p.variant).toBe("secondary");
     }
   });
@@ -166,7 +181,7 @@ describe("cross-stack: per-worker heartbeat -> running/stale/missing", () => {
     expect(heartbeatLiveness(hb)).toBe("stale");
     const p = workerPresentation("stale");
     expect(p.token).toBe("stale");
-    expect(p.label).toBe(`Stale (> ${HEARTBEAT_STALE_MINUTES} min)`);
+    expect(p.label).toBe(L_STALE);
     expect(p.variant).toBe("destructive");
   });
 
@@ -182,7 +197,7 @@ describe("cross-stack: per-worker heartbeat -> running/stale/missing", () => {
     // PolyHermes "zero vs unavailable": missing is its OWN state, distinct
     // from a real failure — outline variant, not destructive.
     expect(p.token).toBe("missing");
-    expect(p.label).toBe("No data");
+    expect(p.label).toBe(L_NO_DATA);
     expect(p.variant).toBe("outline");
   });
 
@@ -217,7 +232,7 @@ describe("cross-stack: integration_status -> ok/down + checked_at", () => {
     expect(db.detail).toBe("SELECT 1 in 3ms");
     const okP = probePresentation(probeVerdict(db));
     expect(okP.token).toBe("ok");
-    expect(okP.label).toBe("OK");
+    expect(okP.label).toBe(L_OK);
     expect(okP.variant).toBe("secondary");
 
     // The load-bearing failure: ok:false must read as a REAL down, with a
@@ -227,7 +242,7 @@ describe("cross-stack: integration_status -> ok/down + checked_at", () => {
     expect(vpn.latency_ms).toBeNull();
     const downP = probePresentation(probeVerdict(vpn));
     expect(downP.token).toBe("down");
-    expect(downP.label).toBe("Down");
+    expect(downP.label).toBe(L_DOWN);
     expect(downP.variant).toBe("destructive");
   });
 
@@ -276,7 +291,7 @@ describe("cross-stack: integration_status -> ok/down + checked_at", () => {
     }
     // No probes at all -> the page shows the honest "No data" badge.
     expect(integrationNoData().token).toBe("missing");
-    expect(integrationNoData().label).toBe("No data");
+    expect(integrationNoData().label).toBe(L_NO_DATA);
     expect(integrationNoData().variant).toBe("outline");
   });
 

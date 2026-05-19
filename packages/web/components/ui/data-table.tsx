@@ -30,6 +30,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -69,11 +70,11 @@ export function DataTable<TData, TValue>({
   columns,
   data,
   searchKey,
-  searchPlaceholder = "Search…",
+  searchPlaceholder = t("common.dataTable.search"),
   facetedFilters = [],
   pageSize = 25,
   className,
-  emptyState = "No rows to show yet. Adjust the filters above or check back once data has been ingested.",
+  emptyState = t("common.dataTable.empty"),
 }: DataTableProps<TData, TValue>) {
   const [sorting, setSorting] = React.useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([]);
@@ -136,7 +137,7 @@ export function DataTable<TData, TValue>({
                   checked={!currentValue}
                   onCheckedChange={() => col.setFilterValue("")}
                 >
-                  All
+                  {t("common.dataTable.all")}
                 </DropdownMenuCheckboxItem>
                 {ff.options.map((opt) => (
                   <DropdownMenuCheckboxItem
@@ -160,7 +161,8 @@ export function DataTable<TData, TValue>({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="outline" size="sm" className="ml-auto h-8 text-xs">
-              Columns <ChevronDown className="ml-1 h-3 w-3 opacity-50" />
+              {t("common.dataTable.columns")}{" "}
+              <ChevronDown className="ml-1 h-3 w-3 opacity-50" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-36">
@@ -244,8 +246,9 @@ export function DataTable<TData, TValue>({
       {/* Pagination */}
       <div className="flex items-center justify-between text-sm text-muted-foreground">
         <span>
-          {table.getFilteredRowModel().rows.length} row
-          {table.getFilteredRowModel().rows.length !== 1 ? "s" : ""}
+          {t("common.dataTable.rowCount", {
+            count: table.getFilteredRowModel().rows.length,
+          })}
         </span>
         <div className="flex items-center gap-1">
           <Button
@@ -254,12 +257,15 @@ export function DataTable<TData, TValue>({
             className="h-7 w-7"
             onClick={() => table.previousPage()}
             disabled={!table.getCanPreviousPage()}
+            aria-label={t("common.dataTable.previousPage")}
           >
             <ChevronLeft className="h-4 w-4" />
           </Button>
           <span className="min-w-[5rem] text-center">
-            Page {table.getState().pagination.pageIndex + 1} of{" "}
-            {table.getPageCount()}
+            {t("common.dataTable.pageOf", {
+              page: table.getState().pagination.pageIndex + 1,
+              total: table.getPageCount(),
+            })}
           </span>
           <Button
             variant="outline"
@@ -267,6 +273,7 @@ export function DataTable<TData, TValue>({
             className="h-7 w-7"
             onClick={() => table.nextPage()}
             disabled={!table.getCanNextPage()}
+            aria-label={t("common.dataTable.nextPage")}
           >
             <ChevronRight className="h-4 w-4" />
           </Button>

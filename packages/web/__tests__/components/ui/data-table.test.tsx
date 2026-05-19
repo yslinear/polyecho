@@ -6,6 +6,19 @@ import {
   type ColumnDef,
 } from "@/components/ui/data-table";
 import { Button } from "@/components/ui/button";
+import { t } from "@/lib/i18n";
+
+// Strings are derived from the i18n dictionary, not hardcoded English: the
+// test asserts the table BEHAVIOUR (row count, filtering, sorting,
+// pagination) via the same keys the component renders, so a translation
+// change cannot silently break it.
+const rowCount = (count: number) =>
+  t("common.dataTable.rowCount", { count });
+const pageOf = (page: number, total: number) =>
+  t("common.dataTable.pageOf", { page, total });
+const SEARCH_PLACEHOLDER = t("common.dataTable.search");
+const ALL = t("common.dataTable.all");
+const EMPTY = t("common.dataTable.empty");
 
 interface Row {
   name: string;
@@ -50,15 +63,13 @@ describe("ui/DataTable", () => {
   it("renders all rows and a row count", () => {
     render(<DataTable columns={columns} data={data} />);
     expect(bodyRows()).toHaveLength(4);
-    expect(screen.getByText("4 rows")).toBeInTheDocument();
+    expect(screen.getByText(rowCount(4))).toBeInTheDocument();
   });
 
   it("renders the default honest empty state when there is no data", () => {
     render(<DataTable columns={columns} data={[]} />);
-    expect(
-      screen.getByText(/No rows to show yet\./)
-    ).toBeInTheDocument();
-    expect(screen.getByText("0 rows")).toBeInTheDocument();
+    expect(screen.getByText(EMPTY)).toBeInTheDocument();
+    expect(screen.getByText(rowCount(0))).toBeInTheDocument();
   });
 
   it("renders a caller-supplied emptyState node when provided", () => {
@@ -95,10 +106,13 @@ describe("ui/DataTable", () => {
     render(
       <DataTable columns={columns} data={data} searchKey="name" />
     );
-    await userEvent.type(screen.getByPlaceholderText("Search…"), "car");
+    await userEvent.type(
+      screen.getByPlaceholderText(SEARCH_PLACEHOLDER),
+      "car"
+    );
     expect(bodyRows()).toHaveLength(1);
     expect(screen.getByText("carol")).toBeInTheDocument();
-    expect(screen.getByText("1 row")).toBeInTheDocument();
+    expect(screen.getByText(rowCount(1))).toBeInTheDocument();
   });
 
   it("faceted filter narrows rows by exact value and 'All' resets", async () => {
@@ -127,7 +141,7 @@ describe("ui/DataTable", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /Status/ }));
     await userEvent.click(
-      await screen.findByRole("menuitemcheckbox", { name: "All" })
+      await screen.findByRole("menuitemcheckbox", { name: ALL })
     );
     expect(bodyRows()).toHaveLength(4);
   });
@@ -141,7 +155,7 @@ describe("ui/DataTable", () => {
     render(<DataTable columns={columns} data={many} pageSize={3} />);
 
     expect(bodyRows()).toHaveLength(3);
-    expect(screen.getByText("Page 1 of 3")).toBeInTheDocument();
+    expect(screen.getByText(pageOf(1, 3))).toBeInTheDocument();
 
     // The two pagination buttons are the only icon buttons; next = last
     const navButtons = screen
@@ -149,9 +163,9 @@ describe("ui/DataTable", () => {
       .filter((b) => b.classList.contains("h-7"));
     const nextBtn = navButtons[navButtons.length - 1];
     await userEvent.click(nextBtn);
-    expect(screen.getByText("Page 2 of 3")).toBeInTheDocument();
+    expect(screen.getByText(pageOf(2, 3))).toBeInTheDocument();
 
     // total filtered count still reflects all rows
-    expect(screen.getByText("7 rows")).toBeInTheDocument();
+    expect(screen.getByText(rowCount(7))).toBeInTheDocument();
   });
 });

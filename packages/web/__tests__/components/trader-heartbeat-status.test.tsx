@@ -17,6 +17,22 @@ import {
   heartbeatLiveness,
   HEARTBEAT_STALE_MINUTES,
 } from "@/lib/settings-keys";
+import { t } from "@/lib/i18n";
+
+// Expected labels are derived from the i18n dictionary, not hardcoded:
+// the test asserts the liveness→label mapping + data-attr + no-control
+// invariant (the load-bearing behaviour), robust to translation. The
+// {{time}}/{{minutes}} placeholders are stripped so the assertion does
+// not depend on the runtime-formatted relative time or the threshold.
+const PLACEHOLDER = /\s*\{\{[^}]+\}\}\s*/g;
+const RUNNING_LABEL = t("common.heartbeat.running", { time: "" }).replace(
+  PLACEHOLDER,
+  ""
+);
+const STALE_LABEL = t("common.heartbeat.stale", {
+  minutes: HEARTBEAT_STALE_MINUTES,
+});
+const MISSING_LABEL = t("common.heartbeat.missing");
 
 const NOW = new Date("2026-05-18T12:00:00.000Z");
 
@@ -74,7 +90,7 @@ describe("heartbeatLiveness", () => {
 });
 
 describe("TraderHeartbeatStatus", () => {
-  it("renders 運行中 with a recent heartbeat", () => {
+  it("renders the running label + relative time with a recent heartbeat", () => {
     const hb = coerceHeartbeat(payload(45));
     render(
       <TraderHeartbeatStatus
@@ -83,12 +99,14 @@ describe("TraderHeartbeatStatus", () => {
       />
     );
     const el = screen.getByRole("status");
-    expect(el.textContent).toContain("運行中");
-    expect(el.textContent).toContain("最後心跳");
+    // Static part of the running label (placeholder stripped) is present…
+    expect(el.textContent).toContain(RUNNING_LABEL);
+    // …and the {{time}} slot is actually filled by a relative-time string.
+    expect(el.textContent!.length).toBeGreaterThan(RUNNING_LABEL.length);
     expect(el).toHaveAttribute("data-heartbeat-status", "running");
   });
 
-  it("renders 停止 / 無心跳 when the heartbeat is stale", () => {
+  it("renders the stale label when the heartbeat is stale", () => {
     const hb = coerceHeartbeat(payload(HEARTBEAT_STALE_MINUTES * 60 + 120));
     render(
       <TraderHeartbeatStatus
@@ -97,17 +115,16 @@ describe("TraderHeartbeatStatus", () => {
       />
     );
     const el = screen.getByRole("status");
-    expect(el.textContent).toContain("停止");
-    expect(el.textContent).toContain("無心跳");
+    expect(el.textContent).toBe(STALE_LABEL);
     expect(el).toHaveAttribute("data-heartbeat-status", "stale");
   });
 
-  it("renders 無心跳 when the row is missing", () => {
+  it("renders the missing label when the row is missing", () => {
     render(
       <TraderHeartbeatStatus heartbeat={null} liveness="missing" />
     );
     const el = screen.getByRole("status");
-    expect(el.textContent).toContain("無心跳");
+    expect(el.textContent).toBe(MISSING_LABEL);
     expect(el).toHaveAttribute("data-heartbeat-status", "missing");
   });
 
