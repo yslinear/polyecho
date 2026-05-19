@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
+import { t } from "@/lib/i18n";
 
 /**
  * State coverage for /backtest/[id] (async Server Component).
@@ -10,10 +11,11 @@ import { render, screen } from "@testing-library/react";
  * ResponsiveContainer is stubbed (0x0 in jsdom) so the completed-state
  * chart island mounts. No DB, no network.
  *
- * These assert the DESIGN.md honesty contract: a queued job says so
- * plainly ("Queued. A backtest worker will process this."), failed jobs
- * give the real next action, and completed jobs render PnL with
- * sign+arrow+tabular semantics (color is reinforcement only).
+ * These assert the DESIGN.md honesty contract via the i18n dictionary
+ * (not hardcoded prose, so they survive translation edits): a queued job
+ * says so plainly, failed jobs give the real next action, and completed
+ * jobs render PnL with sign+arrow+tabular semantics (color is
+ * reinforcement only — language-neutral, asserted literally).
  */
 
 let row: Record<string, unknown> | undefined;
@@ -80,14 +82,17 @@ describe("/backtest/[id] result page", () => {
     expect(notFound).toHaveBeenCalledTimes(1);
   });
 
-  it("pending: shows the plain queued sentence + Queued badge", async () => {
+  it("pending: shows the plain queued sentence + humanised badge", async () => {
     row = { ...baseJob, status: "pending" };
     render(await renderPage());
+    // The honest "worker will process this" sentence (i18n body copy).
     expect(
-      screen.getByText(/Queued\. A backtest worker will process this\./i)
+      screen.getByText(t("backtest.result.pending.body"))
     ).toBeInTheDocument();
     // Status label is humanised, never the raw enum.
-    expect(screen.getAllByText("Queued").length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(t("backtest.result.status.pending")).length
+    ).toBeGreaterThan(0);
     expect(screen.queryByText("pending")).not.toBeInTheDocument();
   });
 
@@ -106,12 +111,21 @@ describe("/backtest/[id] result page", () => {
       result: { error: "engine boom" },
     };
     render(await renderPage());
-    expect(screen.getByText(/Backtest Failed/i)).toBeInTheDocument();
     expect(
-      screen.getByText(/polyecho logs backtest/i)
+      screen.getByText(t("backtest.result.failed.title"))
     ).toBeInTheDocument();
+    // The CLI command stays English by proper-noun policy (rendered in a
+    // <code> block) — the real next action a failed run must surface.
     expect(
-      screen.getByText(/queue the job again/i)
+      screen.getByText("polyecho logs backtest")
+    ).toBeInTheDocument();
+    // The actionable suffix prose ("…then queue the job again") is i18n.
+    expect(
+      screen.getByText((_, el) =>
+        (el?.textContent ?? "").includes(
+          t("backtest.result.failed.bodySuffix")
+        )
+      )
     ).toBeInTheDocument();
   });
 

@@ -12,6 +12,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
 
+import { t } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
 import {
   Form,
@@ -40,13 +41,17 @@ const schema = z
   .object({
     leader_address: z
       .string()
-      .min(10, "Enter a valid wallet address")
-      .regex(/^0x[0-9a-fA-F]+$/, "Must start with 0x"),
-    start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD"),
-    end_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD"),
+      .min(10, t("backtest.form.validation.walletInvalid"))
+      .regex(/^0x[0-9a-fA-F]+$/, t("backtest.form.validation.walletPrefix")),
+    start_date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, t("backtest.form.validation.dateFormat")),
+    end_date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, t("backtest.form.validation.dateFormat")),
     initial_capital_usd: z.coerce
       .number()
-      .min(10, "Minimum $10")
+      .min(10, t("backtest.form.validation.capitalMin"))
       .max(1_000_000),
     copy_ratio: z.coerce
       .number()
@@ -74,12 +79,12 @@ const schema = z
       return hasCopyRatio || hasFixed;
     },
     {
-      message: "Provide either copy_ratio or fixed_size_usd",
+      message: t("backtest.form.validation.sizingRequired"),
       path: ["copy_ratio"],
     }
   )
   .refine((d) => d.start_date < d.end_date, {
-    message: "start_date must be before end_date",
+    message: t("backtest.form.validation.dateOrder"),
     path: ["end_date"],
   });
 
@@ -179,13 +184,13 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
         category_whitelist,
         scenario: values.scenario,
       });
-      toast.success("Backtest queued. Redirecting…");
+      toast.success(t("backtest.form.toastQueued"));
     } catch (err) {
       // redirect() throws internally; re-throw to let Next.js handle it
       if ((err as Error).message?.includes("NEXT_REDIRECT")) {
         throw err;
       }
-      toast.error("Failed to queue backtest", {
+      toast.error(t("backtest.form.toastError"), {
         description: String(err),
       });
       setSubmitting(false);
@@ -197,18 +202,18 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
       <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-10">
         {/* ---- Leader & Dates ---- */}
         <Section
-          title="Leader & date range"
-          hint="Which wallet to mirror, and the window to replay."
+          title={t("backtest.form.sections.leaderDates.title")}
+          hint={t("backtest.form.sections.leaderDates.hint")}
         >
           <FormField
             control={form.control}
             name="leader_address"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Leader Address</FormLabel>
+                <FormLabel>{t("backtest.form.fields.leaderAddress.label")}</FormLabel>
                 <FormControl>
                   <Input
-                    placeholder="0x…"
+                    placeholder={t("backtest.form.fields.leaderAddress.placeholder")}
                     autoComplete="off"
                     spellCheck={false}
                     className="font-mono"
@@ -216,7 +221,7 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
                   />
                 </FormControl>
                 <FormDescription>
-                  Wallet address of the leader to backtest
+                  {t("backtest.form.fields.leaderAddress.help")}
                 </FormDescription>
                 <FormMessage />
               </FormItem>
@@ -229,7 +234,7 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
               name="start_date"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Start Date</FormLabel>
+                  <FormLabel>{t("backtest.form.fields.startDate.label")}</FormLabel>
                   <FormControl>
                     <Input type="date" {...field} />
                   </FormControl>
@@ -242,7 +247,7 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
               name="end_date"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>End Date</FormLabel>
+                  <FormLabel>{t("backtest.form.fields.endDate.label")}</FormLabel>
                   <FormControl>
                     <Input type="date" {...field} />
                   </FormControl>
@@ -257,15 +262,15 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
 
         {/* ---- Capital & Sizing ---- */}
         <Section
-          title="Capital & sizing"
-          hint="Starting capital and how each copied trade is sized. Set a copy ratio or a fixed size, not both."
+          title={t("backtest.form.sections.capital.title")}
+          hint={t("backtest.form.sections.capital.hint")}
         >
           <FormField
             control={form.control}
             name="initial_capital_usd"
             render={({ field }) => (
               <FormItem className="max-w-xs">
-                <FormLabel>Initial Capital (USD)</FormLabel>
+                <FormLabel>{t("backtest.form.fields.initialCapital.label")}</FormLabel>
                 <FormControl>
                   <Input
                     type="number"
@@ -286,20 +291,20 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
               name="copy_ratio"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Copy Ratio</FormLabel>
+                  <FormLabel>{t("backtest.form.fields.copyRatio.label")}</FormLabel>
                   <FormControl>
                     <Input
                       type="number"
                       step="0.0001"
                       min="0.0001"
                       max="1"
-                      placeholder="0.001"
+                      placeholder={t("backtest.form.fields.copyRatio.placeholder")}
                       className="tabular-nums"
                       {...field}
                       value={field.value ?? ""}
                     />
                   </FormControl>
-                  <FormDescription>e.g. 0.001 = 0.1%</FormDescription>
+                  <FormDescription>{t("backtest.form.fields.copyRatio.help")}</FormDescription>
                   <FormMessage />
                 </FormItem>
               )}
@@ -309,19 +314,19 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
               name="fixed_size_usd"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Fixed Size (USD)</FormLabel>
+                  <FormLabel>{t("backtest.form.fields.fixedSize.label")}</FormLabel>
                   <FormControl>
                     <Input
                       type="number"
                       step="0.5"
                       min="1"
-                      placeholder="Leave blank to use copy ratio"
+                      placeholder={t("backtest.form.fields.fixedSize.placeholder")}
                       className="tabular-nums"
                       {...field}
                       value={field.value ?? ""}
                     />
                   </FormControl>
-                  <FormDescription>Fixed dollar amount per trade</FormDescription>
+                  <FormDescription>{t("backtest.form.fields.fixedSize.help")}</FormDescription>
                   <FormMessage />
                 </FormItem>
               )}
@@ -334,7 +339,7 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
               name="max_position_usd"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Max Position (USD)</FormLabel>
+                  <FormLabel>{t("backtest.form.fields.maxPosition.label")}</FormLabel>
                   <FormControl>
                     <Input
                       type="number"
@@ -353,7 +358,7 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
               name="min_trade_size_usd"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Min Trade Size (USD)</FormLabel>
+                  <FormLabel>{t("backtest.form.fields.minTradeSize.label")}</FormLabel>
                   <FormControl>
                     <Input
                       type="number"
@@ -374,7 +379,7 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
             name="daily_loss_limit_usd"
             render={({ field }) => (
               <FormItem className="max-w-xs">
-                <FormLabel>Daily Loss Limit (USD)</FormLabel>
+                <FormLabel>{t("backtest.form.fields.dailyLossLimit.label")}</FormLabel>
                 <FormControl>
                   <Input
                     type="number"
@@ -385,7 +390,7 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
                   />
                 </FormControl>
                 <FormDescription>
-                  Stop copying once the day&rsquo;s loss exceeds this limit
+                  {t("backtest.form.fields.dailyLossLimit.help")}
                 </FormDescription>
                 <FormMessage />
               </FormItem>
@@ -397,8 +402,8 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
 
         {/* ---- Execution Params ---- */}
         <Section
-          title="Execution model"
-          hint="Slippage and fill delay applied to every simulated trade."
+          title={t("backtest.form.sections.execution.title")}
+          hint={t("backtest.form.sections.execution.hint")}
         >
           <div className="grid grid-cols-2 gap-5">
             <FormField
@@ -406,7 +411,7 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
               name="slippage_bps"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Slippage (bps)</FormLabel>
+                  <FormLabel>{t("backtest.form.fields.slippage.label")}</FormLabel>
                   <FormControl>
                     <Input
                       type="number"
@@ -416,7 +421,7 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
                       {...field}
                     />
                   </FormControl>
-                  <FormDescription>150 bps = 1.5%</FormDescription>
+                  <FormDescription>{t("backtest.form.fields.slippage.help")}</FormDescription>
                   <FormMessage />
                 </FormItem>
               )}
@@ -426,7 +431,7 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
               name="execution_delay_seconds"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Execution Delay (s)</FormLabel>
+                  <FormLabel>{t("backtest.form.fields.executionDelay.label")}</FormLabel>
                   <FormControl>
                     <Input
                       type="number"
@@ -436,7 +441,7 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
                       {...field}
                     />
                   </FormControl>
-                  <FormDescription>Simulated fill delay</FormDescription>
+                  <FormDescription>{t("backtest.form.fields.executionDelay.help")}</FormDescription>
                   <FormMessage />
                 </FormItem>
               )}
@@ -448,15 +453,15 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
             name="category_whitelist_raw"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Category Whitelist</FormLabel>
+                <FormLabel>{t("backtest.form.fields.categoryWhitelist.label")}</FormLabel>
                 <FormControl>
                   <Input
-                    placeholder="Politics, Sports, Economy"
+                    placeholder={t("backtest.form.fields.categoryWhitelist.placeholder")}
                     {...field}
                   />
                 </FormControl>
                 <FormDescription>
-                  Comma-separated. Leave blank to include all categories.
+                  {t("backtest.form.fields.categoryWhitelist.help")}
                 </FormDescription>
                 <FormMessage />
               </FormItem>
@@ -468,42 +473,41 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
 
         {/* ---- Scenario ---- */}
         <Section
-          title="Scenario"
-          hint="Run a single execution model, or all three side by side."
+          title={t("backtest.form.sections.scenario.title")}
+          hint={t("backtest.form.sections.scenario.hint")}
         >
           <FormField
             control={form.control}
             name="scenario"
             render={({ field }) => (
               <FormItem className="max-w-md">
-                <FormLabel>Run Mode</FormLabel>
+                <FormLabel>{t("backtest.form.runMode.label")}</FormLabel>
                 <Select
                   onValueChange={field.onChange}
                   defaultValue={field.value}
                 >
                   <FormControl>
                     <SelectTrigger>
-                      <SelectValue placeholder="Select scenario" />
+                      <SelectValue placeholder={t("backtest.form.runMode.placeholder")} />
                     </SelectTrigger>
                   </FormControl>
                   <SelectContent>
                     <SelectItem value="triple">
-                      Triple (all 3 scenarios, recommended)
+                      {t("backtest.form.runMode.triple")}
                     </SelectItem>
                     <SelectItem value="optimistic">
-                      Optimistic (50 bps slippage, 10 s delay)
+                      {t("backtest.form.runMode.optimistic")}
                     </SelectItem>
                     <SelectItem value="neutral">
-                      Neutral (150 bps, 30 s)
+                      {t("backtest.form.runMode.neutral")}
                     </SelectItem>
                     <SelectItem value="pessimistic">
-                      Pessimistic (300 bps, 60 s)
+                      {t("backtest.form.runMode.pessimistic")}
                     </SelectItem>
                   </SelectContent>
                 </Select>
                 <FormDescription>
-                  &ldquo;Triple&rdquo; runs all three at once so you can
-                  compare best, base, and worst case (PRD §5.4).
+                  {t("backtest.form.runMode.help")}
                 </FormDescription>
                 <FormMessage />
               </FormItem>
@@ -513,10 +517,10 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
 
         <div className="flex items-center justify-end gap-4 pt-2">
           <p className="text-xs text-muted-foreground">
-            Queues the job. A worker processes it shortly after.
+            {t("backtest.form.submitHint")}
           </p>
           <Button type="submit" disabled={submitting}>
-            {submitting ? "Queueing…" : "Queue Backtest"}
+            {submitting ? t("backtest.form.submitting") : t("backtest.form.submit")}
           </Button>
         </div>
       </form>

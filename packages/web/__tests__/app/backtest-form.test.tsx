@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { t } from "@/lib/i18n";
 
 // Mock the server action so no DB / network is touched.
 const createBacktestJob = vi.fn();
@@ -20,6 +21,17 @@ vi.mock("sonner", () => ({
 
 import { BacktestForm } from "@/app/backtest/new/backtest-form";
 
+// Locators derived from the i18n dictionary, not hardcoded text: the test
+// asserts the form STRUCTURE (labels resolve to controls, zod messages
+// surface, the action receives the parsed payload) and stays correct if a
+// translation string changes — while still proving the i18n seam renders.
+const LBL_LEADER = t("backtest.form.fields.leaderAddress.label");
+const LBL_START = t("backtest.form.fields.startDate.label");
+const LBL_END = t("backtest.form.fields.endDate.label");
+const LBL_CAPITAL = t("backtest.form.fields.initialCapital.label");
+const LBL_CATEGORY = t("backtest.form.fields.categoryWhitelist.label");
+const BTN_SUBMIT = t("backtest.form.submit");
+
 describe("BacktestForm (zod validation + server action)", () => {
   beforeEach(() => {
     createBacktestJob.mockReset().mockResolvedValue({ id: "job-1" });
@@ -29,85 +41,76 @@ describe("BacktestForm (zod validation + server action)", () => {
 
   it("renders the key fields and the submit button", () => {
     render(<BacktestForm />);
-    expect(screen.getByLabelText("Leader Address")).toBeInTheDocument();
-    expect(screen.getByLabelText("Start Date")).toBeInTheDocument();
-    expect(screen.getByLabelText("End Date")).toBeInTheDocument();
-    expect(screen.getByLabelText("Initial Capital (USD)")).toBeInTheDocument();
+    expect(screen.getByLabelText(LBL_LEADER)).toBeInTheDocument();
+    expect(screen.getByLabelText(LBL_START)).toBeInTheDocument();
+    expect(screen.getByLabelText(LBL_END)).toBeInTheDocument();
+    expect(screen.getByLabelText(LBL_CAPITAL)).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Queue Backtest" })
+      screen.getByRole("button", { name: BTN_SUBMIT })
     ).toBeInTheDocument();
   });
 
   it("prefills the leader address from the defaultLeader prop", () => {
     render(<BacktestForm defaultLeader="0xdeadbeef" />);
-    expect(screen.getByLabelText("Leader Address")).toHaveValue("0xdeadbeef");
+    expect(screen.getByLabelText(LBL_LEADER)).toHaveValue("0xdeadbeef");
   });
 
   it("blocks submit and shows the min-length error for a too-short wallet", async () => {
     render(<BacktestForm />);
-    const addr = screen.getByLabelText("Leader Address");
+    const addr = screen.getByLabelText(LBL_LEADER);
     await userEvent.clear(addr);
     await userEvent.type(addr, "0xabc"); // < 10 chars -> min() message
 
-    await userEvent.click(
-      screen.getByRole("button", { name: "Queue Backtest" })
-    );
+    await userEvent.click(screen.getByRole("button", { name: BTN_SUBMIT }));
 
     expect(
-      await screen.findByText("Enter a valid wallet address")
+      await screen.findByText(t("backtest.form.validation.walletInvalid"))
     ).toBeInTheDocument();
     expect(createBacktestJob).not.toHaveBeenCalled();
   });
 
   it("enforces the 0x-hex regex on the wallet address", async () => {
     render(<BacktestForm />);
-    const addr = screen.getByLabelText("Leader Address");
+    const addr = screen.getByLabelText(LBL_LEADER);
     await userEvent.clear(addr);
     await userEvent.type(addr, "1234567890abcdef"); // long enough, no 0x
 
-    await userEvent.click(
-      screen.getByRole("button", { name: "Queue Backtest" })
-    );
-    expect(await screen.findByText("Must start with 0x")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: BTN_SUBMIT }));
+    expect(
+      await screen.findByText(t("backtest.form.validation.walletPrefix"))
+    ).toBeInTheDocument();
     expect(createBacktestJob).not.toHaveBeenCalled();
   });
 
   it("rejects when start_date is not before end_date", async () => {
     render(<BacktestForm />);
-    await userEvent.clear(screen.getByLabelText("Leader Address"));
-    await userEvent.type(
-      screen.getByLabelText("Leader Address"),
-      "0xabcabcabcabc"
-    );
+    await userEvent.clear(screen.getByLabelText(LBL_LEADER));
+    await userEvent.type(screen.getByLabelText(LBL_LEADER), "0xabcabcabcabc");
     // Date inputs: set start after end
-    const start = screen.getByLabelText("Start Date");
-    const end = screen.getByLabelText("End Date");
+    const start = screen.getByLabelText(LBL_START);
+    const end = screen.getByLabelText(LBL_END);
     await userEvent.clear(start);
     await userEvent.type(start, "2025-12-31");
     await userEvent.clear(end);
     await userEvent.type(end, "2025-01-01");
 
-    await userEvent.click(
-      screen.getByRole("button", { name: "Queue Backtest" })
-    );
+    await userEvent.click(screen.getByRole("button", { name: BTN_SUBMIT }));
     expect(
-      await screen.findByText("start_date must be before end_date")
+      await screen.findByText(t("backtest.form.validation.dateOrder"))
     ).toBeInTheDocument();
     expect(createBacktestJob).not.toHaveBeenCalled();
   });
 
   it("submits valid data: calls the action with parsed payload and toasts success", async () => {
     render(<BacktestForm />);
-    const addr = screen.getByLabelText("Leader Address");
+    const addr = screen.getByLabelText(LBL_LEADER);
     await userEvent.clear(addr);
     await userEvent.type(
       addr,
       "0x1111111111111111111111111111111111111111"
     );
 
-    await userEvent.click(
-      screen.getByRole("button", { name: "Queue Backtest" })
-    );
+    await userEvent.click(screen.getByRole("button", { name: BTN_SUBMIT }));
 
     await waitFor(() => expect(createBacktestJob).toHaveBeenCalledTimes(1));
     const payload = createBacktestJob.mock.calls[0][0];
@@ -125,17 +128,15 @@ describe("BacktestForm (zod validation + server action)", () => {
 
   it("splits the comma-separated category whitelist into a trimmed array", async () => {
     render(<BacktestForm />);
-    await userEvent.clear(screen.getByLabelText("Leader Address"));
+    await userEvent.clear(screen.getByLabelText(LBL_LEADER));
     await userEvent.type(
-      screen.getByLabelText("Leader Address"),
+      screen.getByLabelText(LBL_LEADER),
       "0x2222222222222222222222222222222222222222"
     );
-    const cw = screen.getByLabelText("Category Whitelist");
+    const cw = screen.getByLabelText(LBL_CATEGORY);
     await userEvent.type(cw, "Politics, Sports ,  Economy ");
 
-    await userEvent.click(
-      screen.getByRole("button", { name: "Queue Backtest" })
-    );
+    await userEvent.click(screen.getByRole("button", { name: BTN_SUBMIT }));
     await waitFor(() => expect(createBacktestJob).toHaveBeenCalled());
     expect(createBacktestJob.mock.calls[0][0].category_whitelist).toEqual([
       "Politics",
@@ -147,15 +148,13 @@ describe("BacktestForm (zod validation + server action)", () => {
   it("surfaces a server-action failure via an error toast (no rethrow for non-redirect)", async () => {
     createBacktestJob.mockRejectedValueOnce(new Error("db down"));
     render(<BacktestForm />);
-    await userEvent.clear(screen.getByLabelText("Leader Address"));
+    await userEvent.clear(screen.getByLabelText(LBL_LEADER));
     await userEvent.type(
-      screen.getByLabelText("Leader Address"),
+      screen.getByLabelText(LBL_LEADER),
       "0x3333333333333333333333333333333333333333"
     );
-    await userEvent.click(
-      screen.getByRole("button", { name: "Queue Backtest" })
-    );
+    await userEvent.click(screen.getByRole("button", { name: BTN_SUBMIT }));
     await waitFor(() => expect(toastError).toHaveBeenCalled());
-    expect(toastError.mock.calls[0][0]).toBe("Failed to queue backtest");
+    expect(toastError.mock.calls[0][0]).toBe(t("backtest.form.toastError"));
   });
 });
