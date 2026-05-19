@@ -186,6 +186,20 @@ class Settings(BaseSettings):
             "local demo).  No effect under the 'live' datasource."
         ),
     )
+    core_persist_fixture: bool = Field(
+        default=False,
+        description=(
+            "Opt-in: when False (the default) and trader-core is running on "
+            "the FIXTURE datasource, the deployed trader-core entrypoint does "
+            "NOT follow the synthetic demo fixture leader, so no synthetic "
+            "copy_fill / fill / risk events are ever generated into the "
+            "operator DB — fixture mode stays a pure no-side-effect demo/test "
+            "path and never auto-pollutes the live operator DB with fake "
+            "copy activity.  Set to True (env POLYECHO_CORE_PERSIST_FIXTURE=1) "
+            "only if you deliberately want the demo fixture pipeline exercised "
+            "(e.g. a local demo).  No effect under the 'live' datasource."
+        ),
+    )
 
     # ------------------------------------------------------------------
     # Live trading — Phase-4 HARD safety lock (brief §9; default OFF)

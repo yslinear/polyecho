@@ -1190,27 +1190,76 @@ async def test_p1_12_main_once_degenerate_returns_nonzero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import polyecho.core.__main__ as main_mod
+    from polyecho.shared.config import get_settings
 
-    ghost = "0xghostleader000000000000000000000000000099"
+    # 防再種 gate: in fixture mode the deployed trader-core entrypoint
+    # follows NO demo leader unless the operator opts in via
+    # POLYECHO_CORE_PERSIST_FIXTURE.  This test exercises the P1-12
+    # *configured-follows degenerate* branch, so it must opt in to keep
+    # the demo-follow pipeline active (mirrors the discovery
+    # POLYECHO_DISCOVERY_PERSIST_FIXTURE tests).  The asserted contract
+    # (configured follows + 0 detected ⇒ exit 2) is unchanged.
+    monkeypatch.setenv("POLYECHO_CORE_PERSIST_FIXTURE", "1")
+    get_settings.cache_clear()
+    try:
+        ghost = "0xghostleader000000000000000000000000000099"
 
-    def _ghost_follows() -> list[FollowSpec]:
-        return [
-            FollowSpec(
-                account_id=ACCT,
-                leader_address=ghost,
-                template=_tpl(),
-                binding=WalletBinding(
-                    signature_type=0,
-                    funder=ghost,
-                    wallet_mode="eoa",
-                    derived=False,
-                ),
-            )
-        ]
+        def _ghost_follows() -> list[FollowSpec]:
+            return [
+                FollowSpec(
+                    account_id=ACCT,
+                    leader_address=ghost,
+                    template=_tpl(),
+                    binding=WalletBinding(
+                        signature_type=0,
+                        funder=ghost,
+                        wallet_mode="eoa",
+                        derived=False,
+                    ),
+                )
+            ]
 
-    monkeypatch.setattr(main_mod, "_demo_follows", _ghost_follows)
-    rc = await main_mod.main(["--once"])
-    assert rc == 2  # degenerate ⇒ documented non-zero exit
+        monkeypatch.setattr(main_mod, "_demo_follows", _ghost_follows)
+        rc = await main_mod.main(["--once"])
+        assert rc == 2  # degenerate ⇒ documented non-zero exit
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_core_persist_fixture_gate_disables_demo_follows(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """防再種: fixture datasource + no opt-in ⇒ trader-core does NOT
+    follow the synthetic demo leader, so no fake copy_fill / fill events
+    can pollute the operator DB.  ``--once`` is then a clean idle pass
+    (no follows configured ⇒ exit 0), never the degenerate path.
+
+    Mirrors discovery's ``POLYECHO_DISCOVERY_PERSIST_FIXTURE`` gate tests
+    (gate-closed by default; opt-in restores the demo pipeline).  The
+    app emits structured JSON logs to stdout (not via stdlib handlers),
+    so the gate's named warning is asserted through ``capsys``.
+    """
+    import json
+
+    import polyecho.core.__main__ as main_mod
+    from polyecho.shared.config import get_settings
+
+    monkeypatch.delenv("POLYECHO_CORE_PERSIST_FIXTURE", raising=False)
+    get_settings.cache_clear()
+    try:
+        # _demo_follows() left intact (the real 0xswing1… fixture leader);
+        # the deployed gate must empty it because we did NOT opt in.
+        rc = await main_mod.main(["--once"])
+        assert rc == 0  # no follows configured ⇒ valid idle, not degenerate
+        events = {
+            json.loads(line).get("event")
+            for line in capsys.readouterr().out.splitlines()
+            if line.strip().startswith("{")
+        }
+        assert "fixture_datasource_demo_follows_disabled" in events
+    finally:
+        get_settings.cache_clear()
 
 
 # --- P1-13: TradeDeduplicator._locks is bounded (no memory leak) ----------
@@ -1262,6 +1311,10 @@ import contextlib  # noqa: E402
 import sys  # noqa: E402
 import types  # noqa: E402
 
+# Bound to the REAL F0 class at import time (before any test swaps the
+# health module in sys.modules), so the WS-probe test stub can build one.
+from polyecho.shared.health import ProbeResult  # noqa: E402
+
 
 @contextlib.contextmanager
 def _fake_shared_health(
@@ -1308,6 +1361,25 @@ def _fake_shared_health(
         write_heartbeat if write_heartbeat is not None else _default_write_heartbeat
     )
 
+    # The integration cycle now also runs the NON-frozen WS probes
+    # (polyecho.core.ws_probe).  This seam must neutralise them too —
+    # deterministic + network-free — for the SAME reason it fakes
+    # run_all_probes: an integration-cadence test must not do real I/O.
+    import polyecho.core.ws_probe as _ws_probe_mod
+
+    async def _stub_ws_probe() -> ProbeResult:
+        return ProbeResult(
+            ok=True,
+            detail="stubbed WS probe (deterministic test seam)",
+            latency_ms=0.0,
+            checked_at="1970-01-01T00:00:00+00:00",
+        )
+
+    _ws_saved_user = _ws_probe_mod.probe_polymarket_ws_user
+    _ws_saved_market = _ws_probe_mod.probe_polymarket_ws_market
+    _ws_probe_mod.probe_polymarket_ws_user = _stub_ws_probe
+    _ws_probe_mod.probe_polymarket_ws_market = _stub_ws_probe
+
     saved = sys.modules.get("polyecho.shared.health")
     sys.modules["polyecho.shared.health"] = mod
     try:
@@ -1319,6 +1391,8 @@ def _fake_shared_health(
             sys.modules["polyecho.shared.health"] = saved
         else:
             sys.modules.pop("polyecho.shared.health", None)
+        _ws_probe_mod.probe_polymarket_ws_user = _ws_saved_user
+        _ws_probe_mod.probe_polymarket_ws_market = _ws_saved_market
 
 
 # --- Task 1: canonical trader_heartbeat via the FROZEN shared helper -------
@@ -1434,7 +1508,14 @@ async def test_task2_probe_drives_write_integration_status_periodically() -> Non
 
     assert len(fake.integ_writes) >= 3
     assert core.integration_probe_runs >= 3
-    assert fake.integ_writes[0] == {"snapshot": 1}
+    # The cycle merges the (now stubbed) non-frozen WS probes into the
+    # frozen snapshot before persisting — assert the original payload is
+    # preserved AND both WS keys were merged in (the intended new
+    # behaviour); the cadence/periodicity contract above is unchanged.
+    first = fake.integ_writes[0]
+    assert first["snapshot"] == 1
+    assert "polymarket_ws_user" in first
+    assert "polymarket_ws_market" in first
 
 
 @pytest.mark.asyncio

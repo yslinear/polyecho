@@ -51,6 +51,8 @@ from polyecho.core.wiring import (
 )
 from polyecho.shared.config import get_settings
 from polyecho.shared.copytrading import WalletBinding
+from polyecho.shared.datasource.factory import get_datasource
+from polyecho.shared.datasource.fixture import FixtureDataSource
 from polyecho.shared.logging import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -105,8 +107,38 @@ async def main(argv: list[str] | None = None) -> int:
     # Both are best-effort: in fixture mode / no DB they log+continue, so
     # the ``--once`` exit-code contract and dry-run semantics are
     # unchanged (they place / move / persist nothing on-chain).
+    #
+    # 防再種 — fixture mode must NOT drive synthetic copy activity into
+    # the operator DB.  Mirrors ``discovery.__main__``: key on the
+    # *resolved datasource object* (not the settings string) so a
+    # live-like fake is never mis-gated.  A real ``FixtureDataSource``
+    # with no opt-in (``POLYECHO_CORE_PERSIST_FIXTURE``) means the demo
+    # fixture leader is NOT followed, so no synthetic ``copy_fill`` /
+    # fill / risk events are ever generated to pollute the operator DB.
+    # ``degenerate_once_pass`` treats "no follows configured" as a valid
+    # idle pass (exit 0), so the ``--once`` / CI-smoke contract is
+    # preserved; the fixture DATASOURCE read path itself is untouched.
+    follows = _demo_follows()
+    if (
+        isinstance(get_datasource(), FixtureDataSource)
+        and not settings.core_persist_fixture
+    ):
+        follows = []
+        logger.warning(
+            "fixture_datasource_demo_follows_disabled",
+            extra={
+                "reason": (
+                    "POLYECHO_DATASOURCE=fixture and "
+                    "POLYECHO_CORE_PERSIST_FIXTURE not set — trader-core "
+                    "will NOT follow the demo fixture leader, so no "
+                    "synthetic copy events pollute the operator DB (set "
+                    "POLYECHO_CORE_PERSIST_FIXTURE=1 to restore the demo "
+                    "pipeline)."
+                ),
+            },
+        )
     core = TraderCore(
-        follows=_demo_follows(),
+        follows=follows,
         heartbeat_writer=make_heartbeat_writer(),
         cursor_writer=make_cursor_writer(),
     )
