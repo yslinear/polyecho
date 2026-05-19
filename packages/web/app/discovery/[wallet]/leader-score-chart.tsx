@@ -20,6 +20,7 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart";
 import { Skeleton } from "@/components/ui/skeleton";
+import { t } from "@/lib/i18n";
 import type { ScorePoint } from "./page";
 
 interface LeaderScoreChartProps {
@@ -49,7 +50,7 @@ export function LeaderScoreChart({ data, loading }: LeaderScoreChartProps) {
   if (data.length === 0) {
     return (
       <p className="py-6 text-center text-sm text-muted-foreground">
-        No score history recorded yet.
+        {t("discovery.chart.noHistory")}
       </p>
     );
   }
@@ -64,22 +65,22 @@ export function LeaderScoreChart({ data, loading }: LeaderScoreChartProps) {
 
   const chartConfig: ChartConfig = {
     total_score: {
-      label: "Total Score",
+      label: t("discovery.chart.totalScore"),
       color: stroke,
     },
   };
 
   const trendLabel =
     dir === "up"
-      ? "trending up"
+      ? t("discovery.chart.trendUp")
       : dir === "down"
-        ? "trending down"
-        : "flat";
+        ? t("discovery.chart.trendDown")
+        : t("discovery.chart.trendFlat");
 
   return (
     <figure className="space-y-2">
       <figcaption className="sr-only">
-        Total score history over time, {trendLabel}.
+        {t("discovery.chart.caption", { trend: trendLabel })}
       </figcaption>
       <ChartContainer config={chartConfig} className="h-[260px] w-full">
         <LineChart

@@ -79,6 +79,7 @@ import {
 } from "@/components/ui/table";
 import { ScoreBadge } from "@/components/score-badge";
 import { cn } from "@/lib/utils";
+import { t } from "@/lib/i18n";
 import { quickBacktest, updateLeaderStatus } from "./actions";
 import type { LeaderStatus } from "./actions";
 import type { CandidateLeaderRow } from "./page";
@@ -117,12 +118,14 @@ const STRATEGY_VARIANT: Record<
 };
 
 const STATUS_OPTIONS = [
-  { label: "New", value: "new" },
-  { label: "Watching", value: "watching" },
-  { label: "Following", value: "following" },
-  { label: "Rejected", value: "rejected" },
+  { label: t("discovery.table.statusOptions.new"), value: "new" },
+  { label: t("discovery.table.statusOptions.watching"), value: "watching" },
+  { label: t("discovery.table.statusOptions.following"), value: "following" },
+  { label: t("discovery.table.statusOptions.rejected"), value: "rejected" },
 ] as const;
 
+// Strategy type identifiers are domain enums (matched against data + badge
+// text); kept verbatim per the PROPER-NOUN POLICY in common.ts.
 const STRATEGY_OPTIONS = [
   { label: "Scalper", value: "Scalper" },
   { label: "Day Trader", value: "Day Trader" },
@@ -135,15 +138,15 @@ const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 
 // Human labels for the column-visibility menu (column id -> label).
 const COLUMN_LABELS: Record<string, string> = {
-  wallet_address: "Wallet",
-  display_name: "Name",
-  strategy_type: "Strategy",
-  profit_score: "Profit",
-  replicability_score: "Replicability",
-  total_score: "Total",
-  risk_flags: "Risk Flags",
-  user_status: "Status",
-  last_active_at: "Last Active",
+  wallet_address: t("discovery.table.columns.wallet"),
+  display_name: t("discovery.table.columns.name"),
+  strategy_type: t("discovery.table.columns.strategy"),
+  profit_score: t("discovery.table.columns.profit"),
+  replicability_score: t("discovery.table.columns.replicability"),
+  total_score: t("discovery.table.columns.total"),
+  risk_flags: t("discovery.table.columns.riskFlags"),
+  user_status: t("discovery.table.columns.status"),
+  last_active_at: t("discovery.table.columns.lastActive"),
 };
 
 // ---------------------------------------------------------------------------
@@ -189,9 +192,18 @@ const STATUS_ACTIONS: {
   Icon: typeof UserPlus;
   destructive?: boolean;
 }[] = [
-  { status: "watching", label: "Watch", Icon: Eye },
-  { status: "following", label: "Follow", Icon: UserPlus },
-  { status: "rejected", label: "Reject", Icon: UserMinus, destructive: true },
+  { status: "watching", label: t("discovery.table.actions.watch"), Icon: Eye },
+  {
+    status: "following",
+    label: t("discovery.table.actions.follow"),
+    Icon: UserPlus,
+  },
+  {
+    status: "rejected",
+    label: t("discovery.table.actions.reject"),
+    Icon: UserMinus,
+    destructive: true,
+  },
 ];
 
 function RowActions({ row }: { row: CandidateLeaderRow }) {
@@ -203,10 +215,10 @@ function RowActions({ row }: { row: CandidateLeaderRow }) {
     setPending(true);
     try {
       const { id } = await quickBacktest(wallet);
-      toast.success("Backtest queued (90d · Balanced)");
+      toast.success(t("discovery.table.toast.backtestQueued"));
       router.push(`/backtest/${id}`);
     } catch {
-      toast.error("Failed to queue backtest");
+      toast.error(t("discovery.table.toast.backtestFailed"));
       setPending(false);
     }
   }
@@ -215,10 +227,10 @@ function RowActions({ row }: { row: CandidateLeaderRow }) {
     setPending(true);
     try {
       await updateLeaderStatus(wallet, status);
-      toast.success(`Leader marked ${label.toLowerCase()}`);
+      toast.success(t("discovery.table.toast.leaderMarked", { label }));
       router.refresh();
     } catch {
-      toast.error("Failed to update leader");
+      toast.error(t("discovery.table.toast.leaderFailed"));
     } finally {
       setPending(false);
     }
@@ -235,7 +247,7 @@ function RowActions({ row }: { row: CandidateLeaderRow }) {
             variant="ghost"
             size="icon"
             className="h-7 w-7"
-            aria-label={`Actions for ${wallet}`}
+            aria-label={t("discovery.table.rowActionsAria", { wallet })}
             disabled={pending}
             onClick={stop}
           >
@@ -243,7 +255,9 @@ function RowActions({ row }: { row: CandidateLeaderRow }) {
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-56">
-          <DropdownMenuLabel className="text-xs">Actions</DropdownMenuLabel>
+          <DropdownMenuLabel className="text-xs">
+            {t("discovery.table.actions.label")}
+          </DropdownMenuLabel>
           <DropdownMenuSeparator />
           <DropdownMenuItem
             className="text-xs"
@@ -254,14 +268,14 @@ function RowActions({ row }: { row: CandidateLeaderRow }) {
             }}
           >
             <FlaskConical className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
-            Quick backtest (90d · Balanced)
+            {t("discovery.table.actions.quickBacktest")}
           </DropdownMenuItem>
           <DropdownMenuItem
             className="text-xs"
             onSelect={() => router.push(`/backtest/new?leader=${wallet}`)}
           >
             <Sliders className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
-            Customize backtest…
+            {t("discovery.table.actions.customizeBacktest")}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           {STATUS_ACTIONS.filter((a) => a.status !== row.user_status).map(
@@ -296,7 +310,7 @@ function RowActions({ row }: { row: CandidateLeaderRow }) {
 const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
   {
     accessorKey: "wallet_address",
-    header: "Wallet",
+    header: t("discovery.table.columns.wallet"),
     cell: ({ row }) => (
       <span
         className="font-mono text-xs"
@@ -310,7 +324,7 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
   },
   {
     accessorKey: "display_name",
-    header: "Name",
+    header: t("discovery.table.columns.name"),
     cell: ({ getValue }) => {
       const v = getValue<string | null>();
       return v ? (
@@ -318,18 +332,24 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
           {v}
         </span>
       ) : (
-        <span className="text-sm text-muted-foreground">Not set</span>
+        <span className="text-sm text-muted-foreground">
+          {t("discovery.table.notSet")}
+        </span>
       );
     },
     enableSorting: false,
   },
   {
     accessorKey: "strategy_type",
-    header: "Strategy",
+    header: t("discovery.table.columns.strategy"),
     cell: ({ getValue }) => {
       const v = getValue<string | null>();
       if (!v)
-        return <span className="text-sm text-muted-foreground">Not set</span>;
+        return (
+          <span className="text-sm text-muted-foreground">
+            {t("discovery.table.notSet")}
+          </span>
+        );
       return (
         <Badge variant={STRATEGY_VARIANT[v] ?? "outline"} className="text-xs">
           {v}
@@ -344,7 +364,7 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
   },
   {
     accessorKey: "profit_score",
-    header: makeSortableHeader("Profit"),
+    header: makeSortableHeader(t("discovery.table.columns.profit")),
     cell: ({ getValue }) => (
       <div className="text-right tabular-nums">
         <ScoreBadge label="" value={getValue<string | null>()} />
@@ -355,7 +375,7 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
   },
   {
     accessorKey: "replicability_score",
-    header: makeSortableHeader("Replicability"),
+    header: makeSortableHeader(t("discovery.table.columns.replicability")),
     cell: ({ getValue }) => (
       <div className="text-right tabular-nums">
         <ScoreBadge label="" value={getValue<string | null>()} />
@@ -366,7 +386,7 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
   },
   {
     accessorKey: "total_score",
-    header: makeSortableHeader("Total"),
+    header: makeSortableHeader(t("discovery.table.columns.total")),
     cell: ({ getValue }) => (
       <div className="text-right tabular-nums">
         <ScoreBadge label="" value={getValue<string | null>()} />
@@ -377,11 +397,15 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
   },
   {
     accessorKey: "risk_flags",
-    header: "Risk Flags",
+    header: t("discovery.table.columns.riskFlags"),
     cell: ({ getValue }) => {
       const flags = getValue<string[] | null>() ?? [];
       if (flags.length === 0) {
-        return <span className="text-xs text-muted-foreground">None</span>;
+        return (
+          <span className="text-xs text-muted-foreground">
+            {t("discovery.table.noRiskFlags")}
+          </span>
+        );
       }
       return (
         <div className="flex flex-wrap gap-1">
@@ -409,7 +433,7 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
   },
   {
     accessorKey: "user_status",
-    header: "Status",
+    header: t("discovery.table.columns.status"),
     cell: ({ getValue }) => {
       const v = getValue<string>();
       return (
@@ -429,12 +453,14 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
   },
   {
     accessorKey: "last_active_at",
-    header: makeSortableHeader("Last Active"),
+    header: makeSortableHeader(t("discovery.table.columns.lastActive")),
     cell: ({ getValue }) => {
       const v = getValue<Date | null>();
       if (!v)
         return (
-          <span className="text-xs text-muted-foreground">Not set</span>
+          <span className="text-xs text-muted-foreground">
+            {t("discovery.table.notSet")}
+          </span>
         );
       return (
         <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">
@@ -452,7 +478,9 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
   },
   {
     id: "actions",
-    header: () => <span className="sr-only">Actions</span>,
+    header: () => (
+      <span className="sr-only">{t("discovery.table.columns.actions")}</span>
+    ),
     cell: ({ row }) => (
       <div className="flex justify-end">
         <RowActions row={row.original} />
@@ -510,7 +538,7 @@ function FacetedFilter({
           checked={!value}
           onCheckedChange={() => onChange("")}
         >
-          All
+          {t("discovery.table.filters.all")}
         </DropdownMenuCheckboxItem>
         {options.map((opt) => (
           <DropdownMenuCheckboxItem
@@ -607,7 +635,7 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
     <Card>
       <CardHeader className="pb-4">
         <CardTitle className="flex items-center gap-2 text-lg font-semibold">
-          Candidate Leaders
+          {t("discovery.table.cardTitle")}
           <Badge
             variant="secondary"
             className="rounded-full tabular-nums font-medium"
@@ -625,8 +653,8 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
               aria-hidden="true"
             />
             <Input
-              placeholder="Search wallet or name…"
-              aria-label="Search by wallet or display name"
+              placeholder={t("discovery.table.searchPlaceholder")}
+              aria-label={t("discovery.table.searchAria")}
               value={globalFilter}
               onChange={(e) => setGlobalFilter(e.target.value)}
               className="h-8 w-[220px] pl-8"
@@ -634,7 +662,7 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
           </div>
 
           <FacetedFilter
-            title="Strategy"
+            title={t("discovery.table.filters.strategy")}
             value={strategyFilter}
             options={STRATEGY_OPTIONS}
             onChange={(v) =>
@@ -642,7 +670,7 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
             }
           />
           <FacetedFilter
-            title="Status"
+            title={t("discovery.table.filters.status")}
             value={statusFilter}
             options={STATUS_OPTIONS}
             onChange={(v) =>
@@ -650,11 +678,11 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
             }
           />
           <FacetedFilter
-            title="Risk Flag"
+            title={t("discovery.table.filters.riskFlag")}
             value={riskFilter}
             options={[
-              { label: "Has risk flag", value: "yes" },
-              { label: "No risk flag", value: "no" },
+              { label: t("discovery.table.filters.hasRiskFlag"), value: "yes" },
+              { label: t("discovery.table.filters.noRiskFlag"), value: "no" },
             ]}
             onChange={(v) => table.getColumn("risk_flags")?.setFilterValue(v)}
           />
@@ -666,7 +694,7 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
               className="h-8 px-2 text-xs"
               onClick={resetFilters}
             >
-              Reset
+              {t("discovery.table.reset")}
               <X className="ml-1 h-3.5 w-3.5" aria-hidden="true" />
             </Button>
           )}
@@ -683,12 +711,12 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
                   className="mr-1 h-3.5 w-3.5"
                   aria-hidden="true"
                 />
-                Columns
+                {t("discovery.table.columnsButton")}
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-40">
               <DropdownMenuLabel className="text-xs">
-                Toggle columns
+                {t("discovery.table.toggleColumns")}
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
               {table
@@ -793,10 +821,10 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
                       {isFiltered ? (
                         <>
                           <p className="text-sm font-medium text-foreground">
-                            No leaders match these filters.
+                            {t("discovery.table.empty.filteredTitle")}
                           </p>
                           <p className="text-sm text-muted-foreground">
-                            Clear the filters to see the full candidate pool.
+                            {t("discovery.table.empty.filteredHint")}
                           </p>
                           <Button
                             variant="outline"
@@ -804,17 +832,16 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
                             className="mt-3 h-8 text-xs"
                             onClick={resetFilters}
                           >
-                            Clear filters
+                            {t("discovery.table.empty.clearFilters")}
                           </Button>
                         </>
                       ) : (
                         <>
                           <p className="text-sm font-medium text-foreground">
-                            No candidates yet. Run discovery.
+                            {t("discovery.table.empty.noDataTitle")}
                           </p>
                           <p className="text-sm text-muted-foreground">
-                            The pool fills once the discovery scan finds
-                            smart-money wallets.
+                            {t("discovery.table.empty.noDataHint")}
                           </p>
                         </>
                       )}
@@ -830,20 +857,26 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
         <div className="flex flex-wrap items-center justify-between gap-3 pt-1 text-sm text-muted-foreground">
           <span className="tabular-nums">
             {filteredCount === 0
-              ? "0 of 0"
-              : `${firstRow}–${lastRow} of ${filteredCount}`}
+              ? t("discovery.table.pagination.empty")
+              : t("discovery.table.pagination.range", {
+                  first: firstRow,
+                  last: lastRow,
+                  total: filteredCount,
+                })}
           </span>
 
           <div className="flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-2">
-              <span className="text-xs">Rows per page</span>
+              <span className="text-xs">
+                {t("discovery.table.pagination.rowsPerPage")}
+              </span>
               <Select
                 value={String(pagination.pageSize)}
                 onValueChange={(v) => table.setPageSize(Number(v))}
               >
                 <SelectTrigger
                   className="h-8 w-[4.5rem]"
-                  aria-label="Rows per page"
+                  aria-label={t("discovery.table.pagination.rowsPerPageAria")}
                 >
                   <SelectValue />
                 </SelectTrigger>
@@ -858,7 +891,10 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
             </div>
 
             <span className="min-w-[5.5rem] text-center text-xs tabular-nums">
-              Page {pagination.pageIndex + 1} of {Math.max(pageCount, 1)}
+              {t("discovery.table.pagination.pageOf", {
+                page: pagination.pageIndex + 1,
+                total: Math.max(pageCount, 1),
+              })}
             </span>
 
             <div className="flex items-center gap-1">
@@ -866,7 +902,7 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
                 variant="outline"
                 size="icon"
                 className="h-7 w-7"
-                aria-label="Previous page"
+                aria-label={t("discovery.table.pagination.previousPage")}
                 onClick={() => table.previousPage()}
                 disabled={!table.getCanPreviousPage()}
               >
@@ -876,7 +912,7 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
                 variant="outline"
                 size="icon"
                 className="h-7 w-7"
-                aria-label="Next page"
+                aria-label={t("discovery.table.pagination.nextPage")}
                 onClick={() => table.nextPage()}
                 disabled={!table.getCanNextPage()}
               >
