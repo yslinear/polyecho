@@ -27,6 +27,7 @@ function req(
 
 beforeEach(() => {
   delete process.env.POLYECHO_WEB_PORT;
+  delete process.env.POLYECHO_WEB_ALLOWED_ORIGINS;
 });
 
 describe("middleware — Origin allow-list", () => {
@@ -109,6 +110,89 @@ describe("middleware — Origin allow-list", () => {
       req("POST", { origin: "http://localhost:4321", host: "localhost:4321" })
     );
     expect(ok.status).not.toBe(403);
+    const bad = middleware(
+      req("POST", { origin: "http://localhost:3000", host: "localhost:3000" })
+    );
+    expect(bad.status).toBe(403);
+  });
+
+  // ---- operator-opt-in CSRF allow-list extension (PRD §5.9) --------------
+
+  it("default (no POLYECHO_WEB_ALLOWED_ORIGINS) still 403s a tailnet Origin", () => {
+    // The secure tracked default is UNCHANGED: a non-localhost Origin is
+    // rejected when the operator has NOT opted in.
+    const res = middleware(
+      req("POST", {
+        origin: "http://mac-mini.tail3e1efb.ts.net:3006",
+        host: "mac-mini.tail3e1efb.ts.net:3006",
+      })
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("ALLOWS a mutating POST from an origin listed in POLYECHO_WEB_ALLOWED_ORIGINS", () => {
+    process.env.POLYECHO_WEB_ALLOWED_ORIGINS =
+      "http://mac-mini.tail3e1efb.ts.net:3006";
+    const res = middleware(
+      req("POST", {
+        origin: "http://mac-mini.tail3e1efb.ts.net:3006",
+        host: "mac-mini.tail3e1efb.ts.net:3006",
+      })
+    );
+    expect(res.status).not.toBe(403);
+  });
+
+  it("ALLOWS a no-Origin POST whose Host matches a POLYECHO_WEB_ALLOWED_ORIGINS entry", () => {
+    process.env.POLYECHO_WEB_ALLOWED_ORIGINS =
+      "http://mac-mini.tail3e1efb.ts.net:3006";
+    const res = middleware(
+      req("POST", { host: "mac-mini.tail3e1efb.ts.net:3006" })
+    );
+    expect(res.status).not.toBe(403);
+  });
+
+  it("parses multiple comma-separated origins and trims blanks", () => {
+    process.env.POLYECHO_WEB_ALLOWED_ORIGINS =
+      " http://a.ts.net:3006 , , http://b.ts.net:3006 ";
+    expect(
+      middleware(
+        req("POST", { origin: "http://a.ts.net:3006", host: "a.ts.net:3006" })
+      ).status
+    ).not.toBe(403);
+    expect(
+      middleware(
+        req("POST", { origin: "http://b.ts.net:3006", host: "b.ts.net:3006" })
+      ).status
+    ).not.toBe(403);
+    // An origin NOT in the list is still rejected.
+    expect(
+      middleware(
+        req("POST", { origin: "http://c.ts.net:3006", host: "c.ts.net:3006" })
+      ).status
+    ).toBe(403);
+  });
+
+  it("a present-but-empty Origin still 403s even with the extension set", () => {
+    // The R17 no-fallthrough invariant must survive the opt-in widening.
+    process.env.POLYECHO_WEB_ALLOWED_ORIGINS =
+      "http://mac-mini.tail3e1efb.ts.net:3006";
+    const res = middleware(
+      req("POST", { origin: "", host: "mac-mini.tail3e1efb.ts.net:3006" })
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("ALLOWS localhost:3006 when POLYECHO_WEB_PORT=3006 (compose published port)", () => {
+    process.env.POLYECHO_WEB_PORT = "3006";
+    const ok = middleware(
+      req("POST", { origin: "http://localhost:3006", host: "localhost:3006" })
+    );
+    expect(ok.status).not.toBe(403);
+    const ok127 = middleware(
+      req("POST", { origin: "http://127.0.0.1:3006", host: "127.0.0.1:3006" })
+    );
+    expect(ok127.status).not.toBe(403);
+    // The container's internal listen port (3000) is NOT auto-allowed.
     const bad = middleware(
       req("POST", { origin: "http://localhost:3000", host: "localhost:3000" })
     );

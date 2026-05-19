@@ -157,6 +157,20 @@ services:
     # A real ../.env still overrides via ${VAR:-default}.
     environment:
       POLYECHO_DB_URL_DRIZZLE: ${POLYECHO_DB_URL_DRIZZLE:-postgresql://polyecho:polyecho@db:5432/polyecho}
+      # The container still LISTENS on 3000 (see healthcheck below, unchanged)
+      # but is PUBLISHED on :3006 — so the browser's Origin/Host is :3006.
+      # The CSRF middleware allow-list keys off POLYECHO_WEB_PORT, so it must
+      # be the PUBLISHED port for localhost:3006 to pass. Internal listen port
+      # is unaffected (Next binds to 3000 regardless of this var).
+      POLYECHO_WEB_PORT: "3006"
+      # Operator opt-in (PRD §5.9): pass a host-side
+      # POLYECHO_WEB_ALLOWED_ORIGINS (comma-separated absolute origins, e.g.
+      # the operator's tailnet origin http://<host>.tailXXXX.ts.net:3006)
+      # through to the container so mutating Server Actions work over
+      # Tailscale. Blank unless the operator exports it / sets it in ../.env —
+      # the tracked default stays localhost-only. No tailnet host is
+      # hardcoded here on purpose.
+      POLYECHO_WEB_ALLOWED_ORIGINS: ${POLYECHO_WEB_ALLOWED_ORIGINS:-}
     # web is all DB-querying Server Components — it must not start until the
     # schema exists, same ordering guarantee as the Python workers.
     depends_on:

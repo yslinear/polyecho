@@ -55,11 +55,55 @@ function webPort(): string {
   return String(n);
 }
 
+/**
+ * OPERATOR OPT-IN allow-list extension (PRD §5.9 — accepted Tailscale /
+ * no-auth posture).
+ *
+ * The tracked default of this middleware is localhost/127.0.0.1 ONLY: that
+ * secure default is UNCHANGED when this env var is unset/blank. But the
+ * operator has explicitly chosen to publish the no-auth dashboard beyond
+ * loopback (compose `0.0.0.0:3006`) and reach it over their own tailnet
+ * (e.g. `http://mac-mini.tail3e1efb.ts.net:3006`). A browser at any origin
+ * other than localhost is otherwise rejected by the strict Origin/Host
+ * check, so EVERY mutating Server Action (queue backtest, save proxy, pause
+ * leader, ack danger) 403s.
+ *
+ * `POLYECHO_WEB_ALLOWED_ORIGINS` is a comma-separated list of ABSOLUTE
+ * origins (e.g. `http://mac-mini.tail3e1efb.ts.net:3006`) the operator
+ * controls on their tailnet. Each is merged into BOTH the allowed-origins
+ * set (matched against the `Origin` header) AND — by parsing the host:port
+ * out of the origin — the allowed-hosts set (matched against `Host` on a
+ * no-Origin request). This is a DELIBERATE widening of the CSRF allow-list
+ * to operator-named origins; it is exactly as safe as the operator's choice
+ * to expose the no-auth UI to those origins. Blank/whitespace entries and a
+ * missing/empty env are ignored (behaviour == localhost-only default).
+ */
+function extraOrigins(): string[] {
+  const raw = process.env.POLYECHO_WEB_ALLOWED_ORIGINS;
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/** Host[:port] parsed out of an absolute origin, lowercased; "" if invalid. */
+function hostFromOrigin(origin: string): string {
+  try {
+    return new URL(origin).host.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 /** The exact set of allowed Origin strings for this port. */
 function allowedOrigins(port: string): Set<string> {
   return new Set([
     `http://localhost:${port}`,
     `http://127.0.0.1:${port}`,
+    // Operator opt-in (PRD §5.9): exact origins from
+    // POLYECHO_WEB_ALLOWED_ORIGINS. Empty unless the operator set it.
+    ...extraOrigins(),
   ]);
 }
 
@@ -77,6 +121,11 @@ function allowedHosts(port: string): Set<string> {
   return new Set([
     `localhost:${port}`,
     `127.0.0.1:${port}`,
+    // Operator opt-in (PRD §5.9): host:port parsed from each
+    // POLYECHO_WEB_ALLOWED_ORIGINS entry. Empty unless the operator set it.
+    ...extraOrigins()
+      .map(hostFromOrigin)
+      .filter((h) => h.length > 0),
   ]);
 }
 
