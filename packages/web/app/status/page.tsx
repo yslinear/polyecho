@@ -245,7 +245,7 @@ export default async function StatusPage() {
                       {probe.latency_ms === null
                         ? "—"
                         : t("status.integrations.latencyMs", {
-                            ms: probe.latency_ms,
+                            ms: Math.round(probe.latency_ms * 10) / 10,
                           })}
                     </div>
                   </div>
