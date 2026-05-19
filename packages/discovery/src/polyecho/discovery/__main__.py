@@ -25,11 +25,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
-from typing import cast
 
 from polyecho.discovery._lifecycle import datasource_lifecycle
 from polyecho.discovery.worker import DiscoveryWorker
@@ -37,43 +35,12 @@ from polyecho.shared.datasource import get_datasource
 from polyecho.shared.logging import configure_logging
 
 # F0 heartbeat contract (FROZEN, lives in packages/shared — code AGAINST
-# it, never modify/recreate it).  Resolved lazily-tolerant so a heartbeat
-# subsystem problem can NEVER abort discovery (fail-soft, task 2).  The
-# resolution is wrapped because this package's isolated test base predates
-# F0; the integrated build has ``polyecho.shared.health`` and uses it.
-
-
-def _resolve_write_heartbeat() -> Callable[..., object] | None:
-    """Return F0's ``write_heartbeat`` if importable, else ``None``.
-
-    Resolved DYNAMICALLY via :func:`importlib.import_module` (not a static
-    ``from polyecho.shared.health import …``) for two reasons:
-
-    1. **Fail-soft** (task 2): this package's isolated test base predates
-       the F0 ``polyecho.shared.health`` module, so a static import would
-       break ``import polyecho.discovery`` outright.  A caught dynamic
-       import degrades to a no-op heartbeat instead.
-    2. **Type-clean across environments**: a static import of a
-       sometimes-absent submodule yields a mypy diagnostic whose code
-       differs by environment (``import-not-found`` when the package is
-       absent vs ``import-untyped`` when the editable parent resolves but
-       the file is missing), which ``strict``'s ``warn_unused_ignores``
-       then flips on.  A dynamic import has nothing for mypy to resolve,
-       so the heartbeat wiring is clean in BOTH the isolated and the
-       integrated verify.
-
-    The integrated build ships ``polyecho.shared.health`` and this returns
-    its real ``write_heartbeat``.
-    """
-    try:  # pragma: no cover - import guard, exercised indirectly
-        module = importlib.import_module("polyecho.shared.health")
-        write_heartbeat = module.write_heartbeat
-    except Exception:  # noqa: BLE001 - heartbeat is best-effort, never fatal
-        return None
-    return cast("Callable[..., object]", write_heartbeat)
-
-
-_write_heartbeat: Callable[..., object] | None = _resolve_write_heartbeat()
+# it, never modify/recreate it).  The lazy-import + sync/coroutine-tolerant
+# + CancelledError-reraising fail-soft *mechanism* is the ONE shared seam
+# ``polyecho.shared.health_emit.emit_heartbeat_safe`` (imported lazily
+# INSIDE :func:`_emit_discovery_heartbeat` so a heartbeat subsystem problem
+# — incl. an absent shared package in this package's isolated test base —
+# can NEVER abort discovery, fail-soft task 2).
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +64,9 @@ _RETRY_SLEEP_INITIAL = timedelta(seconds=60)
 _RETRY_SLEEP_MAX = timedelta(hours=1)
 
 
-def _emit_discovery_heartbeat(worker: DiscoveryWorker, *, phase: str) -> None:
+async def _emit_discovery_heartbeat(
+    worker: DiscoveryWorker, *, phase: str
+) -> None:
     """Write the ``discovery_heartbeat`` via the FROZEN F0 shared contract.
 
     Populates the F0 heartbeat shape
@@ -105,30 +74,48 @@ def _emit_discovery_heartbeat(worker: DiscoveryWorker, *, phase: str) -> None:
     are this-pass candidate metrics (scanned / scored / emitted) drained
     from the worker.
 
+    Delegates the fail-soft write to the ONE shared seam
+    :func:`polyecho.shared.health_emit.emit_heartbeat_safe` (lazy F0
+    import + sync/coroutine tolerance + swallow-all-but-CancelledError),
+    imported lazily INSIDE so this package's isolated test base — which
+    predates the shared ``health``/``health_emit`` modules — keeps
+    ``import polyecho.discovery`` working (a caught ImportError degrades
+    to a no-op heartbeat).
+
     STRICTLY fail-soft (task 2): a missing ``polyecho.shared.health``
-    module, a write failure, or any other exception is logged and
-    swallowed — a heartbeat problem must NEVER abort a discovery pass.
+    module, a write failure, or any other exception is logged (the
+    unchanged ``discovery_heartbeat_failed_continuing`` event, via the
+    seam's ``on_error`` hook) and swallowed — a heartbeat problem must
+    NEVER abort a discovery pass.  ``asyncio.CancelledError`` still
+    propagates (graceful shutdown is never a "heartbeat failure").
     """
     try:
-        if _write_heartbeat is None:
-            logger.debug(
-                "discovery_heartbeat_skipped_no_shared_health",
-                extra={"phase": phase},
-            )
-            return
         counters = worker.drain_pass_counters()
-        _write_heartbeat(
+
+        # Lazy import INSIDE the guard: the shared seam (and the frozen
+        # shared.health it wraps) may be absent in this package's isolated
+        # base — an ImportError must degrade to a no-op, never abort a pass.
+        from polyecho.shared.health_emit import emit_heartbeat_safe
+
+        await emit_heartbeat_safe(
             "discovery",
             phase=phase,
             datasource=worker.datasource_name,
             live_trading=False,  # discovery never trades (read-only service)
             counters=counters,
+            on_error=lambda exc: logger.warning(
+                "discovery_heartbeat_failed_continuing",
+                extra={"phase": phase, "error": str(exc)},
+            ),
         )
         logger.debug(
             "discovery_heartbeat_written",
             extra={"phase": phase, "counters": counters},
         )
     except Exception as exc:  # noqa: BLE001 - heartbeat is best-effort
+        # Final backstop: the seam is fail-soft, but draining counters or
+        # importing the seam itself must still never abort the pass — same
+        # event name as before for log-assertion parity.
         logger.warning(
             "discovery_heartbeat_failed_continuing",
             extra={"phase": phase, "error": str(exc)},
@@ -142,7 +129,7 @@ async def _run_once(worker: DiscoveryWorker) -> None:
     logger.info("run_once: starting hourly pipeline")
     await worker.run_hourly()
     # One heartbeat for the whole one-shot pass (task 2).  Fail-soft.
-    _emit_discovery_heartbeat(worker, phase="once")
+    await _emit_discovery_heartbeat(worker, phase="once")
     logger.info("run_once: complete")
 
 
@@ -181,7 +168,7 @@ async def _scheduled_loop(worker: DiscoveryWorker) -> None:
             # 2), then reset backoff and resume the normal long cadence.
             # The heartbeat helper is itself fail-soft so it can never
             # turn a successful pass into the error/backoff path.
-            _emit_discovery_heartbeat(worker, phase=name)
+            await _emit_discovery_heartbeat(worker, phase=name)
             retry_sleep = _RETRY_SLEEP_INITIAL
             logger.info("%s: sleeping %s until next run", name, interval)
             await asyncio.sleep(interval.total_seconds())

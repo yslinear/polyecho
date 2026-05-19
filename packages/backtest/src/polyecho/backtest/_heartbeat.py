@@ -26,6 +26,13 @@ be absent in an isolated build) — degrades to a swallowed WARNING and
 the worker keeps draining jobs.  Mirrors the established best-effort
 pattern in ``polyecho.core`` (``Trader._write_heartbeat`` /
 ``wiring.make_heartbeat_writer``).
+
+The lazy-import + sync/coroutine-tolerant + ``CancelledError``-reraising
+fail-soft *mechanism* is the ONE shared seam
+:func:`polyecho.shared.health_emit.emit_heartbeat_safe`; this module only
+resolves the backtest-specific inputs and keeps the
+``backtest_heartbeat_write_failed_continuing`` log event (via the seam's
+``on_error`` hook) so the existing semantics/tests are unchanged.
 """
 
 from __future__ import annotations
@@ -77,36 +84,48 @@ async def write_backtest_heartbeat(
         counters: per-cycle tallies, e.g.
                   ``{"processed": int, "failed": int}``.
 
-    Resolves the timestamp/datasource/live flag and delegates to the
-    FROZEN ``polyecho.shared.health.write_heartbeat``.  ANY failure —
-    importing the (possibly-absent) shared module, resolving inputs, or
-    the write itself — is logged at WARNING and swallowed so the
-    backtest worker continues draining jobs unaffected.
+    Resolves the timestamp/datasource/live flag and delegates the
+    fail-soft write to the ONE shared seam
+    :func:`polyecho.shared.health_emit.emit_heartbeat_safe` (lazy F0
+    import + sync/coroutine tolerance + swallow-all-but-CancelledError).
+    ANY failure — importing the (possibly-absent) shared module,
+    resolving inputs, or the write itself — is logged at WARNING (the
+    unchanged ``backtest_heartbeat_write_failed_continuing`` event, via
+    the seam's ``on_error`` hook) and swallowed so the backtest worker
+    continues draining jobs unaffected.
     """
     try:
         datasource = _resolve_datasource()
         live_trading = _resolve_live_trading()
 
-        # Lazy import INSIDE the guard: the frozen shared.health module is
-        # owned by another package and may be absent in an isolated build —
-        # an ImportError here must degrade to a swallowed warning, never
-        # abort the worker.
-        from polyecho.shared.health import write_heartbeat
-
         # Defensive copy so a later mutation of the caller's per-cycle
         # counter dict can never retroactively change what was emitted.
         safe_counters: dict[str, Any] = dict(counters)
 
-        # F0's write_heartbeat is keyword-only after ``kind`` and stamps
-        # ``ts`` itself (ISO-8601 UTC) — callers MUST NOT pass ``ts``.
-        await write_heartbeat(
+        # Lazy import INSIDE the guard: the shared seam (and the frozen
+        # shared.health it wraps) is owned by another package and may be
+        # absent in an isolated build — an ImportError here must degrade
+        # to a swallowed warning, never abort the worker.
+        from polyecho.shared.health_emit import emit_heartbeat_safe
+
+        # The seam does the F0 lazy import + sync/coroutine tolerance +
+        # swallow-all-but-CancelledError once; we keep the backtest log
+        # event verbatim via on_error so existing tests stay green.
+        await emit_heartbeat_safe(
             "backtest",
             phase=phase,
             datasource=datasource,
             live_trading=live_trading,
             counters=safe_counters,
+            on_error=lambda exc: logger.warning(
+                "backtest_heartbeat_write_failed_continuing",
+                extra={"phase": phase, "error": str(exc)},
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - heartbeat must never abort work
+        # Final backstop: the seam itself is fail-soft, but a failure
+        # resolving inputs above (or importing the seam) must still never
+        # propagate — same event name as before for log-assertion parity.
         logger.warning(
             "backtest_heartbeat_write_failed_continuing",
             extra={"phase": phase, "error": str(exc)},

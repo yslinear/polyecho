@@ -1152,24 +1152,37 @@ class TraderCore:
         self.last_heartbeat = info
         logger.info("trader_heartbeat", extra=info)
 
-        # Task 1: canonical write via the FROZEN shared helper.  Imported
-        # lazily + fully guarded: F0 lives in ``packages/shared`` (outside
-        # this worktree) so in an isolated base the import is red — which
-        # MUST degrade to "legacy-only heartbeat", never a loop crash.
+        # Task 1: canonical write via the FROZEN shared helper, through the
+        # ONE shared fail-soft seam ``health_emit.emit_heartbeat_safe``
+        # (lazy F0 import + sync/coroutine tolerance + swallow-all-but-
+        # CancelledError).  The seam is itself imported lazily + guarded:
+        # F0 / the seam live in ``packages/shared`` (outside this worktree)
+        # so in an isolated base the import is red — which MUST degrade to
+        # "legacy-only heartbeat", never a loop crash.  The
+        # ``trader_heartbeat_canonical_write_failed_continuing`` event is
+        # kept verbatim (via the seam's ``on_error`` hook) so existing
+        # behaviour/tests are unchanged.
         try:
-            from polyecho.shared.health import write_heartbeat
+            from polyecho.shared.health_emit import emit_heartbeat_safe
 
             # F0's write_heartbeat is keyword-only after ``kind`` and stamps
             # ``ts`` itself — do NOT pass ``ts`` (the legacy ``info`` mirror
             # above still records its own ``ts`` for back-compat).
-            await write_heartbeat(
+            await emit_heartbeat_safe(
                 "trader",
                 phase=phase,
                 datasource=self._settings.datasource,
                 live_trading=live,
                 counters=counters,
+                on_error=lambda exc: logger.warning(
+                    "trader_heartbeat_canonical_write_failed_continuing",
+                    extra={"phase": phase, "error": str(exc)},
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - best-effort liveness
+            # Final backstop: the seam is fail-soft, but a failure importing
+            # the seam itself must still degrade to legacy-only — same event
+            # name as before for log-assertion parity.
             logger.warning(
                 "trader_heartbeat_canonical_write_failed_continuing",
                 extra={"phase": phase, "error": str(exc)},

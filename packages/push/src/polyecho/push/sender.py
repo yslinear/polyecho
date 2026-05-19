@@ -312,41 +312,58 @@ class WebPushSender:
         datasource / live-trading flags from settings and this cycle's tally.
 
         Fail-soft is the whole point of this seam.  The heartbeat is pure
-        observability; it must never be able to take down delivery.  So:
+        observability; it must never be able to take down delivery.  The
+        lazy-import + sync/coroutine tolerance + swallow-all-but-
+        ``CancelledError`` *mechanism* is now the ONE shared seam
+        :func:`polyecho.shared.health_emit.emit_heartbeat_safe`; this
+        method only supplies the push-specific inputs and keeps its own
+        ``web_push_heartbeat_write_failed`` structlog event (via the
+        seam's ``on_error`` hook) so existing semantics/tests are
+        unchanged.  Specifically the seam guarantees, exactly as before:
 
-        * the import is **lazy** — ``polyecho.shared.health`` lives outside
-          this worktree and may be absent/broken in an isolated build; a
-          module-level import would make *every* push path (including the
-          ``--once`` CI smoke and the supervised loop) fail at import time;
-        * **every** exception is logged and swallowed *except*
-          :class:`asyncio.CancelledError`, which must always propagate so a
-          shutdown / task-cancel is never silently eaten (swallowing it
-          would wedge graceful shutdown and is not a "heartbeat failure").
+        * the F0 import is **lazy** — ``polyecho.shared.health`` lives
+          outside this worktree and may be absent/broken in an isolated
+          build; a module-level import would make *every* push path
+          (including the ``--once`` CI smoke and the supervised loop) fail
+          at import time;
+        * **every** exception is swallowed (and logged here via
+          ``on_error``) *except* :class:`asyncio.CancelledError`, which
+          always propagates so a shutdown / task-cancel is never silently
+          eaten (swallowing it would wedge graceful shutdown and is not a
+          "heartbeat failure");
+        * ``write_heartbeat`` may be sync or a coroutine depending on the
+          F0 implementation; the seam awaits it only if it returned an
+          awaitable so either shape is tolerated without coupling to one.
 
-        ``write_heartbeat`` may be sync or a coroutine depending on the F0
-        implementation; we await it only if it returned an awaitable so
-        either shape is tolerated without coupling to one.
+        The seam itself is imported lazily here too: it lives in
+        ``packages/shared`` and may also be absent in an isolated build —
+        a module-level import would reintroduce exactly the import-time
+        failure this lazy seam exists to avoid; an ImportError of the seam
+        is therefore caught and swallowed identically (still NOT
+        ``CancelledError``).
         """
         try:
-            from polyecho.shared.health import write_heartbeat
+            from polyecho.shared.health_emit import emit_heartbeat_safe
 
-            result = write_heartbeat(
+            await emit_heartbeat_safe(
                 _HEARTBEAT_COMPONENT,
                 phase=phase,
                 datasource=self._settings.datasource,
                 live_trading=self._settings.live_trading,
                 counters=counters.as_dict(),
+                on_error=lambda exc: log.warning(
+                    "web_push_heartbeat_write_failed", error=str(exc)
+                ),
             )
-            if asyncio.iscoroutine(result):
-                await result
         except asyncio.CancelledError:
             # Cooperative cancellation is not a heartbeat failure — never
-            # swallow it or graceful shutdown wedges.
+            # swallow it or graceful shutdown wedges.  (The seam already
+            # re-raises this; re-asserted here for the seam-import path.)
             raise
         except BaseException as exc:  # noqa: BLE001 - heartbeat is fail-soft
-            # Anything else (import error in an isolated build, a DB blip
-            # inside write_heartbeat, a contract mismatch, …) is logged and
-            # swallowed so the push loop / --once / scheduler is untouched.
+            # The seam is fail-soft, but importing the seam itself could
+            # fail in an isolated build — swallow + log identically so the
+            # push loop / --once / scheduler is untouched.
             log.warning("web_push_heartbeat_write_failed", error=str(exc))
 
     # ------------------------------------------------------------------
