@@ -77,9 +77,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Slider } from "@/components/ui/slider";
 import { ScoreBadge } from "@/components/score-badge";
 import { cn } from "@/lib/utils";
-import { t } from "@/lib/i18n";
+import { t, type I18nKey } from "@/lib/i18n";
 import { quickBacktest, updateLeaderStatus } from "./actions";
 import type { LeaderStatus } from "./actions";
 import type { CandidateLeaderRow } from "./page";
@@ -94,6 +95,24 @@ function shortWallet(addr: string): string {
 function numericValue(v: unknown): number {
   const n = v === null || v === undefined ? NaN : Number(v);
   return Number.isNaN(n) ? -Infinity : n;
+}
+
+// Localise a backend enum DISPLAY only — the underlying filter/sort value
+// stays the raw enum. An UNMAPPED value degrades to the raw value verbatim
+// (never blank), mirroring lib/i18n.ts "degrade, don't crash": t() returns
+// the dotted path on a miss, which we detect and fall back from.
+//
+// The `t(`literal.prefix.${raw}`)` template forms below are deliberate: the
+// i18n orphan-guard (__tests__/lib/i18n.test.ts) treats a STATIC template
+// prefix as covering every leaf beneath it, so every strategy.* / riskFlag.*
+// key counts as referenced through this dynamic seam.
+function strategyLabel(raw: string): string {
+  const out = t(`discovery.table.strategy.${raw}` as I18nKey);
+  return out === `discovery.table.strategy.${raw}` ? raw : out;
+}
+function riskFlagLabel(raw: string): string {
+  const out = t(`discovery.table.riskFlag.${raw}` as I18nKey);
+  return out === `discovery.table.riskFlag.${raw}` ? raw : out;
 }
 
 // Inclusive [min, max] numeric range filter for the 0–100 score columns.
@@ -145,14 +164,17 @@ const STATUS_OPTIONS = [
   { label: t("discovery.table.statusOptions.rejected"), value: "rejected" },
 ] as const;
 
-// Strategy type identifiers are domain enums (matched against data + badge
-// text); kept verbatim per the PROPER-NOUN POLICY in common.ts.
+// Strategy type identifiers — the VALUE is the raw domain enum (matched
+// against data + used by the column filter), the LABEL is localised so the
+// faceted filter shows a zh-TW gloss while still filtering on the raw enum.
+// Mirrors packages/discovery frequency.py StrategyType.
 const STRATEGY_OPTIONS = [
-  { label: "Scalper", value: "Scalper" },
-  { label: "Day Trader", value: "Day Trader" },
-  { label: "Swing", value: "Swing" },
-  { label: "Position", value: "Position" },
-  { label: "Hold-to-Resolve", value: "Hold-to-Resolve" },
+  { label: strategyLabel("Scalper"), value: "Scalper" },
+  { label: strategyLabel("Day Trader"), value: "Day Trader" },
+  { label: strategyLabel("Swing"), value: "Swing" },
+  { label: strategyLabel("Position"), value: "Position" },
+  { label: strategyLabel("Hold-to-Resolve"), value: "Hold-to-Resolve" },
+  { label: strategyLabel("Unknown"), value: "Unknown" },
 ] as const;
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
@@ -371,9 +393,11 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
             {t("discovery.table.notSet")}
           </span>
         );
+      // VALUE stays the raw enum (filter/sort); only the DISPLAY is
+      // localised. An unmapped enum falls back to the raw value.
       return (
         <Badge variant={STRATEGY_VARIANT[v] ?? "outline"} className="text-xs">
-          {v}
+          {strategyLabel(v)}
         </Badge>
       );
     },
@@ -431,6 +455,9 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
           </span>
         );
       }
+      // Underlying value stays the raw code; only the DISPLAY (and the
+      // title tooltip's raw code, for support) is localised. An unmapped
+      // code falls back to the raw code verbatim.
       return (
         <div className="flex flex-wrap gap-1">
           {flags.map((f) => (
@@ -438,8 +465,9 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
               key={f}
               variant={f === "insider_suspect" ? "destructive" : "outline"}
               className="px-1.5 py-0 text-xs"
+              title={f}
             >
-              {f}
+              {riskFlagLabel(f)}
             </Badge>
           ))}
         </div>
@@ -581,23 +609,20 @@ function FacetedFilter({
 }
 
 // ---------------------------------------------------------------------------
-// Numeric range filter dropdown — min/max number inputs for a 0–100 score
-// column. Same DropdownMenu shell as FacetedFilter (cohesive toolbar), wired
-// straight to the column's [min,max] filter value via rangeFilterFn.
+// Numeric range filter dropdown — a dual-thumb 拉桿 (shadcn Slider, wrapping
+// @radix-ui/react-slider) for a 0–100 score column. Same DropdownMenu shell
+// as FacetedFilter (cohesive toolbar). The slider drives the column's
+// [min,max] filter LIVE: every drag fires onValueChange → setFilterValue, so
+// the filtered rows + the current-bounds readout update in real time.
 // ---------------------------------------------------------------------------
+const RANGE_MIN = 0;
+const RANGE_MAX = 100;
+const RANGE_STEP = 1;
+
 interface RangeFilterControlProps {
   title: string;
   value: RangeFilter;
   onChange: (next: RangeFilter) => void;
-}
-
-// "" / out-of-range / non-numeric => undefined (unbounded), else clamp 0–100.
-function parseBound(raw: string): number | undefined {
-  const s = raw.trim();
-  if (s === "") return undefined;
-  const n = Number(s);
-  if (Number.isNaN(n)) return undefined;
-  return Math.min(100, Math.max(0, n));
 }
 
 function RangeFilterControl({
@@ -606,14 +631,35 @@ function RangeFilterControl({
   onChange,
 }: RangeFilterControlProps) {
   const [min, max] = value;
+  // A bound is "active" only when it actually narrows the full 0–100 range.
   const active = min !== undefined || max !== undefined;
+  // The slider always renders concrete thumbs; an unbounded side shows the
+  // domain edge so the thumb has somewhere to sit.
+  const lo = min ?? RANGE_MIN;
+  const hi = max ?? RANGE_MAX;
+  // A side resting on the domain edge imposes no real bound — read it out
+  // as 不限 (clearer than "0" / "100"), keeping the badge/readout honest.
   const unbounded = t("discovery.table.range.unbounded");
+  const loText = min === undefined ? unbounded : String(lo);
+  const hiText = max === undefined ? unbounded : String(hi);
+
+  // Live drag → column filter. The full 0–100 span means "no filter": map
+  // an edge back to `undefined` so an untouched/cleared slider never filters
+  // and null-score rows are excluded ONLY once a real bound is set.
+  function handleValueChange(next: number[]) {
+    const [nLo, nHi] = next;
+    onChange([
+      nLo <= RANGE_MIN ? undefined : nLo,
+      nHi >= RANGE_MAX ? undefined : nHi,
+    ]);
+  }
+
   return (
     // Non-modal: a score-range filter must NOT inert/aria-hide the table
-    // behind it — the user adjusts a bound and watches the rows update
-    // live (a faceted-filter affordance, not a blocking dialog). modal
-    // mode (Radix default) would hide the result set the filter exists
-    // to refine.
+    // behind it — the user drags a thumb and watches the rows update live
+    // (a faceted-filter affordance, not a blocking dialog). modal mode
+    // (Radix default) would hide the result set the filter exists to
+    // refine, and would also inert the slider mid-drag.
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
         <Button variant="outline" size="sm" className="h-8 text-xs">
@@ -628,78 +674,42 @@ function RangeFilterControl({
               className="ml-2 rounded-sm px-1 py-0 text-[10px] font-normal tabular-nums"
             >
               {t("discovery.table.range.badge", {
-                min: min ?? unbounded,
-                max: max ?? unbounded,
+                min: loText,
+                max: hiText,
               })}
             </Badge>
           )}
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-56">
+      <DropdownMenuContent align="start" className="w-64">
         <DropdownMenuLabel className="text-xs">{title}</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <div
-          className="flex items-end gap-2 p-2"
-          // Keep typing inside the menu from triggering its
-          // typeahead/close-on-key behaviour.
+          className="space-y-3 p-3"
+          // Keep arrow-key thumb nudges inside the menu from triggering
+          // its typeahead/roving-focus/close-on-key behaviour.
           onKeyDown={(e) => e.stopPropagation()}
         >
-          <div className="flex-1 space-y-1">
-            <label
-              htmlFor={`range-min-${title}`}
-              className="block text-[10px] font-medium text-muted-foreground"
-            >
-              {t("discovery.table.range.min")}
-            </label>
-            <Input
-              id={`range-min-${title}`}
-              type="number"
-              inputMode="numeric"
-              min={0}
-              max={100}
-              placeholder="0"
-              aria-label={t("discovery.table.range.minAria", {
-                title,
-                bound: t("discovery.table.range.min"),
+          {/* Live current-bounds readout — reflects the slider state the
+              instant a thumb moves (the filter updates on the same tick). */}
+          <div className="flex items-center justify-between text-xs tabular-nums text-muted-foreground">
+            <span>{t("discovery.table.range.min")}</span>
+            <span aria-live="polite">
+              {t("discovery.table.range.current", {
+                min: loText,
+                max: hiText,
               })}
-              value={min ?? ""}
-              onChange={(e) =>
-                onChange([parseBound(e.target.value), max])
-              }
-              className="h-8 text-xs tabular-nums"
-            />
+            </span>
+            <span>{t("discovery.table.range.max")}</span>
           </div>
-          <span
-            className="pb-2 text-xs text-muted-foreground"
-            aria-hidden="true"
-          >
-            –
-          </span>
-          <div className="flex-1 space-y-1">
-            <label
-              htmlFor={`range-max-${title}`}
-              className="block text-[10px] font-medium text-muted-foreground"
-            >
-              {t("discovery.table.range.max")}
-            </label>
-            <Input
-              id={`range-max-${title}`}
-              type="number"
-              inputMode="numeric"
-              min={0}
-              max={100}
-              placeholder="100"
-              aria-label={t("discovery.table.range.maxAria", {
-                title,
-                bound: t("discovery.table.range.max"),
-              })}
-              value={max ?? ""}
-              onChange={(e) =>
-                onChange([min, parseBound(e.target.value)])
-              }
-              className="h-8 text-xs tabular-nums"
-            />
-          </div>
+          <Slider
+            min={RANGE_MIN}
+            max={RANGE_MAX}
+            step={RANGE_STEP}
+            value={[lo, hi]}
+            onValueChange={handleValueChange}
+            aria-label={t("discovery.table.range.sliderAria", { title })}
+          />
         </div>
         <DropdownMenuSeparator />
         <Button

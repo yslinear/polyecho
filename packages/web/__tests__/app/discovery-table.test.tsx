@@ -61,19 +61,15 @@ const TX = {
   rangeProfit: t("discovery.table.range.profit"),
   rangeReplicability: t("discovery.table.range.replicability"),
   rangeTotal: t("discovery.table.range.total"),
-  rangeMin: t("discovery.table.range.min"),
-  rangeMax: t("discovery.table.range.max"),
   rangeClear: t("discovery.table.range.clear"),
-  rangeMinAria: (title: string) =>
-    t("discovery.table.range.minAria", {
-      title,
-      bound: t("discovery.table.range.min"),
-    }),
-  rangeMaxAria: (title: string) =>
-    t("discovery.table.range.maxAria", {
-      title,
-      bound: t("discovery.table.range.max"),
-    }),
+  rangeSliderAria: (title: string) =>
+    t("discovery.table.range.sliderAria", { title }),
+  // Localised strategy_type / risk_flags DISPLAY labels — the filter/sort
+  // VALUE stays the raw enum; only the rendered text is zh-TW. Mirrors
+  // packages/discovery frequency.py StrategyType / riskflags.py codes.
+  stratScalper: t("discovery.table.strategy.Scalper"),
+  stratSwing: t("discovery.table.strategy.Swing"),
+  riskInsider: t("discovery.table.riskFlag.insider_suspect"),
   colWallet: t("discovery.table.columns.wallet"),
   statusFollowing: t("discovery.table.statusOptions.following"),
   actWatch: t("discovery.table.actions.watch"),
@@ -252,14 +248,15 @@ describe("DiscoveryTable (shadcn data-table)", () => {
     expect(screen.getByText("Gamma")).toBeInTheDocument();
   });
 
-  it("faceted Strategy filter narrows rows", async () => {
+  it("faceted Strategy filter narrows rows (option label localised, value = raw enum)", async () => {
     render(<DiscoveryTable data={rows} />);
     await userEvent.click(
       screen.getByRole("button", { name: rx(TX.filterStrategy) })
     );
-    // Strategy type identifiers stay English by the proper-noun policy.
+    // The faceted option shows the localised zh-TW label, but still
+    // filters on the underlying raw "Scalper" enum value.
     await userEvent.click(
-      await screen.findByRole("menuitemcheckbox", { name: "Scalper" })
+      await screen.findByRole("menuitemcheckbox", { name: TX.stratScalper })
     );
     // Alpha + Gamma are Scalpers
     expect(bodyRows()).toHaveLength(2);
@@ -333,15 +330,37 @@ describe("DiscoveryTable (shadcn data-table)", () => {
     expect(replicabilityHeader()).not.toBeInTheDocument();
   });
 
-  it("renders strategy, status and risk badges (insider_suspect = destructive)", () => {
+  it("renders strategy + risk badges with LOCALISED labels (insider_suspect = destructive); raw status stays English", () => {
     render(<DiscoveryTable data={rows} />);
-    // Strategy types + risk-flag tokens + the raw user_status badge value
-    // stay English by the proper-noun policy (matched against data).
-    expect(screen.getAllByText("Scalper").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText("Swing")).toBeInTheDocument();
+    // strategy_type + risk_flags DISPLAY is the zh-TW label; the raw
+    // user_status badge value stays English (out of i18n scope here).
+    expect(
+      screen.getAllByText(TX.stratScalper).length
+    ).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText(TX.stratSwing)).toBeInTheDocument();
     expect(screen.getByText("following")).toBeInTheDocument();
-    const riskBadge = screen.getByText("insider_suspect");
+    const riskBadge = screen.getByText(TX.riskInsider);
     expect(riskBadge.className).toMatch(/destructive/);
+    // the raw enum is preserved as the badge title (support / filter parity)
+    expect(riskBadge).toHaveAttribute("title", "insider_suspect");
+  });
+
+  it("falls back to the raw value for an UNMAPPED strategy/risk code (never blank)", () => {
+    render(
+      <DiscoveryTable
+        data={[
+          makeRow({
+            wallet_address: "0x9",
+            display_name: "Edge",
+            strategy_type: "BrandNewStrat",
+            risk_flags: ["totally_new_flag"],
+          }),
+        ]}
+      />
+    );
+    // Unmapped enum/code degrade to the raw string verbatim.
+    expect(screen.getByText("BrandNewStrat")).toBeInTheDocument();
+    expect(screen.getByText("totally_new_flag")).toBeInTheDocument();
   });
 
   it("shows a calm i18n 'no risk flags' label for rows with no risk flags", () => {
@@ -524,33 +543,35 @@ describe("DiscoveryTable per-row quick actions", () => {
   });
 });
 
-describe("DiscoveryTable score range filters", () => {
+describe("DiscoveryTable score range filter (dual-thumb 拉桿)", () => {
   // Synthetic non-zero fixture across all three 0–100 score columns. (Real
   // total_score / replicability_score are all 0 today due to a separate
   // scoring bug fixed in parallel — the filter is exercised against the
   // 0–100 schema, never the buggy data.) `Null` carries no scores so its
-  // null cells must drop out the moment any bound is set.
+  // null cells must drop out the moment a real bound is set. Scores sit
+  // near the domain edges so a few deterministic arrow-key thumb nudges
+  // cross the relevant thresholds in jsdom.
   const scored: CandidateLeaderRow[] = [
     makeRow({
       wallet_address: "0x1111111111111111111111111111111111111111",
       display_name: "Low",
-      profit_score: "20",
-      replicability_score: "15",
-      total_score: "18",
+      profit_score: "1",
+      replicability_score: "1",
+      total_score: "1",
     }),
     makeRow({
       wallet_address: "0x2222222222222222222222222222222222222222",
       display_name: "Mid",
-      profit_score: "55",
-      replicability_score: "50",
-      total_score: "52",
+      profit_score: "3",
+      replicability_score: "3",
+      total_score: "3",
     }),
     makeRow({
       wallet_address: "0x3333333333333333333333333333333333333333",
       display_name: "High",
-      profit_score: "90",
-      replicability_score: "85",
-      total_score: "88",
+      profit_score: "98",
+      replicability_score: "98",
+      total_score: "98",
     }),
     makeRow({
       wallet_address: "0x4444444444444444444444444444444444444444",
@@ -565,15 +586,28 @@ describe("DiscoveryTable score range filters", () => {
     await userEvent.click(screen.getByRole("button", { name: rx(title) }));
   }
 
-  function minInput(title: string) {
-    return screen.getByRole("spinbutton", {
-      name: TX.rangeMinAria(title),
+  // Radix Slider renders one role="slider" thumb per value: [minThumb,
+  // maxThumb]. Each thumb is keyboard-driven; ArrowRight/ArrowLeft step
+  // the FOCUSED thumb by ±step (=1) and that is what a real drag does at
+  // the granular level. Driving via userEvent.keyboard wraps the change
+  // in act() and the LIVE onValueChange → setFilterValue fires on every
+  // keystroke, so the assertions below observe real-time filtering.
+  function thumbs(title: string) {
+    const [lo, hi] = screen.getAllByRole("slider", {
+      name: TX.rangeSliderAria(title),
     });
+    return { lo, hi };
   }
-  function maxInput(title: string) {
-    return screen.getByRole("spinbutton", {
-      name: TX.rangeMaxAria(title),
-    });
+
+  // Step a focused thumb n times in one direction (live filter each tick).
+  async function step(
+    thumb: HTMLElement,
+    dir: "left" | "right",
+    n: number
+  ) {
+    thumb.focus();
+    const key = dir === "right" ? "{ArrowRight}" : "{ArrowLeft}";
+    await userEvent.keyboard(key.repeat(n));
   }
 
   it("renders a range trigger for each of the three score columns", () => {
@@ -589,76 +623,111 @@ describe("DiscoveryTable score range filters", () => {
     ).toBeInTheDocument();
   });
 
-  it("exposes accessible labelled min & max number inputs (0–100)", async () => {
+  it("exposes a dual-thumb 0–100 slider with an accessible name", async () => {
     render(<DiscoveryTable data={scored} />);
     await openRange(TX.rangeProfit);
-    const lo = minInput(TX.rangeProfit);
-    const hi = maxInput(TX.rangeProfit);
-    expect(lo).toHaveAttribute("type", "number");
-    expect(lo).toHaveAttribute("min", "0");
-    expect(lo).toHaveAttribute("max", "100");
-    expect(hi).toHaveAttribute("type", "number");
-    expect(hi).toHaveAttribute("max", "100");
+    const all = screen.getAllByRole("slider", {
+      name: TX.rangeSliderAria(TX.rangeProfit),
+    });
+    expect(all).toHaveLength(2); // two thumbs = a range slider
+    for (const thumb of all) {
+      expect(thumb).toHaveAttribute("aria-valuemin", "0");
+      expect(thumb).toHaveAttribute("aria-valuemax", "100");
+    }
   });
 
-  it("profit min bound filters out lower-scoring rows (null excluded)", async () => {
+  it("dragging the min thumb up filters out lower rows LIVE (null excluded)", async () => {
     render(<DiscoveryTable data={scored} />);
     await openRange(TX.rangeProfit);
-    await userEvent.type(minInput(TX.rangeProfit), "50");
-    // Mid(55) + High(90) pass; Low(20) and Null(no score) drop out.
+    const { lo } = thumbs(TX.rangeProfit);
+    // One step right: min 0 -> 1. Low(1) still ≥ 1, Mid/High pass, Null
+    // (no score) drops the instant a real bound is set.
+    await step(lo, "right", 1);
+    expect(names().sort()).toEqual(["High", "Low", "Mid"]);
+    // Two more steps: min -> 3. Low(1) now drops, Mid(3)/High(98) remain.
+    await step(lo, "right", 2);
     expect(names().sort()).toEqual(["High", "Mid"]);
   });
 
-  it("profit max bound filters out higher-scoring rows", async () => {
+  it("dragging the max thumb down filters out higher rows LIVE", async () => {
     render(<DiscoveryTable data={scored} />);
     await openRange(TX.rangeProfit);
-    await userEvent.type(maxInput(TX.rangeProfit), "60");
-    // Low(20) + Mid(55) pass; High(90) and Null drop out.
+    const { hi } = thumbs(TX.rangeProfit);
+    // One step left: max 100 -> 99. High(98) still ≤ 99, so only the
+    // null-score row drops (a bound is now set).
+    await step(hi, "left", 1);
+    expect(names().sort()).toEqual(["High", "Low", "Mid"]);
+    // Three steps: max -> 97. High(98) now exceeds the upper bound.
+    await step(hi, "left", 3);
     expect(names().sort()).toEqual(["Low", "Mid"]);
   });
 
-  it("min+max define an inclusive window on a score column", async () => {
+  it("min+max define an inclusive window, updating on each thumb move", async () => {
     render(<DiscoveryTable data={scored} />);
     await openRange(TX.rangeTotal);
-    await userEvent.type(minInput(TX.rangeTotal), "18");
-    await userEvent.type(maxInput(TX.rangeTotal), "52");
-    // total_score: Low=18 (incl), Mid=52 (incl), High=88 (out), Null out.
+    const { lo, hi } = thumbs(TX.rangeTotal);
+    // min 0 -> 1 (Low edge stays in)
+    await step(lo, "right", 1);
+    expect(names().sort()).toEqual(["High", "Low", "Mid"]);
+    // max 100 -> 97 (High=98 now excluded), live each step.
+    await step(hi, "left", 3);
+    // Window [1,97]: Low=1 (incl), Mid=3 (incl), High=98 (out), Null out.
     expect(names().sort()).toEqual(["Low", "Mid"]);
   });
 
-  it("the replicability range filters independently of profit/total", async () => {
+  it("the replicability slider filters independently of profit/total", async () => {
     render(<DiscoveryTable data={scored} />);
     await openRange(TX.rangeReplicability);
-    await userEvent.type(minInput(TX.rangeReplicability), "80");
-    // replicability_score: only High=85 ≥ 80.
-    expect(names()).toEqual(["High"]);
+    const { hi } = thumbs(TX.rangeReplicability);
+    // Lower replicability max to 97 -> High(98) drops; profit/total
+    // sliders are untouched so they impose no bound.
+    await step(hi, "left", 3);
+    expect(names().sort()).toEqual(["Low", "Mid"]);
   });
 
-  it("an empty range never filters (all rows incl. null scores remain)", async () => {
+  it("an untouched / full-range slider never filters (null rows remain)", async () => {
     render(<DiscoveryTable data={scored} />);
     await openRange(TX.rangeProfit);
-    // open the popover but type nothing -> dataset untouched, no Reset shown
+    // open the popover but move nothing -> dataset untouched, no Reset shown
     expect(bodyRows()).toHaveLength(4);
     expect(
       screen.queryByRole("button", { name: rx(TX.reset) })
     ).not.toBeInTheDocument();
   });
 
-  it("out-of-range / non-numeric input is treated as unbounded", async () => {
+  it("an active range can be emptied by combining both thumbs", async () => {
     render(<DiscoveryTable data={scored} />);
     await openRange(TX.rangeProfit);
-    // 250 clamps to 100 as a max -> only High(90)…? no, 100 max keeps all
-    // scored rows; assert the clamp by using it as a min instead.
-    await userEvent.type(minInput(TX.rangeProfit), "250");
-    // clamped to min=100 -> no scored row reaches 100 -> empty result
+    const { lo, hi } = thumbs(TX.rangeProfit);
+    await step(lo, "right", 4); // min -> 4 (Low/Mid drop, High=98 remains)
+    expect(names()).toEqual(["High"]);
+    await step(hi, "left", 3); // max -> 97 (High=98 now excluded too)
     expect(bodyRows()).toHaveLength(0);
+  });
+
+  it("returning the thumb back to the 0–100 edge clears the filter again", async () => {
+    render(<DiscoveryTable data={scored} />);
+    await openRange(TX.rangeProfit);
+    const { lo } = thumbs(TX.rangeProfit);
+    await step(lo, "right", 3); // min -> 3, an active bound
+    expect(names().sort()).toEqual(["High", "Mid"]);
+    expect(
+      screen.getByRole("button", { name: rx(TX.reset) })
+    ).toBeInTheDocument();
+    await step(lo, "left", 3); // min back to 0 == full 0–100 range
+    // Full span == no filter: all rows incl. the null-score one return.
+    expect(bodyRows()).toHaveLength(4);
+    expect(
+      screen.queryByRole("button", { name: rx(TX.reset) })
+    ).not.toBeInTheDocument();
   });
 
   it("the per-filter Clear button resets just that range", async () => {
     render(<DiscoveryTable data={scored} />);
     await openRange(TX.rangeProfit);
-    await userEvent.type(minInput(TX.rangeProfit), "50");
-    expect(names().sort()).toEqual(["High", "Mid"]);
+    const { lo } = thumbs(TX.rangeProfit);
+    await step(lo, "right", 4); // min -> 4 -> only High remains
+    expect(names()).toEqual(["High"]);
 
     await userEvent.click(
       screen.getByRole("button", { name: rx(TX.rangeClear) })
@@ -673,7 +742,8 @@ describe("DiscoveryTable score range filters", () => {
     ).not.toBeInTheDocument();
 
     await openRange(TX.rangeTotal);
-    await userEvent.type(minInput(TX.rangeTotal), "80");
+    const { lo } = thumbs(TX.rangeTotal);
+    await step(lo, "right", 4); // min -> 4 -> only High remains
     expect(names()).toEqual(["High"]);
 
     // Reset lives in the toolbar; close the popover then click it.

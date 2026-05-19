@@ -129,22 +129,51 @@ export const discovery = {
       hasRiskFlag: "有風險標記",
       noRiskFlag: "無風險標記",
     },
-    /** Numeric range filters for the 0–100 score columns
-     *  (獲利 / 可複製性 / 總分). Min/max inputs, empty = 不限. */
+    /** Range filters for the 0–100 score columns (獲利 / 可複製性 /
+     *  總分). A dual-thumb 拉桿 (shadcn Slider) drives the [min,max]
+     *  filter live; the full 0–100 range = no filtering. */
     range: {
       profit: "獲利區間",
       replicability: "可複製性區間",
       total: "總分區間",
       min: "最小",
       max: "最大",
-      /** {{title}} = the range filter title above; {{bound}} = 最小 / 最大. */
-      minAria: "{{title}} {{bound}}（0–100，留空表示不限）",
-      maxAria: "{{title}} {{bound}}（0–100，留空表示不限）",
+      /** Accessible name for the dual-thumb range Slider.
+       *  {{title}} = the range filter title above. */
+      sliderAria: "{{title}}（0–100 雙向拉桿）",
+      /** Live current-bounds readout shown above the slider.
+       *  {{min}}/{{max}} = the live thumb values. */
+      current: "{{min}} – {{max}}",
       /** Active-range Badge shown on the trigger. {{min}}/{{max}} are the
-       *  bound text (a number, or 不限 when that side is unbounded). */
+       *  current bound values. */
       badge: "{{min}}–{{max}}",
       unbounded: "不限",
       clear: "清除",
+    },
+    /** strategy_type enum (packages/discovery frequency.py StrategyType
+     *  L26-33) rendered both as the column Badge and the Strategy facet
+     *  option labels. The underlying filter/sort VALUE stays the raw enum
+     *  — only the DISPLAY is localised. An UNMAPPED value degrades to the
+     *  raw enum verbatim (matches lib/i18n.ts "degrade, don't crash").
+     *  The canonical English domain term stays in parentheses. */
+    strategy: {
+      Scalper: "短炒（Scalper）",
+      "Day Trader": "當沖（Day Trader）",
+      Swing: "波段（Swing）",
+      Position: "部位（Position）",
+      "Hold-to-Resolve": "持有至結算（Hold-to-Resolve）",
+      Unknown: "未分類（Unknown）",
+    },
+    /** risk_flags codes (packages/discovery riskflags.py
+     *  detect_risk_flags) rendered as the per-row risk Badges. Underlying
+     *  value stays the raw code; an UNMAPPED code degrades to the raw
+     *  code verbatim. */
+    riskFlag: {
+      insider_suspect: "疑似內線",
+      strategy_drift: "策略漂移",
+      new_account: "新帳號",
+      low_liquidity: "低流動性",
+      high_concentration: "高度集中",
     },
     /** Status facet option labels (value stays the raw enum). */
     statusOptions: {
