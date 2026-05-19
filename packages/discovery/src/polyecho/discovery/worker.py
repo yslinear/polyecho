@@ -339,8 +339,14 @@ async def _upsert_candidate(
     f_score: float,
     risk_flags: list[str],
     last_active_at: datetime | None,
-) -> None:
+) -> bool:
     """Upsert a CandidateLeader row and append a CandidateScoreHistory row.
+
+    Returns:
+        ``True`` iff a ``CANDIDATE_HIGH_SCORE`` event was emitted for this
+        wallet on this call (an upward threshold crossing).  Used only to
+        feed the per-pass ``emitted`` heartbeat counter (task 2); it does
+        not affect persistence or scoring.
 
     Uses raw INSERT … ON CONFLICT for PostgreSQL; falls back to SELECT + add
     for SQLite (tests with in-memory DB).
@@ -525,6 +531,10 @@ async def _upsert_candidate(
         },
     )
 
+    # Tell the caller whether a high-score event fired (for the per-pass
+    # ``emitted`` heartbeat counter only — no behavioural effect).
+    return should_emit_high_score
+
 
 async def _insert_drift_event(wallet: str, strategy_30d: str, strategy_7d: str) -> None:
     """Insert a strategy_drift Event row (PRD §5.8)."""
@@ -574,6 +584,38 @@ class DiscoveryWorker:
         self._follower_capital = follower_capital_usd
         # Cache of known wallet addresses across all sources (used by hourly scan)
         self._known_wallets: set[str] = set()
+        # Per-pass discovery counters for the F0 ``discovery_heartbeat``
+        # (task 2).  ``scanned``  = wallets the pipeline attempted,
+        # ``scored`` = wallets that completed scoring + upsert,
+        # ``emitted`` = wallets that crossed the high-score threshold this
+        # pass.  Reset (drained) once per heartbeat by
+        # :meth:`drain_pass_counters` so each heartbeat reports only the
+        # work done since the previous one.
+        self._pass_counters: dict[str, int] = {
+            "scanned": 0,
+            "scored": 0,
+            "emitted": 0,
+        }
+
+    @property
+    def datasource_name(self) -> str:
+        """Concrete datasource class name (e.g. ``FixtureDataSource``).
+
+        Used to populate the F0 heartbeat ``datasource`` field.
+        """
+        return type(self._ds).__name__
+
+    def drain_pass_counters(self) -> dict[str, int]:
+        """Return a snapshot of the per-pass counters and reset them to 0.
+
+        Called once per heartbeat (task 2) so each ``discovery_heartbeat``
+        reflects only the candidates scanned/scored/emitted since the
+        previous heartbeat.  Returning a *copy* and zeroing in place keeps
+        this safe to call between passes.
+        """
+        snapshot = dict(self._pass_counters)
+        self._pass_counters = {"scanned": 0, "scored": 0, "emitted": 0}
+        return snapshot
 
     # ------------------------------------------------------------------
     # Core per-wallet pipeline
@@ -600,6 +642,12 @@ class DiscoveryWorker:
         8. Insert ``strategy_drift`` Event if flagged.
         """
         logger.debug("processing wallet", extra={"wallet": wallet, "source": source})
+
+        # Per-pass heartbeat counter (task 2): every wallet the pipeline
+        # attempts is "scanned" — incremented before the fetch so a
+        # fetch failure (early return below) is still counted as scanned
+        # but not scored.
+        self._pass_counters["scanned"] += 1
 
         try:
             activity_90d = await self._ds.get_user_activity(
@@ -664,7 +712,7 @@ class DiscoveryWorker:
         if trades_only:
             last_active_at = max(r.timestamp for r in trades_only)
 
-        await _upsert_candidate(
+        emitted_high_score = await _upsert_candidate(
             wallet,
             source,
             display_name=display_name,
@@ -679,6 +727,12 @@ class DiscoveryWorker:
             risk_flags=risk_flags,
             last_active_at=last_active_at,
         )
+
+        # The wallet completed the full compute + upsert → "scored".
+        # ``emitted`` tracks high-score threshold crossings this pass.
+        self._pass_counters["scored"] += 1
+        if emitted_high_score:
+            self._pass_counters["emitted"] += 1
 
         if "strategy_drift" in risk_flags:
             await _insert_drift_event(wallet, strategy_type.value, strategy_7d.value)

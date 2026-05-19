@@ -28,6 +28,11 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from polyecho.backtest._heartbeat import (
+    PHASE_IDLE,
+    PHASE_RUNNING,
+    write_backtest_heartbeat,
+)
 from polyecho.backtest._perf import BACKTEST_TARGET_SECONDS, perf_timer
 from polyecho.backtest.engine import BacktestEngine, BacktestParams
 from polyecho.backtest.scenarios import run_triple
@@ -373,6 +378,11 @@ async def process_pending_jobs(datasource: DataSource, *, once: bool = False) ->
         # the claim still has a defined exit decision below (a failed poll in
         # --once mode exits rather than spinning — the outer except logs it).
         claimed_any = False
+        # Per-cycle heartbeat counters: jobs processed / failed THIS poll
+        # only (reset every iteration so the heartbeat reflects the latest
+        # cycle, not a cumulative running total).
+        cycle_processed = 0
+        cycle_failed = 0
         try:
             # I5: recover orphaned 'running' jobs (crashed-worker leftovers)
             # at startup and on every poll BEFORE claiming new pending work,
@@ -398,7 +408,9 @@ async def process_pending_jobs(datasource: DataSource, *, once: bool = False) ->
             for job in job_snapshots:
                 try:
                     await _process_job(job, engine)
+                    cycle_processed += 1
                 except Exception as exc:
+                    cycle_failed += 1
                     logger.error(
                         "jobs.job_failed",
                         extra={
@@ -421,6 +433,22 @@ async def process_pending_jobs(datasource: DataSource, *, once: bool = False) ->
 
         except Exception:
             logger.exception("jobs.poll_error")
+
+        # Per-cycle liveness: emit ONE backtest_heartbeat after every poll
+        # (including the --once drain's iterations and its final empty poll).
+        # phase = running when this cycle claimed work, else idle; counters
+        # are this cycle's processed/failed tallies.  STRICTLY fail-soft:
+        # write_backtest_heartbeat never raises (a heartbeat failure must
+        # NEVER abort the worker or affect job processing), but it is also
+        # wrapped here as defence-in-depth so the loop/exit/sleep below is
+        # reached unconditionally.
+        try:
+            await write_backtest_heartbeat(
+                PHASE_RUNNING if claimed_any else PHASE_IDLE,
+                {"processed": cycle_processed, "failed": cycle_failed},
+            )
+        except Exception:  # noqa: BLE001 - heartbeat must never abort work
+            logger.exception("jobs.heartbeat_error")
 
         if once:
             # R12 #5: drain semantics — exit only once a poll claimed zero

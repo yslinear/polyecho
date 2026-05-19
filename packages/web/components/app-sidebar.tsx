@@ -16,6 +16,7 @@ import {
   TrendingUp,
   Wallet,
   Bell,
+  Activity,
   Settings,
 } from "lucide-react";
 
@@ -43,6 +44,7 @@ const navItems = [
   { href: "/positions", label: "Positions", icon: TrendingUp },
   { href: "/accounts", label: "Accounts", icon: Wallet },
   { href: "/alerts", label: "Alerts", icon: Bell },
+  { href: "/status", label: "Status", icon: Activity },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 

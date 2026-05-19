@@ -1245,3 +1245,323 @@ async def _true() -> bool:
 
 async def _false() -> bool:
     return False
+
+
+# ===========================================================================
+# API-status A-core — Task 1 (canonical heartbeat) + Task 2 (integration
+# probe).  The FROZEN F0 ``polyecho.shared.health`` module lives OUTSIDE
+# this worktree, so these tests install a faithful in-memory stand-in into
+# ``sys.modules`` for the duration of each test (the engine imports the
+# helper lazily, so it picks up whichever module is registered).  This
+# keeps the suite green both in the isolated base AND under the integrated
+# verify (the stub is always installed/removed around the test, so it
+# never shadows the real F0 outside it).
+# ===========================================================================
+
+import contextlib  # noqa: E402
+import sys  # noqa: E402
+import types  # noqa: E402
+
+
+@contextlib.contextmanager
+def _fake_shared_health(
+    *,
+    run_all_probes: Any,
+    write_heartbeat: Any | None = None,
+) -> Any:
+    """Install a fake ``polyecho.shared.health`` for the test body.
+
+    ``write_integration_status`` records every snapshot into the returned
+    list.  ``write_heartbeat`` defaults to recording the canonical kwargs;
+    callers can pass a custom (e.g. raising) impl.
+    """
+    integ_writes: list[Any] = []
+    hb_writes: list[dict[str, Any]] = []
+
+    async def _default_write_heartbeat(
+        kind: str,
+        *,
+        phase: str,
+        datasource: str,
+        live_trading: bool,
+        counters: dict[str, Any],
+    ) -> None:
+        # F0 stamps ``ts`` itself (keyword-only signature, no ``ts`` arg);
+        # the caller passes none, so the recorder captures none.
+        hb_writes.append(
+            {
+                "kind": kind,
+                "phase": phase,
+                "datasource": datasource,
+                "live_trading": live_trading,
+                "counters": counters,
+            }
+        )
+
+    async def _write_integration_status(snapshot: Any) -> None:
+        integ_writes.append(snapshot)
+
+    mod = types.ModuleType("polyecho.shared.health")
+    mod.run_all_probes = run_all_probes  # type: ignore[attr-defined]
+    mod.write_integration_status = _write_integration_status  # type: ignore[attr-defined]
+    mod.write_heartbeat = (  # type: ignore[attr-defined]
+        write_heartbeat if write_heartbeat is not None else _default_write_heartbeat
+    )
+
+    saved = sys.modules.get("polyecho.shared.health")
+    sys.modules["polyecho.shared.health"] = mod
+    try:
+        yield types.SimpleNamespace(
+            integ_writes=integ_writes, hb_writes=hb_writes
+        )
+    finally:
+        if saved is not None:
+            sys.modules["polyecho.shared.health"] = saved
+        else:
+            sys.modules.pop("polyecho.shared.health", None)
+
+
+# --- Task 1: canonical trader_heartbeat via the FROZEN shared helper -------
+
+
+@pytest.mark.asyncio
+async def test_task1_heartbeat_uses_canonical_shared_helper() -> None:
+    """``run_once`` drives shared ``write_heartbeat("trader", ...)`` with the
+    canonical nested-counters shape, while the legacy in-proc mirror / hook
+    stay legacy-shaped (F0 reader folds them — no flag-day)."""
+
+    async def _probes() -> dict[str, Any]:
+        return {"ok": True}
+
+    legacy_hook: list[dict[str, Any]] = []
+
+    async def _hb(info: dict[str, Any]) -> None:
+        legacy_hook.append(info)
+
+    with _fake_shared_health(run_all_probes=_probes) as fake:
+        core = TraderCore(follows=[_follow()], heartbeat_writer=_hb)
+        await core.run_once()
+
+    # Canonical writes: at least cycle_start + cycle_complete, kind="trader",
+    # counters NESTED with the required keys.
+    phases = {w["phase"] for w in fake.hb_writes}
+    assert phases >= {"cycle_start", "cycle_complete"}
+    w = fake.hb_writes[-1]
+    assert w["kind"] == "trader"
+    # F0 stamps ``ts`` itself (keyword-only signature, no ``ts`` arg) so the
+    # caller passes none and the fake recorder captures none — ts is
+    # asserted on the legacy ``last_heartbeat`` mirror below instead.
+    assert isinstance(w["live_trading"], bool)
+    assert set(w["counters"]) >= {"detected", "copied", "skipped", "placed"}
+    # Semantically identical: canonical counters mirror the legacy mirror.
+    assert core.last_heartbeat is not None
+    assert w["counters"]["detected"] == core.last_heartbeat["detected"]
+    # Back-compat preserved: legacy hook + mirror keep TOP-LEVEL counters
+    # (the existing settings-row shape the F0 reader folds).
+    assert legacy_hook and "detected" in legacy_hook[-1]
+    assert "ts" in core.last_heartbeat and "detected" in core.last_heartbeat
+
+
+@pytest.mark.asyncio
+async def test_task1_canonical_write_failure_never_crashes_loop() -> None:
+    """A raising shared ``write_heartbeat`` (or absent F0) degrades to
+    legacy-only; the supervised pass still completes."""
+
+    async def _probes() -> dict[str, Any]:
+        return {"ok": True}
+
+    async def _boom_hb(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("shared health down")
+
+    with _fake_shared_health(run_all_probes=_probes, write_heartbeat=_boom_hb):
+        core = TraderCore(follows=[_follow()])
+        stats = await core.run_once()  # must NOT raise
+
+    assert stats.detected >= 0
+    assert core.last_heartbeat is not None  # legacy mirror still set
+
+
+# --- Task 2: periodic integration probe (isolation guarantees) -------------
+
+
+@pytest.mark.asyncio
+async def test_task2_probe_drives_write_integration_status_periodically() -> None:
+    """The supervised cadence calls run_all_probes → write_integration_status
+    repeatedly (independent of the trade loop).
+
+    Driven DETERMINISTICALLY (not by a wall-clock race): each
+    ``run_all_probes`` bumps a counter and sets an Event, so the test
+    advances the loop cycle-by-cycle and proves true periodicity without
+    timing flakiness.
+    """
+    calls = {"n": 0}
+    tick = asyncio.Event()
+
+    async def _probes() -> dict[str, Any]:
+        calls["n"] += 1
+        tick.set()
+        return {"snapshot": calls["n"]}
+
+    import polyecho.core.trader as trader_mod
+
+    with _fake_shared_health(run_all_probes=_probes) as fake:
+        # Lower the safe FLOOR for this test only so the cadence ticks
+        # fast (the floor itself is asserted by
+        # ``test_task2_interval_clamped_to_safe_floor``); the ctor clamps
+        # ``max(floor, interval)`` so we must move the floor, not just the
+        # interval.
+        prev_floor = trader_mod._MIN_INTEGRATION_PROBE_INTERVAL_SECONDS
+        trader_mod._MIN_INTEGRATION_PROBE_INTERVAL_SECONDS = 0.0
+        try:
+            core = TraderCore(
+                follows=[_follow()],
+                integration_probe_interval_seconds=0.001,
+            )
+        finally:
+            trader_mod._MIN_INTEGRATION_PROBE_INTERVAL_SECONDS = prev_floor
+        assert core._integration_probe_interval_s == 0.001  # not clamped
+        task = asyncio.create_task(core._integration_probe_loop())
+        try:
+            # Await three SUCCESSIVE cycles deterministically.
+            for expected in (1, 2, 3):
+                await asyncio.wait_for(tick.wait(), timeout=5.0)
+                tick.clear()
+                assert calls["n"] >= expected
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    assert len(fake.integ_writes) >= 3
+    assert core.integration_probe_runs >= 3
+    assert fake.integ_writes[0] == {"snapshot": 1}
+
+
+@pytest.mark.asyncio
+async def test_task2_probe_failure_does_not_affect_engine() -> None:
+    """A raising probe is swallowed: the cadence keeps ticking and a
+    concurrent ``run_once`` still completes a clean pass."""
+
+    async def _bad_probes() -> dict[str, Any]:
+        raise RuntimeError("datasource probe exploded")
+
+    with _fake_shared_health(run_all_probes=_bad_probes) as fake:
+        core = TraderCore(
+            follows=[_follow()], integration_probe_interval_seconds=0.01
+        )
+        probe_task = asyncio.create_task(core._integration_probe_loop())
+        # Engine pass runs CONCURRENTLY with the failing probe cadence.
+        stats = await core.run_once()
+        await asyncio.sleep(0.05)  # let the probe fail several times
+        probe_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await probe_task
+
+    # Engine unharmed: a normal fixture pass (detected + dry-run skips).
+    assert stats.detected > 0
+    assert stats.placed == 0
+    assert core.degenerate_once_pass() is None
+    # Probe failed every time ⇒ zero successful integration writes, but the
+    # loop never raised out (no successful runs recorded either).
+    assert fake.integ_writes == []
+    assert core.integration_probe_runs == 0
+
+
+@pytest.mark.asyncio
+async def test_task2_slow_probe_is_timeout_bounded_not_blocking() -> None:
+    """A probe that hangs is cancelled by the per-cycle timeout; it never
+    delays/raises into the cadence (and thus never the trade loop)."""
+
+    async def _hang_probes() -> dict[str, Any]:
+        await asyncio.sleep(3600)  # would hang forever
+        return {}
+
+    import polyecho.core.trader as trader_mod
+
+    with _fake_shared_health(run_all_probes=_hang_probes) as fake:
+        core = TraderCore(follows=[_follow()])
+        # Shrink the hard per-cycle bound so the test is fast.
+        prev = trader_mod.INTEGRATION_PROBE_TIMEOUT_SECONDS
+        trader_mod.INTEGRATION_PROBE_TIMEOUT_SECONDS = 0.05
+        try:
+            # One cycle must RETURN promptly (~timeout), never hang.
+            await asyncio.wait_for(
+                core._run_integration_probe_once(), timeout=2.0
+            )
+        finally:
+            trader_mod.INTEGRATION_PROBE_TIMEOUT_SECONDS = prev
+
+    assert fake.integ_writes == []  # hung ⇒ nothing written
+    assert core.integration_probe_runs == 0  # cycle skipped, no crash
+
+
+def test_task2_interval_clamped_to_safe_floor() -> None:
+    """A mis-configured tiny/invalid interval is clamped (never a tight
+    loop)."""
+    from polyecho.core.trader import (
+        _MIN_INTEGRATION_PROBE_INTERVAL_SECONDS as FLOOR,
+    )
+    from polyecho.core.trader import (
+        INTEGRATION_PROBE_INTERVAL_SECONDS as DEFAULT,
+    )
+
+    assert (
+        TraderCore(
+            integration_probe_interval_seconds=0.0001
+        )._integration_probe_interval_s
+        == FLOOR
+    )
+    assert (
+        TraderCore(
+            integration_probe_interval_seconds=-5
+        )._integration_probe_interval_s
+        == DEFAULT
+    )
+    assert (
+        TraderCore(
+            integration_probe_interval_seconds=120
+        )._integration_probe_interval_s
+        == 120
+    )
+
+
+@pytest.mark.asyncio
+async def test_task2_once_bypasses_probe_scheduler_exit_zero() -> None:
+    """``--once`` must NOT start the probe scheduler and must keep the
+    exit-code contract (0 on a healthy/idle pass)."""
+    from polyecho.core.__main__ import main
+
+    async def _probes() -> dict[str, Any]:
+        return {"ok": True}
+
+    with _fake_shared_health(run_all_probes=_probes) as fake:
+        rc = await main(["--once"])
+
+    assert rc == 0
+    # run_once never starts _integration_probe_loop ⇒ no integration writes.
+    assert fake.integ_writes == []
+
+
+@pytest.mark.asyncio
+async def test_task2_once_degenerate_still_exit_two() -> None:
+    """The degenerate ``--once`` path (follows but 0 detected) is untouched
+    by the probe work — still exit 2."""
+    ghost = "0xghostprobeleader00000000000000000000000098"
+    spec = FollowSpec(
+        account_id=ACCT,
+        leader_address=ghost,
+        template=_tpl(),
+        binding=WalletBinding(
+            signature_type=0, funder=ghost, wallet_mode="eoa", derived=False
+        ),
+    )
+
+    async def _probes() -> dict[str, Any]:
+        return {"ok": True}
+
+    with _fake_shared_health(run_all_probes=_probes):
+        core = TraderCore(follows=[spec])
+        await core.run_once()
+
+    assert core.stats.detected == 0
+    assert core.degenerate_once_pass() is not None  # ⇒ --once exits 2

@@ -36,6 +36,7 @@ import asyncio
 import json
 import logging
 import os
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -188,6 +189,49 @@ class PushConfigError(RuntimeError):
     """
 
 
+#: The component name this process reports under in the FROZEN
+#: ``polyecho.shared.health.write_heartbeat`` contract (F0): the heartbeat is
+#: persisted to the ``push_heartbeat`` settings key with a payload of
+#: ``{ts (ISO8601, REQUIRED), phase, datasource, live_trading, counters{}}``.
+_HEARTBEAT_COMPONENT = "push"
+
+#: Liveness ``phase`` values reported in the heartbeat payload.  ``idle`` =
+#: the loop is parked waiting on the next NOTIFY / next scheduler tick (no
+#: in-flight delivery); ``sending`` = a (mini-)backfill / fallback scan /
+#: ``--once`` drain is actively delivering this cycle.
+_PHASE_IDLE = "idle"
+_PHASE_SENDING = "sending"
+
+
+@dataclass
+class _HeartbeatCounters:
+    """Per-cycle delivery tally surfaced in the heartbeat ``counters`` block.
+
+    A "cycle" is one drain unit — a (mini-)backfill, a fallback scan, or the
+    ``--once`` run.  Counts are *cumulative for that cycle* and reset by
+    constructing a fresh instance at the top of each cycle so an operator
+    reading the heartbeat sees what the most recent cycle actually did:
+
+    * ``delivered`` — events with at least one real 2xx push this cycle;
+    * ``content_error`` — events stamped solely via the content-error path
+      (every sub 413 / non-gone 4xx — durable but zero real delivery, the
+      :data:`web_push_event_content_error_stamped` case);
+    * ``fallback_scanned`` — events processed by the periodic safety-net
+      :meth:`WebPushSender.run_fallback_scan` this cycle (0 outside it).
+    """
+
+    delivered: int = 0
+    content_error: int = 0
+    fallback_scanned: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "delivered": self.delivered,
+            "content_error": self.content_error,
+            "fallback_scanned": self.fallback_scanned,
+        }
+
+
 def _now() -> datetime:
     """Timezone-aware UTC ``now`` (single seam so tests can monkeypatch)."""
     return datetime.now(UTC)
@@ -252,6 +296,60 @@ class WebPushSender:
         self._settings = get_settings()
 
     # ------------------------------------------------------------------
+    # Heartbeat (FROZEN polyecho.shared.health contract, F0) — STRICTLY
+    # fail-soft: a heartbeat-write error must NEVER abort the push loop, the
+    # ``--once`` backfill, or the scheduler.
+    # ------------------------------------------------------------------
+
+    async def _emit_heartbeat(
+        self, phase: str, counters: _HeartbeatCounters
+    ) -> None:
+        """Write one ``push_heartbeat`` via the frozen shared contract.
+
+        Calls ``polyecho.shared.health.write_heartbeat("push", phase=,
+        datasource=, live_trading=, counters=)`` — keyword-only after
+        ``kind``; F0 stamps the ISO8601 UTC ``ts`` itself.  Passes the live
+        datasource / live-trading flags from settings and this cycle's tally.
+
+        Fail-soft is the whole point of this seam.  The heartbeat is pure
+        observability; it must never be able to take down delivery.  So:
+
+        * the import is **lazy** — ``polyecho.shared.health`` lives outside
+          this worktree and may be absent/broken in an isolated build; a
+          module-level import would make *every* push path (including the
+          ``--once`` CI smoke and the supervised loop) fail at import time;
+        * **every** exception is logged and swallowed *except*
+          :class:`asyncio.CancelledError`, which must always propagate so a
+          shutdown / task-cancel is never silently eaten (swallowing it
+          would wedge graceful shutdown and is not a "heartbeat failure").
+
+        ``write_heartbeat`` may be sync or a coroutine depending on the F0
+        implementation; we await it only if it returned an awaitable so
+        either shape is tolerated without coupling to one.
+        """
+        try:
+            from polyecho.shared.health import write_heartbeat
+
+            result = write_heartbeat(
+                _HEARTBEAT_COMPONENT,
+                phase=phase,
+                datasource=self._settings.datasource,
+                live_trading=self._settings.live_trading,
+                counters=counters.as_dict(),
+            )
+            if asyncio.iscoroutine(result):
+                await result
+        except asyncio.CancelledError:
+            # Cooperative cancellation is not a heartbeat failure — never
+            # swallow it or graceful shutdown wedges.
+            raise
+        except BaseException as exc:  # noqa: BLE001 - heartbeat is fail-soft
+            # Anything else (import error in an isolated build, a DB blip
+            # inside write_heartbeat, a contract mismatch, …) is logged and
+            # swallowed so the push loop / --once / scheduler is untouched.
+            log.warning("web_push_heartbeat_write_failed", error=str(exc))
+
+    # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
 
@@ -285,17 +383,21 @@ class WebPushSender:
         log.info("web_push_sender_starting", channel=EVENTS_NOTIFY_CHANNEL)
         await self._stream_forever(initial=True)
 
-    async def run_mini_backfill(self) -> int:
+    async def run_mini_backfill(
+        self, counters: _HeartbeatCounters | None = None
+    ) -> int:
         """Re-deliver every ``pushed_at IS NULL`` event (reconnect path).
 
         Identical query to the startup backfill; named distinctly so the
         reconnect log line and tests can assert it ran *before* the LISTEN
         loop is re-entered, recovering events missed during the disconnect.
+        ``counters`` (optional) is forwarded so a reconnect-recovered
+        delivery is reflected in that iteration's heartbeat tally.
 
         Returns:
             The number of events processed.
         """
-        return await self.run_backfill()
+        return await self.run_backfill(counters=counters)
 
     async def run_once(self) -> int:
         """Drain every currently-unpushed event then return (CI smoke path).
@@ -311,18 +413,29 @@ class WebPushSender:
             The number of events processed (``0`` if the DB is unreachable).
         """
         log.info("web_push_sender_once")
+        counters = _HeartbeatCounters()
         try:
-            return await self.run_backfill()
+            processed = await self.run_backfill(counters=counters)
         except OSError as exc:
             # asyncpg surfaces connect failures as OSError /
             # ConnectionError; SQLAlchemy wraps them too — see _is_db_down.
             log.warning("web_push_once_db_unavailable", error=str(exc))
+            # Still emit a heartbeat (fail-soft) so a DB-down --once is
+            # observably "the process ran" — never lets a heartbeat error
+            # turn this clean exit into a crash.
+            await self._emit_heartbeat(_PHASE_IDLE, counters)
             return 0
         except Exception as exc:  # noqa: BLE001 - smoke must exit 0
             if _is_db_down(exc):
                 log.warning("web_push_once_db_unavailable", error=str(exc))
+                await self._emit_heartbeat(_PHASE_IDLE, counters)
                 return 0
             raise
+        # Successful drain: report what this single cycle delivered. The
+        # heartbeat call is itself fail-soft, so a write error here can
+        # never stop ``--once`` from returning its processed count.
+        await self._emit_heartbeat(_PHASE_IDLE, counters)
+        return processed
 
     async def run_fallback_scan(self) -> int:
         """Periodic safety-net re-scan of ``pushed_at IS NULL`` (R13 #3 / R2).
@@ -348,29 +461,53 @@ class WebPushSender:
             The number of events processed (``0`` if the DB is unreachable).
         """
         log.info("web_push_fallback_scan")
+        counters = _HeartbeatCounters()
         try:
-            return await self.run_backfill()
+            processed = await self.run_backfill(counters=counters)
         except (asyncio.CancelledError, PushConfigError):
             # Cancellation must propagate; bad VAPID must halt (I4) — never
-            # let the safety net swallow either.
+            # let the safety net swallow either (and a heartbeat write must
+            # not run on these paths and risk masking them).
             raise
         except OSError as exc:
             log.warning("web_push_fallback_scan_db_unavailable", error=str(exc))
+            counters.fallback_scanned = 0
+            await self._emit_heartbeat(_PHASE_IDLE, counters)
             return 0
         except Exception as exc:  # noqa: BLE001 - safety net must not crash
             if _is_db_down(exc):
                 log.warning(
                     "web_push_fallback_scan_db_unavailable", error=str(exc)
                 )
+                counters.fallback_scanned = 0
+                await self._emit_heartbeat(_PHASE_IDLE, counters)
                 return 0
             # Unexpected non-DB error: log and swallow so one bad scan does
             # not kill the scheduler / supervised process; the next tick
             # (and the live loop) retry.
             log.error("web_push_fallback_scan_failed", error=str(exc))
+            counters.fallback_scanned = 0
+            await self._emit_heartbeat(_PHASE_IDLE, counters)
             return 0
+        # The fallback scan re-scanned ``pushed_at IS NULL``; record how many
+        # events it processed so an operator can see the safety net is doing
+        # work (or correctly idle). Heartbeat is fail-soft, so it can never
+        # crash the scheduler — preserving the "safety net must not crash"
+        # contract end to end.
+        counters.fallback_scanned = processed
+        await self._emit_heartbeat(_PHASE_IDLE, counters)
+        return processed
 
-    async def run_backfill(self) -> int:
+    async def run_backfill(
+        self, counters: _HeartbeatCounters | None = None
+    ) -> int:
         """Deliver every ``events`` row with ``pushed_at IS NULL`` (id ASC).
+
+        ``counters`` (optional) is the current cycle's heartbeat tally; when
+        supplied each delivered / content-error-stamped event increments it
+        so the caller can report an accurate ``counters`` block.  It is
+        threaded purely so existing callers/tests that don't care about the
+        heartbeat keep working unchanged (defaults to ``None`` ⇒ no tally).
 
         Returns:
             The number of events processed.
@@ -379,7 +516,7 @@ class WebPushSender:
             pending = await self._fetch_pending_event_ids(session)
         log.info("web_push_backfill", pending=len(pending))
         for event_id in pending:
-            await self._safe_deliver(event_id)
+            await self._safe_deliver(event_id, counters=counters)
         return len(pending)
 
     async def push_event(self, event: dict[str, Any]) -> None:
@@ -411,6 +548,12 @@ class WebPushSender:
         """
         first = initial
         while True:
+            # One heartbeat cycle per loop iteration (PRD §7.1 liveness): the
+            # (mini-)backfill below is the ``sending`` phase and tallies what
+            # it delivered; once it parks on the NOTIFY stream the process is
+            # ``idle``. Every ``_emit_heartbeat`` call is fail-soft, so a bad
+            # heartbeat write can never break this reconnect/drain loop.
+            counters = _HeartbeatCounters()
             try:
                 async with pg_listen_iter(EVENTS_NOTIFY_CHANNEL) as notes:
                     # LISTEN is attached *now* (pg_listen_iter.__aenter__
@@ -423,17 +566,22 @@ class WebPushSender:
                             "web_push_listening_then_backfill",
                             channel=EVENTS_NOTIFY_CHANNEL,
                         )
-                        await self.run_backfill()
+                        await self.run_backfill(counters=counters)
                         first = False
                     else:
                         log.info(
                             "web_push_reconnect_mini_backfill",
                             channel=EVENTS_NOTIFY_CHANNEL,
                         )
-                        await self.run_mini_backfill()
+                        await self.run_mini_backfill(counters=counters)
+                    # Report the drain just done (phase=sending), then signal
+                    # we are about to park on the live stream (phase=idle).
+                    # Both are best-effort — see _emit_heartbeat.
+                    await self._emit_heartbeat(_PHASE_SENDING, counters)
                     log.info(
                         "web_push_listening", channel=EVENTS_NOTIFY_CHANNEL
                     )
+                    await self._emit_heartbeat(_PHASE_IDLE, counters)
                     async for note in notes:
                         await self._handle_notification(note.payload)
             except asyncio.CancelledError:
@@ -446,6 +594,11 @@ class WebPushSender:
                 raise
             except Exception as exc:  # noqa: BLE001 - resilient reconnect loop
                 log.warning("web_push_stream_lost", error=str(exc))
+                # Still emit a per-iteration liveness heartbeat even when the
+                # stream/DB is flapping (phase=idle, whatever was delivered
+                # before the drop). Fail-soft, so a heartbeat error here can
+                # never stop the reconnect backoff/retry.
+                await self._emit_heartbeat(_PHASE_IDLE, counters)
                 await asyncio.sleep(_RETRY_BACKOFF_BASE_SECONDS)
 
     async def _handle_notification(self, payload: str) -> None:
@@ -457,7 +610,11 @@ class WebPushSender:
             return
         await self._safe_deliver(event_id)
 
-    async def _safe_deliver(self, event_id: int) -> None:
+    async def _safe_deliver(
+        self,
+        event_id: int,
+        counters: _HeartbeatCounters | None = None,
+    ) -> None:
         """Deliver one event by id; never let one *event* failure kill the loop.
 
         A normal per-event error is logged and swallowed so the next event /
@@ -465,6 +622,12 @@ class WebPushSender:
         the deliberate exception: it is *not* swallowed — it propagates up
         through backfill / the stream loop so delivery halts instead of the
         config bug hiding as silently-"ok" stamped events.
+
+        ``counters`` (optional) is the current heartbeat cycle's tally,
+        forwarded to :meth:`_deliver_event` so a real delivery / a
+        content-error stamp is reflected in the next heartbeat.  An
+        idempotent skip (already-pushed) and a per-event failure do *not*
+        bump the tally — neither delivered the event this cycle.
         """
         try:
             async with session_scope() as session:
@@ -475,7 +638,7 @@ class WebPushSender:
                 if row.pushed_at is not None:
                     # Already delivered (backfill/live race) — idempotent skip.
                     return
-                await self._deliver_event(session, row)
+                await self._deliver_event(session, row, counters=counters)
         except PushConfigError:
             # Bad VAPID config — must halt delivery, not be swallowed (I4).
             raise
@@ -488,13 +651,26 @@ class WebPushSender:
     # Delivery
     # ------------------------------------------------------------------
 
-    async def _deliver_event(self, session: AsyncSession, event: Event) -> None:
+    async def _deliver_event(
+        self,
+        session: AsyncSession,
+        event: Event,
+        counters: _HeartbeatCounters | None = None,
+    ) -> None:
         """Fan one event out to every subscription, then stamp ``pushed_at``.
 
         Non-push events (``payload["push"] is None``) are stamped and
         skipped — no ``webpush`` call.  If *any* subscription hits an
         exhausted transient failure the event is left ``pushed_at IS NULL``
         so the next backfill retries it.
+
+        ``counters`` (optional): when supplied, the *same* terminal
+        classification this method already computes for logging
+        (``any_real_delivery`` vs the durable-but-zero-delivery
+        content-error branch) bumps the heartbeat tally — ``delivered`` on a
+        real 2xx, ``content_error`` on the content-error-stamped case.  A
+        non-push stamp, a no-subscriptions stamp and a deferred event are
+        *not* counted (no push was actually delivered this cycle).
         """
         payload = event.payload or {}
         push_json = payload.get("push") if isinstance(payload, dict) else None
@@ -578,6 +754,8 @@ class WebPushSender:
         if all_durable:
             event.pushed_at = _now()
             if any_real_delivery:
+                if counters is not None:
+                    counters.delivered += 1
                 log.info(
                     "web_push_event_delivered",
                     event_id=event.id,
@@ -589,6 +767,8 @@ class WebPushSender:
                 # received it — every sub was content_error / gone. Stamp
                 # is intentional (no infinite retry); the distinct event
                 # name stops operators reading this as a real delivery.
+                if counters is not None:
+                    counters.content_error += 1
                 log.warning(
                     "web_push_event_content_error_stamped",
                     event_id=event.id,

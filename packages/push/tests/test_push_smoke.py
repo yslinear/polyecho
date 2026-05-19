@@ -354,9 +354,13 @@ async def test_backfill_selects_only_unpushed(_patched_scope: Any) -> None:
     delivered: list[int] = []
     orig = sender._safe_deliver
 
-    async def _spy(event_id: int) -> None:
+    async def _spy(event_id: int, counters: Any = None) -> None:
+        # Mirror the real _safe_deliver signature: run_backfill now forwards
+        # an optional heartbeat ``counters`` tally. Pass it through to the
+        # real method so behaviour (the pushed_at IS NULL ordering this test
+        # asserts) is unchanged.
         delivered.append(event_id)
-        await orig(event_id)
+        await orig(event_id, counters=counters)
 
     with (
         patch("polyecho.push.sender.session_scope", _patched_scope(session)),
@@ -468,13 +472,20 @@ async def test_listen_attaches_before_backfill_no_lost_event() -> None:
 
     delivered: list[int] = []
 
-    async def _fake_backfill() -> int:
+    async def _fake_backfill(counters: Any = None) -> int:  # noqa: ARG001
         order.append("backfill_ran")
         # The gap event is NOT visible to the backfill snapshot (committed
         # after its SELECT) — but it is already sitting in the buffer.
+        # ``counters`` mirrors the real run_backfill signature (the
+        # supervised loop now threads a heartbeat tally through it); this
+        # double ignores it — the test only asserts call ordering.
         return 0
 
-    async def _fake_safe(event_id: int) -> None:
+    async def _fake_safe(
+        event_id: int, counters: Any = None
+    ) -> None:  # noqa: ARG001
+        # Mirrors the real _safe_deliver signature (optional heartbeat
+        # counters); the stream path delivers event 99 then cancels.
         delivered.append(event_id)
         if event_id == 99:
             raise asyncio.CancelledError  # stop the infinite stream
@@ -526,11 +537,11 @@ async def test_reconnect_runs_mini_backfill_before_listen_loop() -> None:
             with __import__("contextlib").suppress(Exception):
                 await gen.aclose()
 
-    async def _fake_backfill() -> int:
+    async def _fake_backfill(counters: Any = None) -> int:  # noqa: ARG001
         order.append("startup_backfill")
         return 0
 
-    async def _fake_mini() -> int:
+    async def _fake_mini(counters: Any = None) -> int:  # noqa: ARG001
         order.append("mini_backfill")
         return 0
 
@@ -966,3 +977,376 @@ async def test_fanout_is_bounded_by_semaphore(_patched_scope: Any) -> None:
     # also proves it WAS concurrent — serial would peak at 1).
     assert peak <= smod._FANOUT_CONCURRENCY
     assert peak > 1
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat (FROZEN polyecho.shared.health contract, F0 — PRD §7.1/§2.3):
+# the sender emits a well-formed ``push_heartbeat`` once per loop iteration
+# and on ``--once``; counters = delivered / content_error / fallback_scanned
+# this cycle; phase = idle/sending. STRICTLY fail-soft: a heartbeat-write
+# error must NEVER abort the push loop, the ``--once`` backfill, or the
+# scheduler.
+#
+# ``polyecho.shared.health`` lives OUTSIDE this worktree and is absent in an
+# isolated build (so the production import is deliberately LAZY). These tests
+# inject a fake module into ``sys.modules`` so the lazy
+# ``from polyecho.shared.health import write_heartbeat`` resolves to our
+# double — this also *proves* the lazy-import seam works regardless of
+# whether the real shared module is present at import time.
+# ---------------------------------------------------------------------------
+
+
+from contextlib import contextmanager  # noqa: E402
+
+
+@contextmanager
+def _fake_health(write_impl: Any) -> Any:
+    """Inject a fake ``polyecho.shared.health`` exposing ``write_heartbeat``.
+
+    Patches ``sys.modules`` so the sender's *lazy* in-method
+    ``from polyecho.shared.health import write_heartbeat`` binds to
+    ``write_impl``; restored on exit so no test leaks the fake.
+    """
+    import sys
+    import types
+
+    mod = types.ModuleType("polyecho.shared.health")
+    mod.write_heartbeat = write_impl  # type: ignore[attr-defined]
+    prev = sys.modules.get("polyecho.shared.health")
+    sys.modules["polyecho.shared.health"] = mod
+    try:
+        yield
+    finally:
+        if prev is not None:
+            sys.modules["polyecho.shared.health"] = prev
+        else:
+            sys.modules.pop("polyecho.shared.health", None)
+
+
+def _hb_sender(*, datasource: str = "fixture", live: bool = False) -> Any:
+    """A sender whose settings carry the datasource / live_trading flags the
+    heartbeat payload must echo from ``polyecho.shared.config``."""
+    settings = MagicMock()
+    settings.vapid_private_key.get_secret_value.return_value = "priv-redacted"
+    settings.datasource = datasource
+    settings.live_trading = live
+    with patch("polyecho.push.sender.get_settings", return_value=settings):
+        from polyecho.push.sender import WebPushSender
+
+        return WebPushSender()
+
+
+@pytest.mark.asyncio
+async def test_once_writes_well_formed_heartbeat(_patched_scope: Any) -> None:
+    """``--once`` emits exactly one ``write_heartbeat("push", ...)`` whose
+    payload matches the FROZEN shape: phase, datasource, live_trading,
+    counters{} with the three cycle counts (F0 stamps ``ts`` itself)."""
+
+    ev = _FakeEvent(1, {"data": {}, "push": {"title": "t", "body": "b"}})
+    sub = _FakeSub("https://push.example/ok")
+    session = _FakeSession({1: ev}, [sub])
+    sender = _hb_sender(datasource="live", live=True)
+
+    calls: list[tuple[Any, ...]] = []
+
+    def _wh(*args: Any, **kwargs: Any) -> None:
+        calls.append((args, kwargs))
+
+    with (
+        _fake_health(_wh),
+        patch("polyecho.push.sender.session_scope", _patched_scope(session)),
+        patch("polyecho.push.sender.webpush", return_value=None),
+        patch(
+            "polyecho.push.sender.build_vapid_claims",
+            return_value={"sub": "x"},
+        ),
+    ):
+        processed = await sender.run_once()
+
+    assert processed == 1
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    # F0's write_heartbeat is keyword-only after ``kind`` and stamps ``ts``
+    # itself — the caller passes no ``ts``.
+    assert args == ("push",)
+    assert kwargs["phase"] in {"idle", "sending"}
+    assert kwargs["datasource"] == "live"
+    assert kwargs["live_trading"] is True
+    assert kwargs["counters"] == {
+        "delivered": 1,
+        "content_error": 0,
+        "fallback_scanned": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_once_heartbeat_write_failure_is_swallowed(
+    _patched_scope: Any,
+) -> None:
+    """A raising ``write_heartbeat`` must NOT abort ``--once``: it still
+    drains, stamps, and returns the processed count (fail-soft)."""
+    ev = _FakeEvent(1, {"data": {}, "push": None})
+    session = _FakeSession({1: ev}, [])
+    sender = _hb_sender()
+
+    def _boom(*_a: Any) -> None:
+        raise RuntimeError("heartbeat backend exploded")
+
+    with (
+        _fake_health(_boom),
+        patch("polyecho.push.sender.session_scope", _patched_scope(session)),
+    ):
+        processed = await sender.run_once()
+
+    assert processed == 1  # drain unaffected
+    assert ev.pushed_at is not None  # event still stamped
+
+
+@pytest.mark.asyncio
+async def test_once_exits_zero_db_down_even_if_heartbeat_raises() -> None:
+    """Combined hostile case: DB unreachable AND the heartbeat write raises.
+    ``--once`` must STILL return 0 (CI-smoke contract preserved end to end)."""
+    sender = _hb_sender()
+
+    @asynccontextmanager
+    async def _boom_db() -> Any:
+        raise OSError("Connect call failed ('127.0.0.1', 5432)")
+        yield  # pragma: no cover
+
+    def _boom_hb(*_a: Any) -> None:
+        raise RuntimeError("heartbeat down too")
+
+    with (
+        _fake_health(_boom_hb),
+        patch("polyecho.push.sender.session_scope", _boom_db),
+    ):
+        processed = await sender.run_once()
+
+    assert processed == 0
+
+
+@pytest.mark.asyncio
+async def test_once_exits_zero_db_down_when_health_module_absent() -> None:
+    """If ``polyecho.shared.health`` is genuinely ABSENT (isolated build),
+    the lazy import inside ``_emit_heartbeat`` raises ImportError — which is
+    swallowed — so ``--once`` still exits 0 with the DB down. (Proves the
+    lazy-import seam, not just a patched double.)"""
+    import sys
+
+    sender = _hb_sender()
+
+    @asynccontextmanager
+    async def _boom_db() -> Any:
+        raise OSError("Connect call failed ('127.0.0.1', 5432)")
+        yield  # pragma: no cover
+
+    prev = sys.modules.pop("polyecho.shared.health", None)
+    try:
+        with patch("polyecho.push.sender.session_scope", _boom_db):
+            processed = await sender.run_once()
+    finally:
+        if prev is not None:
+            sys.modules["polyecho.shared.health"] = prev
+
+    assert processed == 0
+
+
+@pytest.mark.asyncio
+async def test_fallback_scan_writes_heartbeat_with_scanned_count(
+    _patched_scope: Any,
+) -> None:
+    """The safety-net scan reports ``fallback_scanned`` = events it processed
+    and a real delivery also bumps ``delivered``."""
+    ev = _FakeEvent(21, {"data": {}, "push": {"title": "t", "body": "b"}})
+    sub = _FakeSub("https://push.example/stranded")
+    session = _FakeSession({21: ev}, [sub])
+    sender = _hb_sender()
+
+    calls: list[tuple[Any, ...]] = []
+
+    with (
+        _fake_health(lambda *a, **kw: calls.append((a, kw))),
+        patch("polyecho.push.sender.session_scope", _patched_scope(session)),
+        patch("polyecho.push.sender.webpush", return_value=None),
+        patch(
+            "polyecho.push.sender.build_vapid_claims",
+            return_value={"sub": "x"},
+        ),
+    ):
+        processed = await sender.run_fallback_scan()
+
+    assert processed == 1
+    assert len(calls) == 1
+    _args, kw = calls[0]
+    assert _args == ("push",)  # only ``kind`` is positional (F0 kw-only)
+    assert kw["phase"] == "idle"
+    assert kw["counters"]["fallback_scanned"] == 1
+    assert kw["counters"]["delivered"] == 1
+
+
+@pytest.mark.asyncio
+async def test_fallback_scan_heartbeat_failure_does_not_crash_scheduler(
+    _patched_scope: Any,
+) -> None:
+    """A raising heartbeat inside the scheduler-driven fallback scan must be
+    swallowed (the 'safety net must not crash the supervised process'
+    contract holds even when observability fails)."""
+    pending = _FakeEvent(32, {"data": {}, "push": None})
+    session = _FakeSession({32: pending}, [])
+    sender = _hb_sender()
+
+    def _boom(*_a: Any) -> None:
+        raise RuntimeError("hb backend down")
+
+    with (
+        _fake_health(_boom),
+        patch("polyecho.push.sender.session_scope", _patched_scope(session)),
+    ):
+        processed = await sender.run_fallback_scan()
+
+    assert processed == 1  # scan completed; heartbeat error did not surface
+
+
+@pytest.mark.asyncio
+async def test_fallback_scan_db_down_still_emits_heartbeat_and_returns_zero(
+    _patched_scope: Any,
+) -> None:
+    """DB-down fallback scan: returns 0 (unchanged) AND still emits a
+    fail-soft heartbeat with ``fallback_scanned`` = 0."""
+    sender = _hb_sender()
+    calls: list[tuple[Any, ...]] = []
+
+    @asynccontextmanager
+    async def _boom_db() -> Any:
+        raise OSError("Connect call failed ('127.0.0.1', 5432)")
+        yield  # pragma: no cover
+
+    with (
+        _fake_health(lambda *a, **kw: calls.append((a, kw))),
+        patch("polyecho.push.sender.session_scope", _boom_db),
+    ):
+        processed = await sender.run_fallback_scan()
+
+    assert processed == 0
+    assert len(calls) == 1
+    assert calls[0][1]["counters"]["fallback_scanned"] == 0
+
+
+@pytest.mark.asyncio
+async def test_all_content_error_heartbeat_counts_content_error(
+    _patched_scope: Any,
+) -> None:
+    """An all-413 cycle bumps ``content_error`` (not ``delivered``) — the
+    counters mirror the existing terminal classification."""
+    ev = _FakeEvent(11, {"data": {}, "push": {"title": "t", "body": "b" * 9}})
+    subs = [_FakeSub("https://push.example/big")]
+    session = _FakeSession({11: ev}, subs)
+    sender = _hb_sender()
+
+    calls: list[tuple[Any, ...]] = []
+
+    with (
+        _fake_health(lambda *a, **kw: calls.append((a, kw))),
+        patch("polyecho.push.sender.session_scope", _patched_scope(session)),
+        patch(
+            "polyecho.push.sender.webpush", side_effect=_webpush_exc(413)
+        ),
+        patch(
+            "polyecho.push.sender.build_vapid_claims",
+            return_value={"sub": "x"},
+        ),
+    ):
+        await sender.run_once()
+
+    assert len(calls) == 1
+    counters = calls[0][1]["counters"]
+    assert counters["content_error"] == 1
+    assert counters["delivered"] == 0
+
+
+@pytest.mark.asyncio
+async def test_emit_heartbeat_swallows_all_but_propagates_cancelled() -> None:
+    """``_emit_heartbeat`` swallows every error EXCEPT
+    ``asyncio.CancelledError`` (which must propagate so graceful shutdown is
+    never silently eaten)."""
+    from polyecho.push.sender import _HeartbeatCounters
+
+    sender = _hb_sender()
+
+    # Arbitrary backend failure → swallowed (no raise).
+    with _fake_health(MagicMock(side_effect=ValueError("nope"))):
+        await sender._emit_heartbeat("idle", _HeartbeatCounters())
+
+    # Cancellation → must propagate.
+    def _cancel(*_a: Any) -> None:
+        raise asyncio.CancelledError
+
+    with _fake_health(_cancel):
+        with pytest.raises(asyncio.CancelledError):
+            await sender._emit_heartbeat("idle", _HeartbeatCounters())
+
+
+@pytest.mark.asyncio
+async def test_emit_heartbeat_awaits_coroutine_write_impl() -> None:
+    """The frozen ``write_heartbeat`` may be sync OR async; an async impl is
+    awaited (no 'coroutine was never awaited' leak)."""
+    from polyecho.push.sender import _HeartbeatCounters
+
+    sender = _hb_sender()
+    seen: list[str] = []
+
+    async def _async_wh(*args: Any) -> None:
+        seen.append(args[0])
+
+    with _fake_health(_async_wh):
+        await sender._emit_heartbeat("sending", _HeartbeatCounters())
+
+    assert seen == ["push"]
+
+
+@pytest.mark.asyncio
+async def test_supervised_loop_emits_heartbeat_and_survives_hb_error() -> (
+    None
+):
+    """The supervised stream emits a per-iteration heartbeat; a raising
+    heartbeat must NOT break the reconnect/drain loop (it still reaches the
+    NOTIFY wait and is then cleanly cancelled)."""
+    sender = _hb_sender()
+    phases: list[str] = []
+
+    def _wh(*args: Any) -> None:
+        phases.append(args[2])  # phase
+        raise RuntimeError("hb always fails")  # fail-soft must absorb this
+
+    @asynccontextmanager
+    async def _fake_listen(_channel: str) -> Any:
+        async def _gen() -> Any:
+            # Reaching here proves the (failing) heartbeats before the
+            # NOTIFY wait did not abort the loop; now stop the test.
+            raise asyncio.CancelledError
+            yield  # pragma: no cover
+
+        gen = _gen()
+        try:
+            yield gen
+        finally:
+            with __import__("contextlib").suppress(Exception):
+                await gen.aclose()
+
+    async def _fake_backfill(
+        counters: Any = None,
+    ) -> int:  # noqa: ARG001
+        return 0
+
+    with (
+        _fake_health(_wh),
+        patch("polyecho.push.sender.pg_listen_iter", _fake_listen),
+        patch.object(sender, "run_backfill", _fake_backfill),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await sender.run()
+
+    # Both the sending and idle per-iteration heartbeats were attempted
+    # (and their RuntimeErrors swallowed — the loop reached the NOTIFY wait).
+    assert "sending" in phases
+    assert "idle" in phases

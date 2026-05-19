@@ -69,6 +69,26 @@ from polyecho.shared.risk_mode import RiskMode, apply_conservative, get_risk_mod
 
 logger = logging.getLogger(__name__)
 
+#: Default cadence (seconds) for the supervised-loop integration probe
+#: (Task 2).  A *safe* default: long enough that the probe is negligible
+#: load and can never become a hot path, short enough that the
+#: integration-status row the Dashboard reads stays fresh.  Tunable via
+#: the ``integration_probe_interval_seconds`` ctor arg.
+INTEGRATION_PROBE_INTERVAL_SECONDS: float = 90.0
+
+#: Hard upper bound (seconds) on a SINGLE ``run_all_probes`` +
+#: ``write_integration_status`` cycle.  A probe that hangs past this is
+#: cancelled and the cycle is skipped — the cadence (and, more
+#: importantly, the trading loop it runs *beside*) is never delayed by a
+#: stuck datasource/DB probe.  Strictly < the cadence so cycles never
+#: pile up.
+INTEGRATION_PROBE_TIMEOUT_SECONDS: float = 20.0
+
+#: Floor the configured cadence can never go below — keeps a
+#: mis-configuration from turning the (fail-soft, off-trade-path) probe
+#: into a tight loop.
+_MIN_INTEGRATION_PROBE_INTERVAL_SECONDS: float = 5.0
+
 #: Funder USDC balance (in USD) at/under which SYSTEM_LOW_BALANCE fires.
 #:
 #: Rationale: Polymarket's CLOB enforces a $1 minimum order notional, and a
@@ -184,6 +204,9 @@ class TraderCore:
         balance_for: BalanceFetcher | None = None,
         cursor_writer: CursorWriter | None = None,
         heartbeat_writer: HeartbeatWriter | None = None,
+        integration_probe_interval_seconds: float = (
+            INTEGRATION_PROBE_INTERVAL_SECONDS
+        ),
     ) -> None:
         self._settings = get_settings()
         self._ds: DataSource = datasource if datasource is not None else get_datasource()
@@ -235,6 +258,32 @@ class TraderCore:
         # Best-effort: a write failure is logged, never crashes the loop.
         self._heartbeat_writer = heartbeat_writer
         self.last_heartbeat: dict[str, Any] | None = None
+
+        # Task 2: periodic integration probe (supervised loop ONLY).  This
+        # runs `run_all_probes` + `write_integration_status` on a slow
+        # cadence so the Dashboard's integration-status row stays fresh.
+        # It is STRICTLY off the order/redeem path, never calls
+        # ``assert_live_allowed``, and is spawned as a detached background
+        # task (not awaited by the trade loop).  ``asyncio`` keeps only a
+        # *weak* reference to a created task, so we hold a strong ref here
+        # to stop it being GC'd mid-flight (context7 /python/cpython —
+        # "Task Reference Management").  Sub-floor / non-finite configs are
+        # clamped so a mis-config can never make this (fail-soft, no-op-on-
+        # error) probe a tight loop.
+        try:
+            _ivl = float(integration_probe_interval_seconds)
+            if _ivl != _ivl or _ivl <= 0:  # NaN or non-positive
+                _ivl = INTEGRATION_PROBE_INTERVAL_SECONDS
+        except (TypeError, ValueError):
+            _ivl = INTEGRATION_PROBE_INTERVAL_SECONDS
+        self._integration_probe_interval_s: float = max(
+            _MIN_INTEGRATION_PROBE_INTERVAL_SECONDS, _ivl
+        )
+        self._integration_probe_task: asyncio.Task[None] | None = None
+        #: Observability-only: count of completed integration-status
+        #: writes.  Inspectable by tests; NEVER read by the exit-code
+        #: contract (``degenerate_once_pass`` ignores it entirely).
+        self.integration_probe_runs: int = 0
 
         self._evaluator = TraderCopyEvaluator(
             template_for=self._template_for,
@@ -1053,21 +1102,35 @@ class TraderCore:
         return len(outcomes)
 
     async def _write_heartbeat(self, *, phase: str) -> None:
-        """P1-5: write the ``trader_heartbeat`` liveness row (best-effort).
+        """P1-5 / Task 1: write the ``trader_heartbeat`` liveness row.
 
         Records a UTC timestamp + last-poll info so ``polyecho trader
         status`` and the Dashboard (PRD §7.4/§2.3) can show UP/DOWN and
-        when the engine last polled.  Always updates the in-proc mirror
-        (so liveness is measurable DB-free in tests); the injected
-        ``heartbeat_writer`` upserts the ``settings`` row in the live
-        wiring.  A write failure is logged and swallowed — the heartbeat
-        must NEVER crash or stall the trading loop.
+        when the engine last polled.
+
+        Task 1 migration: the canonical row is now written through the
+        FROZEN shared helper :func:`polyecho.shared.health.write_heartbeat`
+        (``kind="trader"``) so the persisted shape is exactly
+        ``{ts, phase, datasource, live_trading, counters{}}`` (counters
+        nested).  This is kept **semantically identical** to the legacy
+        per-tick/startup heartbeat — same trigger points, same numbers.
+
+        Back-compat is preserved without a flag-day: the F0 reader already
+        folds core's legacy *top-level* counters into ``counters{}``, so
+        the in-proc mirror (:attr:`last_heartbeat`) and the injected
+        ``heartbeat_writer`` hook continue to receive the legacy-shaped
+        ``info`` dict verbatim (existing ``settings`` upsert + tests
+        unchanged); the canonical write is an additive best-effort sibling.
+
+        Every leg is best-effort and time-/exception-bounded — a heartbeat
+        write (legacy hook OR the canonical shared helper, including the
+        shared-import itself) must NEVER crash or stall the trading loop,
+        and it never touches the live-lock or the order/redeem path.
         """
-        info: dict[str, Any] = {
-            "ts": datetime.now(tz=UTC).isoformat(),
-            "phase": phase,
-            "datasource": self._settings.datasource,
-            "live_trading": is_live_enabled(),
+        ts = datetime.now(tz=UTC).isoformat()
+        live = is_live_enabled()
+        # Canonical counters block (the nested F0 shape).
+        counters: dict[str, Any] = {
             "detected": self.stats.detected,
             "copied": self.stats.copied,
             "skipped": self.stats.skipped,
@@ -1076,8 +1139,42 @@ class TraderCore:
                 {f.leader_address.lower() for f in self._follows}
             ),
         }
+        # Legacy-shaped mirror/hook payload (counters ALSO top-level) — the
+        # F0 reader folds these, so we don't break the existing row
+        # mid-migration; existing tests/cwire upsert see the same dict.
+        info: dict[str, Any] = {
+            "ts": ts,
+            "phase": phase,
+            "datasource": self._settings.datasource,
+            "live_trading": live,
+            **counters,
+        }
         self.last_heartbeat = info
         logger.info("trader_heartbeat", extra=info)
+
+        # Task 1: canonical write via the FROZEN shared helper.  Imported
+        # lazily + fully guarded: F0 lives in ``packages/shared`` (outside
+        # this worktree) so in an isolated base the import is red — which
+        # MUST degrade to "legacy-only heartbeat", never a loop crash.
+        try:
+            from polyecho.shared.health import write_heartbeat
+
+            # F0's write_heartbeat is keyword-only after ``kind`` and stamps
+            # ``ts`` itself — do NOT pass ``ts`` (the legacy ``info`` mirror
+            # above still records its own ``ts`` for back-compat).
+            await write_heartbeat(
+                "trader",
+                phase=phase,
+                datasource=self._settings.datasource,
+                live_trading=live,
+                counters=counters,
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort liveness
+            logger.warning(
+                "trader_heartbeat_canonical_write_failed_continuing",
+                extra={"phase": phase, "error": str(exc)},
+            )
+
         if self._heartbeat_writer is not None:
             try:
                 await self._heartbeat_writer(info)
@@ -1260,13 +1357,92 @@ class TraderCore:
             self.events.append(("pending_action_processed", {"action_id": action_id}))
         return len(processed)
 
+    # ------------------------------------------------------------------
+    # Task 2: periodic integration probe (supervised loop ONLY)
+    # ------------------------------------------------------------------
+
+    async def _run_integration_probe_once(self) -> None:
+        """One ``run_all_probes`` → ``write_integration_status`` cycle.
+
+        STRICTLY fail-soft and time-bounded (the two reasons this can
+        never harm the engine):
+
+        * **Time-bounded** — the whole probe+write is wrapped in
+          :func:`asyncio.timeout` (:data:`INTEGRATION_PROBE_TIMEOUT_SECONDS`,
+          strictly < the cadence).  A datasource/DB probe that hangs is
+          cancelled; the cycle is skipped.  Because this coroutine runs in
+          its OWN detached task (never awaited by the copy-trade loop), a
+          slow probe delays only the *next probe*, never a single tick of
+          detection / evaluate / risk / execute / redeem.
+        * **Exception-bounded** — every failure (including the lazy F0
+          import being red in an isolated base, or a probe raising) is
+          caught and swallowed; only ``CancelledError`` propagates so a
+          real shutdown still tears the task down promptly.
+
+        It calls **only** the FROZEN shared
+        :func:`polyecho.shared.health.run_all_probes` /
+        :func:`~polyecho.shared.health.write_integration_status`; it
+        touches no engine state, no ``FifoLedger``, no order/redeem path,
+        and NEVER ``assert_live_allowed`` (it is read → write-status only).
+        """
+        try:
+            async with asyncio.timeout(INTEGRATION_PROBE_TIMEOUT_SECONDS):
+                from polyecho.shared.health import (
+                    run_all_probes,
+                    write_integration_status,
+                )
+
+                snapshot = await run_all_probes()
+                await write_integration_status(snapshot)
+            self.integration_probe_runs += 1
+            logger.info(
+                "integration_probe_written",
+                extra={"runs": self.integration_probe_runs},
+            )
+        except asyncio.CancelledError:
+            raise  # cooperative shutdown — never swallow cancellation
+        except BaseException as exc:  # noqa: BLE001 - probe is fail-soft
+            # A slow/failing/absent probe must NEVER surface anywhere near
+            # the trading loop — log a breadcrumb and move on.
+            logger.warning(
+                "integration_probe_failed_continuing",
+                extra={"error": str(exc)},
+            )
+
+    async def _integration_probe_loop(self) -> None:
+        """Perpetual cadence driving :meth:`_run_integration_probe_once`.
+
+        A genuine never-exit ``while True`` (mirrors the wiring redeem /
+        daily-reconcile cadences): a stray fault in one cycle only waits
+        the interval and re-enters; only a real shutdown
+        (Cancelled/KeyboardInterrupt/SystemExit) propagates.  This loop
+        lives in its own detached task, so its sleeps/awaits are entirely
+        independent of — and can never back-pressure — the trade path.
+        """
+        while True:
+            await self._run_integration_probe_once()
+            try:
+                await asyncio.sleep(self._integration_probe_interval_s)
+            except asyncio.CancelledError:
+                raise
+
     async def run(self) -> None:
-        """Supervised loop: detection / reconcile / redeem TaskGroup.
+        """Supervised loop: bounded pass + parked detection/probe TaskGroup.
 
         Fixture mode performs one bounded ``run_once`` pass then idles
         (restart-safe; reconcile is the durable backfill).  The live WS /
         RPC streams are the Phase-4 W2 deliverable behind the same
         interface and only ever exercised with ``POLYECHO_LIVE_TRADING``.
+
+        Task 2: the periodic integration probe is attached HERE (the
+        always-on supervised engine) as a detached sibling task — it runs
+        ``run_all_probes`` + ``write_integration_status`` on a slow
+        cadence concurrently with the parked loop.  It is NOT awaited on
+        the trade path and cannot delay or break it (see
+        :meth:`_run_integration_probe_once`).  ``--once`` does NOT reach
+        ``run()`` (``__main__`` calls ``run_once()`` directly), so the
+        probe + its scheduler never run under ``--once`` and the
+        exit-code contract is wholly untouched.
         """
         await self.run_once()
         # Idle until cancelled by the supervising TaskGroup / signal — an
@@ -1275,6 +1451,16 @@ class TraderCore:
         # the Phase-4 W2 live build behind the same interface.
         async with asyncio.TaskGroup() as tg:  # pragma: no cover - supervised loop
             tg.create_task(self._park())
+            # Strong ref (asyncio holds only a WEAK ref to a created
+            # task — context7 /python/cpython "Task Reference
+            # Management") so the probe cadence can't be GC'd mid-flight.
+            # The loop is a true never-exit ``while True`` that re-raises
+            # only cancellation, so it can never trip the TaskGroup's
+            # "one child raises ⇒ cancel siblings" rule and abort the
+            # parked engine.
+            self._integration_probe_task = tg.create_task(
+                self._integration_probe_loop()
+            )
 
     async def _park(self) -> None:  # pragma: no cover - supervised loop
         await asyncio.Event().wait()
