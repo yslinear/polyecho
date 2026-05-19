@@ -61,9 +61,6 @@ export function AppSidebar() {
           <span className="hidden text-lg font-bold tracking-tight group-data-[collapsible=icon]:block">
             PE
           </span>
-          <span className="text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
-            跟單，是延遲的回聲
-          </span>
         </div>
       </SidebarHeader>
 

@@ -145,15 +145,17 @@ class TestF0DatasourceContract:
             reason="F0 lives in packages/shared (outside this worktree); "
             "asserted by the post-consolidation integrated verify.",
         )
-        from polyecho.shared.datasource import get_datasource
-
-        # F0 API (per the frozen contract): asserts a LiveDataSource /
-        # get_datasource() used WITHOUT `async with` raises the clear
-        # RuntimeError.  Call whichever symbol F0 exposes.
-        if hasattr(contract, "assert_requires_async_context"):
-            contract.assert_requires_async_context(get_datasource)
-        if hasattr(contract, "assert_datasource_factory_contract"):
-            contract.assert_datasource_factory_contract()
+        # F0's authoritative, self-contained contract assertion: it builds
+        # a LiveDataSource with a minimal stub settings (NO env, NO
+        # network), asserts the async-CM protocol shape, that the
+        # un-entered guard fires, and that get_datasource is importable +
+        # documents the `async with` requirement.  We deliberately do NOT
+        # call assert_requires_async_context(get_datasource): under
+        # POLYECHO_DATASOURCE=fixture get_datasource() returns a
+        # (guard-less) FixtureDataSource, which would spuriously read as
+        # "lifecycle guard MISSING".  assert_datasource_factory_contract()
+        # is the single line F0 froze for exactly this recurrence guard.
+        contract.assert_datasource_factory_contract()
 
 
 # --------------------------------------------------------------------------- #

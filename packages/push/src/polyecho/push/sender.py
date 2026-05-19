@@ -471,7 +471,6 @@ class WebPushSender:
             raise
         except OSError as exc:
             log.warning("web_push_fallback_scan_db_unavailable", error=str(exc))
-            counters.fallback_scanned = 0
             await self._emit_heartbeat(_PHASE_IDLE, counters)
             return 0
         except Exception as exc:  # noqa: BLE001 - safety net must not crash
@@ -479,14 +478,12 @@ class WebPushSender:
                 log.warning(
                     "web_push_fallback_scan_db_unavailable", error=str(exc)
                 )
-                counters.fallback_scanned = 0
                 await self._emit_heartbeat(_PHASE_IDLE, counters)
                 return 0
             # Unexpected non-DB error: log and swallow so one bad scan does
             # not kill the scheduler / supervised process; the next tick
             # (and the live loop) retry.
             log.error("web_push_fallback_scan_failed", error=str(exc))
-            counters.fallback_scanned = 0
             await self._emit_heartbeat(_PHASE_IDLE, counters)
             return 0
         # The fallback scan re-scanned ``pushed_at IS NULL``; record how many

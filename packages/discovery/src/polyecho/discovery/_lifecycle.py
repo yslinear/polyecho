@@ -90,14 +90,8 @@ async def datasource_lifecycle[DS](datasource: DS) -> AsyncIterator[DS]:
         # the yielded value is preserved (live's ``__aenter__`` returns
         # ``self`` → same object, same ``DS`` type).
         cm: AbstractAsyncContextManager[object] = datasource  # type: ignore[assignment]
-        await cm.__aenter__()
-        try:
+        async with cm:
             yield datasource
-        except BaseException as exc:
-            if not await cm.__aexit__(type(exc), exc, exc.__traceback__):
-                raise
-        else:
-            await cm.__aexit__(None, None, None)
     else:
         logger.debug(
             "datasource has no async lifecycle; using as-is",

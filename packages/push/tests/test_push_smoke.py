@@ -1278,7 +1278,7 @@ async def test_emit_heartbeat_swallows_all_but_propagates_cancelled() -> None:
         await sender._emit_heartbeat("idle", _HeartbeatCounters())
 
     # Cancellation → must propagate.
-    def _cancel(*_a: Any) -> None:
+    def _cancel(*_a: Any, **_kw: Any) -> None:
         raise asyncio.CancelledError
 
     with _fake_health(_cancel):
@@ -1295,7 +1295,7 @@ async def test_emit_heartbeat_awaits_coroutine_write_impl() -> None:
     sender = _hb_sender()
     seen: list[str] = []
 
-    async def _async_wh(*args: Any) -> None:
+    async def _async_wh(*args: Any, **_kw: Any) -> None:
         seen.append(args[0])
 
     with _fake_health(_async_wh):
@@ -1314,8 +1314,8 @@ async def test_supervised_loop_emits_heartbeat_and_survives_hb_error() -> (
     sender = _hb_sender()
     phases: list[str] = []
 
-    def _wh(*args: Any) -> None:
-        phases.append(args[2])  # phase
+    def _wh(*_a: Any, **kw: Any) -> None:
+        phases.append(kw["phase"])  # phase is keyword-only in F0's contract
         raise RuntimeError("hb always fails")  # fail-soft must absorb this
 
     @asynccontextmanager
