@@ -24,9 +24,13 @@ Contract — IDENTICAL to the frozen ``run_all_probes`` probes:
 * A successful WS *opening handshake* ⇒ ``ok=True``.  The live WS client
   itself is not yet implemented (fixture replay is the tested detection
   path), so this is a pure endpoint-reachability check, phrased as such
-  in ``detail``.  ``websockets`` (a ``packages/core`` dependency) only
-  gained proxy support in 14.0 and the spec is ``>=13.0``, so the probe
-  connects directly — this matches reality (no code proxies the WS).
+  in ``detail``.  It routes through the operator proxy
+  (:func:`polyecho.shared.http.get_proxy_url` — the SAME seam the frozen
+  REST probes use) when one is configured: ``*.polymarket.com``'s direct
+  path is TLS-intercepted (self-signed cert) and only the proxy/VPN
+  egress is clean, so a *direct* WS probe falsely reports the endpoint
+  unreachable.  ``websockets`` (resolved 15.x) accepts ``proxy=``;
+  ``None`` (no proxy configured) ⇒ direct.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from datetime import UTC, datetime
 
 from polyecho.shared.constants import CLOB_WSS_MARKET_URL, CLOB_WSS_USER_URL
 from polyecho.shared.health import ProbeResult
+from polyecho.shared.http import get_proxy_url
 
 #: Per-probe hard ceiling.  Strictly < the caller's
 #: ``INTEGRATION_PROBE_TIMEOUT_SECONDS`` (20s) which bounds the whole
@@ -57,11 +62,18 @@ async def _probe_ws(url: str) -> ProbeResult:
         # to ok=False (fail-soft) instead of an import-time crash.
         import websockets
 
+        # Route through the operator proxy — the SAME seam the REST
+        # probes use.  *.polymarket.com's direct path is TLS-intercepted
+        # (self-signed cert); only the proxy/VPN egress is clean.  None
+        # ⇒ no proxy configured ⇒ direct (websockets 15.x: proxy=None
+        # explicitly disables, never auto-reads env).
+        proxy = get_proxy_url()
         async with asyncio.timeout(WS_PROBE_TIMEOUT_SECONDS):
             async with websockets.connect(
                 url,
                 open_timeout=WS_PROBE_TIMEOUT_SECONDS,
                 close_timeout=WS_PROBE_TIMEOUT_SECONDS,
+                proxy=proxy,
             ):
                 # Opening handshake completed → endpoint reachable.
                 pass
