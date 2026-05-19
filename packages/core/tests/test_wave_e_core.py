@@ -680,13 +680,27 @@ async def test_run_supervised_runs_engine_once_then_parks(
     (R9 I-4: a fault in one must not stop the other)."""
     import polyecho.core.wiring as wiring
 
-    calls = {"run_once": 0, "startup": 0, "redeem": 0, "daily": 0}
+    calls = {
+        "run_once": 0,
+        "startup": 0,
+        "redeem": 0,
+        "daily": 0,
+        "integ": 0,
+    }
 
     class _Core:
         _follows: list[Any] = []
 
         async def run_once(self) -> None:
             calls["run_once"] += 1
+
+        async def _integration_probe_loop(self) -> None:
+            # The deployed entrypoint must ALSO drive the §7.1
+            # integration connectivity probe — it was previously omitted
+            # from run_supervised so the dashboard /status panel stayed
+            # permanently empty.  Bounded fake of the never-exit loop.
+            calls["integ"] += 1
+            await asyncio.sleep(0)
 
     async def _startup() -> None:
         calls["startup"] += 1
@@ -716,6 +730,9 @@ async def test_run_supervised_runs_engine_once_then_parks(
     # CancelledError did NOT prevent the daily loop from running.
     assert calls["redeem"] == 1
     assert calls["daily"] == 1
+    # The §7.1 integration connectivity probe loop is now ALSO driven by
+    # the deployed entrypoint (previously omitted ⇒ /status empty).
+    assert calls["integ"] == 1
 
 
 def test_once_path_never_calls_run_supervised(

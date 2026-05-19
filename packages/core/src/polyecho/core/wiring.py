@@ -575,9 +575,16 @@ async def run_supervised(
        cursor).  The engine's ``--once`` contract is untouched: this
        path is ONLY the supervised loop; ``--once`` calls
        ``core.run_once()`` directly in ``__main__``.
-    3. A long-lived TaskGroup parking the process while the real
-       RedeemWorker (behind the unchanged double live-lock) and the
-       daily on-chain reconcile cadence run.
+    3. A long-lived ``asyncio.gather`` parking the process while the
+       real RedeemWorker (behind the unchanged double live-lock), the
+       daily on-chain reconcile cadence, AND the PRD §7.1 integration
+       connectivity probe (``run_all_probes`` → ``write_integration_status``
+       plus the non-frozen WS reachability probes) run as independent
+       fail-soft loops.  The probe is attached HERE because this is the
+       deployed supervised entrypoint (``__main__`` calls
+       ``run_supervised``, not ``TraderCore.run``); omitting it left the
+       ``integration_status`` row — and the /status connectivity panel —
+       permanently empty.
 
     Mirrors :meth:`TraderCore.run` (run one bounded pass then park) but
     additionally drives the real DB-backed RedeemWorker + reconcile
@@ -596,9 +603,17 @@ async def run_supervised(
     # redeem cadence (and vice-versa).  With ``gather`` each loop is a
     # genuine never-exit ``while True`` (above) and a stray return/raise
     # in one is captured as a result without disturbing the other.
+    # §7.1 integration connectivity probe — attached as a third
+    # independent never-exit fail-soft loop.  ``TraderCore.run`` attaches
+    # it via its own TaskGroup, but ``__main__`` deploys THIS entrypoint,
+    # so without this line the deployed trader-core never writes the
+    # ``integration_status`` row (the dashboard /status connectivity panel
+    # stays empty).  Same ``gather(return_exceptions=True)`` rationale:
+    # one loop faulting must never stop the siblings.
     await asyncio.gather(  # pragma: no cover - supervised loop
         _redeem_loop(worker, interval_seconds=redeem_interval_seconds),
         _daily_reconcile_loop(interval_seconds=reconcile_interval_seconds),
+        core._integration_probe_loop(),
         return_exceptions=True,
     )
 
