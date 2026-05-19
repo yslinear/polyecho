@@ -26,6 +26,7 @@ from polyecho.cli.doctor import doctor
 from polyecho.cli.logs import app as logs_app
 from polyecho.cli.push import app as push_app
 from polyecho.cli.settings import app as settings_app
+from polyecho.cli.status import status
 from polyecho.cli.trader import app as trader_app
 
 app = typer.Typer(
@@ -64,6 +65,7 @@ app.add_typer(
 
 # Top-level commands
 app.command(name="doctor")(doctor)
+app.command(name="status")(status)
 
 if __name__ == "__main__":
     app()
