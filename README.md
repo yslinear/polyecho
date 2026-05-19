@@ -66,11 +66,13 @@ docker compose -f infra/docker-compose.yml down -v         # 停止 + 清除 DB
 | `POLYECHO_DB_URL` | `…@db:5432/polyecho` | Python 服務使用的非同步(asyncpg)DB URL。容器內主機為 `db`。 |
 | `POLYECHO_DB_URL_DRIZZLE` | `…@db:5432/polyecho` | Web 應用程式 Drizzle ORM 使用的同步 DB URL。 |
 | `POLYECHO_DATASOURCE` | `fixture` | `fixture` = 離線預錄資料(安全的預設值)。`live` = 真實的 Polymarket API。 |
+| `POLYECHO_CORE_PERSIST_FIXTURE` | _(unset = false)_ | 未設定且為 fixture datasource 時,trader-core **不會**跟單那個示範用 fixture 領單者 —— 因此不會有任何合成的跟單事件污染操作者 DB。僅在你刻意要演練示範管線時設為 true。 |
+| `POLYECHO_DISCOVERY_PERSIST_FIXTURE` | _(unset = false)_ | 同上的姊妹開關:未設定且為 fixture datasource 時,discovery worker **不會**將其合成的 fixture 候選領單者寫入操作者 DB。僅在你刻意要為本機示範植入資料時設為 true。 |
 | `POLYECHO_POLYMARKET_CLOB_URL` | `https://clob.polymarket.com` | CLOB 訂單 API base。 |
 | `POLYECHO_POLYMARKET_DATA_API_URL` | `https://data-api.polymarket.com` | 排行榜／活動／部位 API base。 |
-| `POLYECHO_POLYGON_RPC_URL` | `https://polygon-rpc.com` | Polygon RPC(鏈上贖回／餘額)。 |
+| `POLYECHO_POLYGON_RPC_URL` | `https://polygon-rpc.com` | Polygon RPC(鏈上贖回／餘額)。**⚠️ 此預設值目前已失效**:`https://polygon-rpc.com` 對所有人都回傳 HTTP 401「tenant disabled」(與 proxy 無關,已確認),操作者**必須**覆寫它。一個已知可用、免 API key 的免費公開 RPC 為 `https://polygon.drpc.org`。 |
 | `POLYECHO_POLYMARKET_CHAIN_ID` | `137` | Polygon mainnet。 |
-| `POLYECHO_POLYMARKET_PROXY_URL` | _(blank = direct)_ | 套用於**所有** Polymarket 呼叫的對外 proxy(地理封鎖的因應方式)。Web 的 `/settings` 頁面會寫入一筆 `settings` DB 資料列,於執行期覆寫此值。 |
+| `POLYECHO_POLYMARKET_PROXY_URL` | _(blank = direct)_ | 套用於**所有** Polymarket 呼叫的對外 proxy(地理封鎖的因應方式)。**支援的操作者機制是 CLI `polyecho settings proxy-set／-show／-clear`**(其 SSRF 驗證器與 web `/settings` 共用,寫入同一筆 `settings` 資料列 `polymarket_proxy_url`)。此 env 僅為 fallback,生效順序為:DB 資料列 → env → 無(直連)。 |
 | `POLYECHO_KEY_KDF_ITERATIONS` | `600000` | 加密帳戶金鑰的 PBKDF2 回合數。通關密語以互動方式輸入,絕不儲存。 |
 | `POLYECHO_VAPID_PUBLIC_KEY` / `_PRIVATE_KEY` / `_SUBJECT` | _(blank)_ | Web-push(VAPID,RFC 8292)。以 `push vapid-keygen` 產生。 |
 | `POLYECHO_LIVE_TRADING` | _(unset = false)_ | **真實資金的主鎖(MASTER live-money lock)。** 為 false 時,每一筆真實訂單／贖回都會在單一咽喉點 RAISES。詳見 [上線(真實資金)](#going-live-real-money)。 |
@@ -80,10 +82,20 @@ docker compose -f infra/docker-compose.yml down -v         # 停止 + 清除 DB
 | `POLYECHO_TZ` | `Asia/Taipei` | 顯示時區(用於「今日」PnL 的邊界判定)。 |
 
 > **Proxy／VPN 說明。** 若 Polymarket 遭地理封鎖,請自行架設你自己的
-> VPN／proxy 作為**獨立**的事務(這是操作者的責任,不在專案範圍內),
-> 並將 `POLYECHO_POLYMARKET_PROXY_URL` 指向它 —— 例如主機上執行的
-> proxy 可用 `http://host.docker.internal:8888`。請勿將 proxy 加入受版控的
-> compose 檔;將它保留在你私有的 `.env` 中。
+> VPN／proxy 作為**獨立**的事務(這是操作者的責任,不在專案範圍內)。
+>
+> **支援的設定路徑(PRIMARY):** 用 CLI 寫入 DB ——
+> `docker compose -f infra/docker-compose.yml run --rm cli settings proxy-set <url>`
+> (DB-backed,寫入後立即生效,且通過 SSRF 驗證)。`POLYECHO_POLYMARKET_PROXY_URL`
+> env 僅為 **fallback**;生效順序為:DB 資料列 → env → 無(直連)。
+>
+> **位址必須是主機外部可路由的形式。** SSRF 驗證器(CLI 與 web 共用)會
+> **硬性拒絕** loopback、`.internal`／`.local` 內網名稱,以及 RFC1918 私有
+> 位址 —— 因此 `http://host.docker.internal:8888`、`http://localhost:8888`、
+> `http://127.0.0.1:8888` 等**一律被拒**。由於 gluetun 是發布在**主機**上,
+> 請改用主機的對外可路由位址,例如主機的 Tailscale IP:
+> `http://<tailscale-ip>:8888`。請勿將 proxy 加入受版控的 compose 檔;
+> 將它保留在你私有的 `.env`(或 DB 資料列)中。
 
 ## 服務
 
@@ -234,6 +246,27 @@ docker compose -f infra/docker-compose.yml run --rm cli push vapid-keygen
 docker compose -f infra/docker-compose.yml run --rm cli alerts list
 ```
 
+### `status` —— 系統狀態快照(唯讀)
+
+```bash
+# worker 心跳 + 整合健康的彙整快照(與 web /status 頁面同源)。
+# 嚴格唯讀:只讀取心跳／整合狀態,絕不寫入,也絕不觸動真實交易鎖。
+docker compose -f infra/docker-compose.yml run --rm cli status
+```
+
+### `settings` —— 執行期設定(Polymarket proxy)
+
+```bash
+# 顯示目前生效的 proxy 及其來源(DB 資料列 → env → 無)。
+docker compose -f infra/docker-compose.yml run --rm cli settings proxy-show
+
+# 經 SSRF 驗證後將 proxy 寫入 DB settings 資料列(支援的操作者路徑)。
+docker compose -f infra/docker-compose.yml run --rm cli settings proxy-set <url>
+
+# 清除 DB proxy 資料列(回到 env fallback／直連)。
+docker compose -f infra/docker-compose.yml run --rm cli settings proxy-clear
+```
+
 ## 典型工作流程
 
 **發掘並審閱領單者**
@@ -308,9 +341,12 @@ open http://mac-mini.tail3e1efb.ts.net:3006
 `0.0.0.0:3006`,**曝露於主機所有網路介面(含 LAN 與 Tailscale),逾越
 loopback**;此無驗證 UI 的遠端存取因而是操作者明確接受的責任,不在
 專案範圍內(PRD §5.9)。它以唯讀為主:總覽、發掘、領單者明細 + 評分
-圖表、回測、交易、部位、帳戶、領單者、一個 `/status` 整合健康頁面,
-以及一個會將 Polymarket proxy URL 寫入 `settings` 資料表的 `/settings`
-頁面。
+圖表、回測、交易、部位、帳戶、領單者、一個 `/status` 整合健康頁面
+(現在會呈現各 worker 心跳,以及 Polymarket CLOB／Data API REST、
+Polygon RPC、**Polymarket user／market WebSocket** 與 VPN egress 的
+可達性 —— 共 8 項探測;整合面板現已實際填入資料,先前部署的
+entrypoint 從未執行該探測),以及一個會將 Polymarket proxy URL
+寫入 `settings` 資料表的 `/settings` 頁面。
 
 ## 安全模型(不可妥協)
 
@@ -338,8 +374,13 @@ loopback**;此無驗證 UI 的遠端存取因而是操作者明確接受的責�
 
 - **全新／空的 DB:** 一次性的 `migrate` 服務會在 worker 啟動前自動
   建立 schema;不需手動步驟。
-- **遭地理封鎖的 Polymarket 呼叫:** 設定 `POLYECHO_POLYMARKET_PROXY_URL`
-  (或 web `/settings` 的 proxy 欄位)—— 見上方的 proxy／VPN 說明。
+- **遭地理封鎖的 Polymarket 呼叫:** 用支援的 CLI 路徑設定 proxy ——
+  `… run --rm cli settings proxy-set <url>`(或 web `/settings` 的 proxy
+  欄位);`POLYECHO_POLYMARKET_PROXY_URL` env 僅為 fallback。位址必須是
+  主機外部可路由的形式:loopback、`.internal`／`.local` 與 RFC1918 私有
+  位址會被 SSRF 硬性拒絕(故 `http://host.docker.internal:8888` 會被拒;
+  改用主機 Tailscale IP `http://<tailscale-ip>:8888`)。詳見上方的
+  proxy／VPN 說明。
 - **全部重置:** 下列指令會清除 DB volume;下一次 `up` 會從頭重新 migrate:
 
   ```bash
