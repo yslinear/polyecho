@@ -33,7 +33,7 @@ flowchart TD
     TC -->|"受風控的 CLOB 訂單"| PM["Polymarket CLOB"]
     TC -->|"寫入事件"| EV[("events")]
     EV --> PS["push-sender → Web Push 警示"]
-    TC -->|"my_trades / settings"| WEB["web 儀表板<br/>(localhost,唯讀為主)"]
+    TC -->|"my_trades / settings"| WEB["web 儀表板<br/>(0.0.0.0:3006,唯讀為主)"]
 ```
 
 每個服務都**只透過 Postgres** 溝通 —— 沒有任何服務會對另一個服務開放連接埠。
@@ -73,8 +73,8 @@ docker compose -f infra/docker-compose.yml up -d
 # 3. 健康檢查 — 探測設定、DB、Polymarket 端點、RPC、proxy/VPN。
 docker compose -f infra/docker-compose.yml run --rm cli polyecho doctor
 
-# 4. 開啟儀表板。
-open http://127.0.0.1:3000
+# 4. 開啟儀表板（受版控的 compose 將其發布於 0.0.0.0:3006）。
+open http://127.0.0.1:3006   # 或 http://<host>:3006 / Tailscale
 ```
 
 停止／檢視：
@@ -105,7 +105,7 @@ docker compose -f infra/docker-compose.yml down -v         # stop + wipe DB
 | `POLYECHO_VAPID_PUBLIC_KEY` / `_PRIVATE_KEY` / `_SUBJECT` | _(blank)_ | Web-push（VAPID，RFC 8292）。以 `polyecho push vapid-keygen` 產生。 |
 | `POLYECHO_LIVE_TRADING` | _(unset = false)_ | **真實資金的主鎖（MASTER live-money lock）。** 為 false 時，每一筆真實訂單／贖回都會在單一咽喉點 RAISES。詳見 [上線（真實資金）](#going-live-real-money)。 |
 | `POLYECHO_AUTO_REDEEM` | _(unset = false)_ | 自動領取獎金。只有在此值**與** `POLYECHO_LIVE_TRADING` 皆為 true 時才會動作。 |
-| `POLYECHO_WEB_PORT` | `3000` | 儀表板連接埠（僅綁定於 `127.0.0.1`）。 |
+| `POLYECHO_WEB_PORT` | `3000` | 容器內部的儀表板埠。**注意：** 受版控的 `infra/docker-compose.yml` 已固定將 web 發布於 `0.0.0.0:3006`（對外曝露於主機所有介面，非經此 env 預設值）。 |
 | `POLYECHO_LOG_LEVEL` | `INFO` | 結構化日誌等級。 |
 | `POLYECHO_TZ` | `Asia/Taipei` | 顯示時區（用於「今日」PnL 的邊界判定）。 |
 
@@ -125,7 +125,7 @@ docker compose -f infra/docker-compose.yml down -v         # stop + wipe DB
 | `discovery` | none | 領單者發掘 + 評分 worker。 |
 | `backtest` | none | 輪詢 `backtest_jobs`、執行引擎、寫入結果。 |
 | `push` | none | Web-push 傳送器（僅對外 VAPID）。 |
-| `web` | `127.0.0.1:3000` | Next.js 15 儀表板。以唯讀為主，**設計上無驗證機制**。 |
+| `web` | `0.0.0.0:3006` | Next.js 15 儀表板。以唯讀為主，**設計上無驗證機制**。受版控的 compose 依操作者明確決定將其曝露於主機所有介面（含 LAN／Tailscale），逾越 loopback。 |
 | `cli` | — | 隨需執行（`profile: tools`）。`polyecho` 命令。 |
 
 ## CLI 參考
@@ -202,7 +202,7 @@ RPC 可達性，以及 proxy／VPN 對外連線。每當有狀況看起來不對
 
 ```bash
 docker compose -f infra/docker-compose.yml run --rm cli polyecho discovery run
-# 在 http://127.0.0.1:3000/discovery 審閱候選者
+# 在 http://<host>:3006/discovery 審閱候選者
 docker compose -f infra/docker-compose.yml run --rm cli polyecho discovery promote <wallet>
 ```
 
@@ -251,11 +251,15 @@ docker compose -f infra/docker-compose.yml run --rm cli polyecho push vapid-keyg
 
 ## Web 儀表板
 
-`http://127.0.0.1:3000` —— 僅綁定 localhost，**設計上無驗證機制**
-（它絕不對外網路曝露；遠端存取是操作者的責任，不在範圍內）。它以唯讀
-為主：總覽、發掘、領單者明細 + 評分圖表、回測、交易、部位、帳戶、
-領單者、一個 `/status` 整合健康頁面，以及一個會將 Polymarket proxy URL
-寫入 `settings` 資料表的 `/settings` 頁面。
+`http://<host>:3006`（本機 `http://127.0.0.1:3006`；經 Tailscale
+`http://mac-mini.tail3e1efb.ts.net:3006`）——**設計上無驗證機制**。
+受版控的 `infra/docker-compose.yml` 依操作者明確且再三確認的決定，
+將 web 發布於 `0.0.0.0:3006`，**曝露於主機所有網路介面（含 LAN
+與 Tailscale），逾越 loopback**；此無驗證 UI 的遠端存取因而是操作者
+明確接受的責任，不在專案範圍內（PRD §5.9）。它以唯讀為主：總覽、
+發掘、領單者明細 + 評分圖表、回測、交易、部位、帳戶、領單者、一個
+`/status` 整合健康頁面，以及一個會將 Polymarket proxy URL 寫入
+`settings` 資料表的 `/settings` 頁面。
 
 ## 安全模型（不可妥協）
 
@@ -264,7 +268,10 @@ docker compose -f infra/docker-compose.yml run --rm cli polyecho push vapid-keyg
 - 所有控制都透過 DB `settings` 變更流動，而非以 RPC 呼叫金鑰持有者。
 - 真實交易由單一咽喉點（`assert_live_allowed`）把關；預設為
   dry-run／fixture —— 除非明確解鎖，否則不會移動任何真實資金。
-- `db` 與 `web` 僅綁定 `127.0.0.1`；設計上沒有驗證層。
+- `db` 僅綁定 `127.0.0.1`。`web` 設計上沒有驗證層，且受版控的 compose
+  依操作者明確決定將其發布於 `0.0.0.0:3006`、曝露於主機所有介面（含
+  LAN／Tailscale，逾越 loopback）—— 此無驗證 UI 的遠端存取是操作者
+  明確接受的責任（PRD §5.9）。
 
 ## 疑難排解
 
