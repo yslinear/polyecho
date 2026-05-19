@@ -37,6 +37,23 @@ import PositionsPage from "@/app/positions/page";
 import AccountsPage from "@/app/accounts/page";
 import LeadersPage from "@/app/leaders/page";
 
+// i18n prose is often split across an inline <code>/<span>/<Link>, so the
+// sentence is broken across multiple DOM nodes. Match the INNERMOST element
+// whose whitespace-normalised full textContent contains `frag` (the leading
+// clause derived from the dict) — robust to that splitting, and unambiguous
+// (ancestors are excluded because a child also matches).
+function brokenText(frag: string) {
+  const norm = (s: string | null | undefined) =>
+    (s ?? "").replace(/\s+/g, " ").trim();
+  const needle = norm(frag);
+  return (_content: string, node: Element | null) => {
+    if (!node) return false;
+    const has = (el: Element | null | undefined) =>
+      norm(el?.textContent).includes(needle);
+    return has(node) && Array.from(node.children).every((c) => !has(c));
+  };
+}
+
 describe("data-page empty states", () => {
   beforeEach(() => {
     rows = [];
@@ -58,11 +75,11 @@ describe("data-page empty states", () => {
     expect(
       screen.getByText(t("tables.accounts.cliOnlyTitle"))
     ).toBeInTheDocument();
-    // Empty-state prose: the prefix text node before the inline <code>.
+    // Empty-state prose: the leading clause before the inline <code>.
     const emptyPrefix = t("tables.accounts.emptyPrefix", {
       cmd: "[[CMD]]",
     }).split("[[CMD]]")[0];
-    expect(screen.getByText(emptyPrefix)).toBeInTheDocument();
+    expect(screen.getByText(brokenText(emptyPrefix))).toBeInTheDocument();
     // The real next action (the CLI command) is shown verbatim.
     expect(
       screen.getAllByText(/polyecho account import/i).length
@@ -76,7 +93,7 @@ describe("data-page empty states", () => {
   it("/leaders: empty state points at Discovery + the real CLI next step", async () => {
     render(await LeadersPage());
     expect(
-      screen.getByText(t("tables.leaders.emptyPrefix"))
+      screen.getByText(brokenText(t("tables.leaders.emptyPrefix")))
     ).toBeInTheDocument();
     // Discovery is highlighted in its own span.
     expect(

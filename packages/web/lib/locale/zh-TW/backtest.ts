@@ -53,6 +53,7 @@ export const backtest = {
     },
     pnlCurves: "PnL 曲線（多情境）",
     pnlCurve: "PnL 曲線",
+    pnlEmpty: "尚無 PnL 資料。",
     statsTitle: "統計",
     table: {
       metric: "指標",

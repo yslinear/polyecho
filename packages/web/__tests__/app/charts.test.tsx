@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import { t } from "@/lib/i18n";
 
 // Recharts' ResponsiveContainer measures its parent (0x0 in jsdom) and would
 // render nothing. Replace it with a fixed-size passthrough so the SVG mounts.
@@ -26,7 +27,7 @@ describe("LeaderScoreChart", () => {
   it("renders an empty-state message when there is no history", () => {
     render(<LeaderScoreChart data={[]} />);
     expect(
-      screen.getByText("No score history recorded yet.")
+      screen.getByText(t("discovery.chart.noHistory"))
     ).toBeInTheDocument();
   });
 
@@ -42,7 +43,7 @@ describe("LeaderScoreChart", () => {
     const { container } = render(<LeaderScoreChart data={data} />);
     expect(container.querySelector("[data-chart]")).toBeInTheDocument();
     expect(
-      screen.queryByText("No score history recorded yet.")
+      screen.queryByText(t("discovery.chart.noHistory"))
     ).not.toBeInTheDocument();
   });
 
@@ -52,7 +53,7 @@ describe("LeaderScoreChart", () => {
     expect(sk).toBeInTheDocument();
     // Loading must not fall through to the empty-state copy.
     expect(
-      screen.queryByText("No score history recorded yet.")
+      screen.queryByText(t("discovery.chart.noHistory"))
     ).not.toBeInTheDocument();
   });
 
@@ -65,8 +66,12 @@ describe("LeaderScoreChart", () => {
     // shadcn ChartContainer injects the config color as a CSS var on a
     // <style> block scoped to the chart id; assert the gain token is used.
     expect(container.innerHTML).toContain("hsl(var(--gain))");
-    // Accessible trend caption is present for screen readers.
-    expect(screen.getByText(/trending up/)).toBeInTheDocument();
+    // Accessible trend caption is present for screen readers (i18n).
+    expect(
+      screen.getByText(
+        t("discovery.chart.caption", { trend: t("discovery.chart.trendUp") })
+      )
+    ).toBeInTheDocument();
   });
 
   it("tints the line via --loss for a falling score history", () => {
@@ -76,14 +81,20 @@ describe("LeaderScoreChart", () => {
     ] as ScorePoint[];
     const { container } = render(<LeaderScoreChart data={data} />);
     expect(container.innerHTML).toContain("hsl(var(--loss))");
-    expect(screen.getByText(/trending down/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        t("discovery.chart.caption", { trend: t("discovery.chart.trendDown") })
+      )
+    ).toBeInTheDocument();
   });
 });
 
 describe("BacktestPnlChart", () => {
   it("renders an empty-state message when there are no scenarios", () => {
     render(<BacktestPnlChart scenarios={[]} />);
-    expect(screen.getByText("No PnL data available.")).toBeInTheDocument();
+    expect(
+      screen.getByText(t("backtest.result.pnlEmpty"))
+    ).toBeInTheDocument();
   });
 
   it("renders a multi-scenario chart and merges dates without throwing", () => {

@@ -21,6 +21,7 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
+import { t } from "@/lib/i18n";
 
 interface DayPoint {
   date: string;
@@ -52,7 +53,7 @@ export function BacktestPnlChart({ scenarios }: BacktestPnlChartProps) {
     return (
       <div className="flex h-[280px] w-full items-center justify-center rounded-md border border-dashed border-border">
         <p className="text-sm text-muted-foreground">
-          No PnL data available.
+          {t("backtest.result.pnlEmpty")}
         </p>
       </div>
     );

@@ -120,12 +120,24 @@ describe("/backtest/[id] result page", () => {
       screen.getByText("polyecho logs backtest")
     ).toBeInTheDocument();
     // The actionable suffix prose ("…then queue the job again") is i18n.
+    // It sits in the same <p> as an inline <code>, so match the INNERMOST
+    // element containing it (ancestors are excluded because a child also
+    // matches) — otherwise getByText sees the <p>, CardContent, Card, … and
+    // throws "multiple elements".
+    const suffix = t("backtest.result.failed.bodySuffix")
+      .replace(/\s+/g, " ")
+      .trim();
     expect(
-      screen.getByText((_, el) =>
-        (el?.textContent ?? "").includes(
-          t("backtest.result.failed.bodySuffix")
-        )
-      )
+      screen.getByText((_content, el) => {
+        const norm = (n: Element | null | undefined) =>
+          (n?.textContent ?? "").replace(/\s+/g, " ");
+        return (
+          norm(el).includes(suffix) &&
+          Array.from(el?.children ?? []).every(
+            (c) => !norm(c).includes(suffix)
+          )
+        );
+      })
     ).toBeInTheDocument();
   });
 
