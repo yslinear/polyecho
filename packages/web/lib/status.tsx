@@ -21,6 +21,7 @@ import {
 import type { BadgeProps } from "@/components/ui/badge";
 import type { HeartbeatLiveness } from "@/lib/settings-keys";
 import { type ProbeVerdict, HEARTBEAT_STALE_MINUTES } from "@/lib/settings-keys";
+import { t } from "@/lib/i18n";
 
 export interface StatusPresentation {
   /** Plain text label — the primary, never-color-only signal. */
@@ -47,21 +48,23 @@ export function workerPresentation(
   switch (liveness) {
     case "running":
       return {
-        label: "Running",
+        label: t("status.verdict.running"),
         variant: "secondary",
         Icon: CheckCircle2,
         token: "running",
       };
     case "stale":
       return {
-        label: `Stale (> ${HEARTBEAT_STALE_MINUTES} min)`,
+        label: t("status.verdict.stale", {
+          minutes: HEARTBEAT_STALE_MINUTES,
+        }),
         variant: "destructive",
         Icon: AlertTriangle,
         token: "stale",
       };
     default:
       return {
-        label: "No data",
+        label: t("status.verdict.noData"),
         variant: "outline",
         Icon: CircleSlash,
         token: "missing",
@@ -82,14 +85,14 @@ export function probePresentation(
 ): StatusPresentation {
   if (verdict === "ok") {
     return {
-      label: "OK",
+      label: t("status.verdict.ok"),
       variant: "secondary",
       Icon: CheckCircle2,
       token: "ok",
     };
   }
   return {
-    label: "Down",
+    label: t("status.verdict.down"),
     variant: "destructive",
     Icon: XCircle,
     token: "down",
@@ -99,7 +102,7 @@ export function probePresentation(
 /** A coerced-but-absent integration_status row → an honest "no data" badge. */
 export function integrationNoData(): StatusPresentation {
   return {
-    label: "No data",
+    label: t("status.verdict.noData"),
     variant: "outline",
     Icon: CircleSlash,
     token: "missing",
@@ -110,13 +113,13 @@ export function integrationNoData(): StatusPresentation {
 export function workerLabel(key: string): string {
   switch (key) {
     case "trader_heartbeat":
-      return "Trader";
+      return t("status.workerLabel.trader");
     case "discovery_heartbeat":
-      return "Discovery";
+      return t("status.workerLabel.discovery");
     case "backtest_heartbeat":
-      return "Backtest";
+      return t("status.workerLabel.backtest");
     case "push_heartbeat":
-      return "Push notifier";
+      return t("status.workerLabel.push");
     default:
       return key;
   }
@@ -126,17 +129,17 @@ export function workerLabel(key: string): string {
 export function probeLabel(key: string): string {
   switch (key) {
     case "config":
-      return "Config";
+      return t("status.probeLabel.config");
     case "database":
-      return "Database";
+      return t("status.probeLabel.database");
     case "polymarket_clob":
-      return "Polymarket CLOB";
+      return t("status.probeLabel.polymarketClob");
     case "polymarket_data_api":
-      return "Polymarket Data API";
+      return t("status.probeLabel.polymarketDataApi");
     case "polygon_rpc":
-      return "Polygon RPC";
+      return t("status.probeLabel.polygonRpc");
     case "vpn_egress":
-      return "VPN egress";
+      return t("status.probeLabel.vpnEgress");
     default:
       // Unknown future probe: humanise the snake_case key, never echo raw.
       return key

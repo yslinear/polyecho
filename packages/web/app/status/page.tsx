@@ -31,6 +31,7 @@ import {
   heartbeatLiveness,
   coerceIntegrationStatus,
   probeVerdict,
+  HEARTBEAT_STALE_MINUTES,
   type IntegrationStatus,
 } from "@/lib/settings-keys";
 import {
@@ -43,15 +44,18 @@ import {
 import { formatRelativeTime, formatDateTime } from "@/lib/format";
 import { StatusBadge } from "@/components/status-badge";
 import { Separator } from "@/components/ui/separator";
+import { t } from "@/lib/i18n";
 
 export const dynamic = "force-dynamic";
 
-/** Worker counters we surface, in a stable order; the rest are ignored. */
+/** Worker counters we surface, in a stable order; the rest are ignored.
+ *  Each entry pairs the heartbeat field with its i18n label key so the
+ *  key is a statically-known I18nKey literal (no template-literal widening). */
 const COUNTER_FIELDS = [
-  ["detected", "detected"],
-  ["copied", "copied"],
-  ["skipped", "skipped"],
-  ["placed", "placed"],
+  ["detected", "status.workers.counters.detected"],
+  ["copied", "status.workers.counters.copied"],
+  ["skipped", "status.workers.counters.skipped"],
+  ["placed", "status.workers.counters.placed"],
 ] as const;
 
 export default async function StatusPage() {
@@ -94,20 +98,18 @@ export default async function StatusPage() {
   return (
     <div className="space-y-10">
       <header className="space-y-1.5">
-        <h1 className="text-2xl font-bold tracking-tight">System status</h1>
+        <h1 className="text-2xl font-bold tracking-tight">
+          {t("status.title")}
+        </h1>
         <p className="max-w-prose text-sm text-muted-foreground">
-          Read-only liveness for the background workers and the outbound
-          integrations. The workers write these rows; the dashboard never
-          starts, stops or probes anything from here.
+          {t("status.intro")}
         </p>
         {rowError ? (
           <p
             role="alert"
             className="max-w-prose text-sm font-medium text-destructive"
           >
-            Could not read the status rows from the database. The figures
-            below are unavailable, not necessarily down. Check the database
-            probe and the host.
+            {t("status.rowError")}
           </p>
         ) : null}
       </header>
@@ -118,12 +120,12 @@ export default async function StatusPage() {
       <section aria-labelledby="workers-heading" className="space-y-4">
         <div className="space-y-1">
           <h2 id="workers-heading" className="text-base font-semibold">
-            Workers
+            {t("status.workers.heading")}
           </h2>
           <p className="max-w-prose text-sm text-muted-foreground">
-            A worker is <span className="font-medium">stale</span> when its
-            last heartbeat is older than 5 minutes. No row means it has not
-            reported yet, which is different from a stopped worker.
+            {t("status.workers.staleHint", {
+              minutes: HEARTBEAT_STALE_MINUTES,
+            })}
           </p>
         </div>
 
@@ -138,27 +140,37 @@ export default async function StatusPage() {
                   </div>
                   <div className="text-xs text-muted-foreground">
                     {hb
-                      ? `Last heartbeat ${formatRelativeTime(hb.ts, now)}`
-                      : "No heartbeat recorded"}
+                      ? t("status.workers.lastHeartbeat", {
+                          time: formatRelativeTime(hb.ts, now),
+                        })
+                      : t("status.workers.noHeartbeat")}
                   </div>
                 </div>
 
                 <dl className="flex flex-1 flex-wrap items-start gap-x-6 gap-y-1 text-xs">
                   <div className="space-y-0.5">
-                    <dt className="text-muted-foreground">Phase</dt>
-                    <dd className="font-medium">{hb?.phase ?? "Unknown"}</dd>
-                  </div>
-                  <div className="space-y-0.5">
-                    <dt className="text-muted-foreground">Datasource</dt>
+                    <dt className="text-muted-foreground">
+                      {t("status.workers.phase")}
+                    </dt>
                     <dd className="font-medium">
-                      {hb?.datasource ?? "Unknown"}
+                      {hb?.phase ?? t("status.workers.unknown")}
                     </dd>
                   </div>
-                  {COUNTER_FIELDS.map(([field, label]) => {
+                  <div className="space-y-0.5">
+                    <dt className="text-muted-foreground">
+                      {t("status.workers.datasource")}
+                    </dt>
+                    <dd className="font-medium">
+                      {hb?.datasource ?? t("status.workers.unknown")}
+                    </dd>
+                  </div>
+                  {COUNTER_FIELDS.map(([field, labelKey]) => {
                     const v = hb?.[field];
                     return (
                       <div key={field} className="space-y-0.5">
-                        <dt className="text-muted-foreground">{label}</dt>
+                        <dt className="text-muted-foreground">
+                          {t(labelKey)}
+                        </dt>
                         <dd className="font-medium tabular-nums">
                           {typeof v === "number" ? v : "—"}
                         </dd>
@@ -183,21 +195,23 @@ export default async function StatusPage() {
       <section aria-labelledby="integrations-heading" className="space-y-3">
         <div className="space-y-1">
           <h2 id="integrations-heading" className="text-base font-semibold">
-            Integrations
+            {t("status.integrations.heading")}
           </h2>
           <p className="max-w-prose text-sm text-muted-foreground">
-            Last self-probe of the outbound dependencies.{" "}
+            {t("status.integrations.lastProbeLead")}{" "}
             {integration.checked_at
-              ? `Checked ${formatRelativeTime(integration.checked_at, now)} (${formatDateTime(integration.checked_at)} UTC).`
-              : "No probe has run yet."}
+              ? t("status.integrations.checkedAt", {
+                  relative: formatRelativeTime(integration.checked_at, now),
+                  absolute: formatDateTime(integration.checked_at),
+                })
+              : t("status.integrations.noProbeYet")}
           </p>
         </div>
 
         {!hasIntegrationRow || probeEntries.length === 0 ? (
           <div className="rounded-lg border border-dashed py-12 text-center">
             <p className="text-sm text-muted-foreground">
-              No integration probe data yet. It appears here once the worker
-              runs its first connectivity self-check.
+              {t("status.integrations.emptyState")}
             </p>
             {hasIntegrationRow ? (
               <StatusBadge
@@ -218,25 +232,31 @@ export default async function StatusPage() {
                     {probeLabel(name)}
                   </div>
                   <div className="max-w-prose break-words text-xs text-muted-foreground">
-                    {probe.detail || "No detail reported"}
+                    {probe.detail || t("status.integrations.noDetail")}
                   </div>
                 </div>
 
                 <div className="flex items-center gap-4 text-xs">
                   <div className="space-y-0.5 text-right">
-                    <div className="text-muted-foreground">Latency</div>
+                    <div className="text-muted-foreground">
+                      {t("status.integrations.latency")}
+                    </div>
                     <div className="font-medium tabular-nums">
                       {probe.latency_ms === null
                         ? "—"
-                        : `${probe.latency_ms} ms`}
+                        : t("status.integrations.latencyMs", {
+                            ms: probe.latency_ms,
+                          })}
                     </div>
                   </div>
                   <div className="space-y-0.5 text-right">
-                    <div className="text-muted-foreground">Checked</div>
+                    <div className="text-muted-foreground">
+                      {t("status.integrations.checked")}
+                    </div>
                     <div className="font-medium tabular-nums">
                       {probe.checked_at
                         ? formatRelativeTime(probe.checked_at, now)
-                        : "Never"}
+                        : t("status.integrations.never")}
                     </div>
                   </div>
                   <StatusBadge
