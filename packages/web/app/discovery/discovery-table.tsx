@@ -96,6 +96,27 @@ function numericValue(v: unknown): number {
   return Number.isNaN(n) ? -Infinity : n;
 }
 
+// Inclusive [min, max] numeric range filter for the 0–100 score columns.
+// filterValue is a [min, max] tuple where either side may be undefined
+// (unbounded). A row whose score is null/NaN (no score yet) is excluded
+// only once a bound is actually set — an empty range never filters.
+type RangeFilter = [number | undefined, number | undefined];
+
+function rangeFilterFn(
+  row: { getValue: (id: string) => unknown },
+  id: string,
+  filterValue: RangeFilter,
+): boolean {
+  const [min, max] = filterValue ?? [];
+  if (min === undefined && max === undefined) return true;
+  const raw = row.getValue(id);
+  const n = raw === null || raw === undefined ? NaN : Number(raw);
+  if (Number.isNaN(n)) return false;
+  if (min !== undefined && n < min) return false;
+  if (max !== undefined && n > max) return false;
+  return true;
+}
+
 const STATUS_VARIANT: Record<
   string,
   "default" | "secondary" | "outline" | "destructive"
@@ -370,6 +391,7 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
         <ScoreBadge label="" value={getValue<string | null>()} />
       </div>
     ),
+    filterFn: rangeFilterFn,
     sortingFn: (a, b, id) =>
       numericValue(a.getValue(id)) - numericValue(b.getValue(id)),
   },
@@ -381,6 +403,7 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
         <ScoreBadge label="" value={getValue<string | null>()} />
       </div>
     ),
+    filterFn: rangeFilterFn,
     sortingFn: (a, b, id) =>
       numericValue(a.getValue(id)) - numericValue(b.getValue(id)),
   },
@@ -392,6 +415,7 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
         <ScoreBadge label="" value={getValue<string | null>()} />
       </div>
     ),
+    filterFn: rangeFilterFn,
     sortingFn: (a, b, id) =>
       numericValue(a.getValue(id)) - numericValue(b.getValue(id)),
   },
@@ -557,6 +581,143 @@ function FacetedFilter({
 }
 
 // ---------------------------------------------------------------------------
+// Numeric range filter dropdown — min/max number inputs for a 0–100 score
+// column. Same DropdownMenu shell as FacetedFilter (cohesive toolbar), wired
+// straight to the column's [min,max] filter value via rangeFilterFn.
+// ---------------------------------------------------------------------------
+interface RangeFilterControlProps {
+  title: string;
+  value: RangeFilter;
+  onChange: (next: RangeFilter) => void;
+}
+
+// "" / out-of-range / non-numeric => undefined (unbounded), else clamp 0–100.
+function parseBound(raw: string): number | undefined {
+  const s = raw.trim();
+  if (s === "") return undefined;
+  const n = Number(s);
+  if (Number.isNaN(n)) return undefined;
+  return Math.min(100, Math.max(0, n));
+}
+
+function RangeFilterControl({
+  title,
+  value,
+  onChange,
+}: RangeFilterControlProps) {
+  const [min, max] = value;
+  const active = min !== undefined || max !== undefined;
+  const unbounded = t("discovery.table.range.unbounded");
+  return (
+    // Non-modal: a score-range filter must NOT inert/aria-hide the table
+    // behind it — the user adjusts a bound and watches the rows update
+    // live (a faceted-filter affordance, not a blocking dialog). modal
+    // mode (Radix default) would hide the result set the filter exists
+    // to refine.
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm" className="h-8 text-xs">
+          <SlidersHorizontal
+            className="mr-1 h-3.5 w-3.5"
+            aria-hidden="true"
+          />
+          {title}
+          {active && (
+            <Badge
+              variant="secondary"
+              className="ml-2 rounded-sm px-1 py-0 text-[10px] font-normal tabular-nums"
+            >
+              {t("discovery.table.range.badge", {
+                min: min ?? unbounded,
+                max: max ?? unbounded,
+              })}
+            </Badge>
+          )}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-56">
+        <DropdownMenuLabel className="text-xs">{title}</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <div
+          className="flex items-end gap-2 p-2"
+          // Keep typing inside the menu from triggering its
+          // typeahead/close-on-key behaviour.
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          <div className="flex-1 space-y-1">
+            <label
+              htmlFor={`range-min-${title}`}
+              className="block text-[10px] font-medium text-muted-foreground"
+            >
+              {t("discovery.table.range.min")}
+            </label>
+            <Input
+              id={`range-min-${title}`}
+              type="number"
+              inputMode="numeric"
+              min={0}
+              max={100}
+              placeholder="0"
+              aria-label={t("discovery.table.range.minAria", {
+                title,
+                bound: t("discovery.table.range.min"),
+              })}
+              value={min ?? ""}
+              onChange={(e) =>
+                onChange([parseBound(e.target.value), max])
+              }
+              className="h-8 text-xs tabular-nums"
+            />
+          </div>
+          <span
+            className="pb-2 text-xs text-muted-foreground"
+            aria-hidden="true"
+          >
+            –
+          </span>
+          <div className="flex-1 space-y-1">
+            <label
+              htmlFor={`range-max-${title}`}
+              className="block text-[10px] font-medium text-muted-foreground"
+            >
+              {t("discovery.table.range.max")}
+            </label>
+            <Input
+              id={`range-max-${title}`}
+              type="number"
+              inputMode="numeric"
+              min={0}
+              max={100}
+              placeholder="100"
+              aria-label={t("discovery.table.range.maxAria", {
+                title,
+                bound: t("discovery.table.range.max"),
+              })}
+              value={max ?? ""}
+              onChange={(e) =>
+                onChange([min, parseBound(e.target.value)])
+              }
+              className="h-8 text-xs tabular-nums"
+            />
+          </div>
+        </div>
+        <DropdownMenuSeparator />
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 w-full justify-start px-2 text-xs"
+          disabled={!active}
+          onClick={() => onChange([undefined, undefined])}
+        >
+          <X className="mr-1 h-3.5 w-3.5" aria-hidden="true" />
+          {t("discovery.table.range.clear")}
+        </Button>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 interface DiscoveryTableProps {
@@ -606,17 +767,42 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
   const riskFilter =
     (table.getColumn("risk_flags")?.getFilterValue() as string) ?? "";
 
+  // Score range columns share one shell — read/clear them generically.
+  const RANGE_COLUMNS = [
+    { id: "profit_score", title: t("discovery.table.range.profit") },
+    {
+      id: "replicability_score",
+      title: t("discovery.table.range.replicability"),
+    },
+    { id: "total_score", title: t("discovery.table.range.total") },
+  ] as const;
+
+  const rangeFilterValue = (id: string): RangeFilter =>
+    (table.getColumn(id)?.getFilterValue() as RangeFilter | undefined) ?? [
+      undefined,
+      undefined,
+    ];
+
+  const hasRangeFilter = RANGE_COLUMNS.some(({ id }) => {
+    const [lo, hi] = rangeFilterValue(id);
+    return lo !== undefined || hi !== undefined;
+  });
+
   const isFiltered =
     globalFilter !== "" ||
     statusFilter !== "" ||
     strategyFilter !== "" ||
-    riskFilter !== "";
+    riskFilter !== "" ||
+    hasRangeFilter;
 
   function resetFilters() {
     setGlobalFilter("");
     table.getColumn("user_status")?.setFilterValue("");
     table.getColumn("strategy_type")?.setFilterValue("");
     table.getColumn("risk_flags")?.setFilterValue("");
+    RANGE_COLUMNS.forEach(({ id }) =>
+      table.getColumn(id)?.setFilterValue(undefined)
+    );
   }
 
   const pagination = table.getState().pagination;
@@ -686,6 +872,22 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
             ]}
             onChange={(v) => table.getColumn("risk_flags")?.setFilterValue(v)}
           />
+
+          {RANGE_COLUMNS.map(({ id, title }) => (
+            <RangeFilterControl
+              key={id}
+              title={title}
+              value={rangeFilterValue(id)}
+              onChange={(next) => {
+                const [lo, hi] = next;
+                table
+                  .getColumn(id)
+                  ?.setFilterValue(
+                    lo === undefined && hi === undefined ? undefined : next
+                  );
+              }}
+            />
+          ))}
 
           {isFiltered && (
             <Button

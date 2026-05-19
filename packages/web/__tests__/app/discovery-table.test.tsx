@@ -58,6 +58,22 @@ const TX = {
   colProfit: t("discovery.table.columns.profit"),
   colReplicability: t("discovery.table.columns.replicability"),
   colTotal: t("discovery.table.columns.total"),
+  rangeProfit: t("discovery.table.range.profit"),
+  rangeReplicability: t("discovery.table.range.replicability"),
+  rangeTotal: t("discovery.table.range.total"),
+  rangeMin: t("discovery.table.range.min"),
+  rangeMax: t("discovery.table.range.max"),
+  rangeClear: t("discovery.table.range.clear"),
+  rangeMinAria: (title: string) =>
+    t("discovery.table.range.minAria", {
+      title,
+      bound: t("discovery.table.range.min"),
+    }),
+  rangeMaxAria: (title: string) =>
+    t("discovery.table.range.maxAria", {
+      title,
+      bound: t("discovery.table.range.max"),
+    }),
   colWallet: t("discovery.table.columns.wallet"),
   statusFollowing: t("discovery.table.statusOptions.following"),
   actWatch: t("discovery.table.actions.watch"),
@@ -189,7 +205,11 @@ describe("DiscoveryTable (shadcn data-table)", () => {
 
   it("toggles aria-sort on the Total header th when sorting", async () => {
     render(<DiscoveryTable data={rows} />);
-    const totalBtn = screen.getByRole("button", { name: rx(TX.colTotal) });
+    // EXACT name (not rx/substring): the column-header sort button's
+    // accessible name is precisely the column title ("總分"). A substring
+    // match would also catch the score range-filter trigger ("總分區間"),
+    // a *different* control — assert only the header here.
+    const totalBtn = screen.getByRole("button", { name: TX.colTotal });
     const th = totalBtn.closest("th")!;
 
     // default state = descending
@@ -206,8 +226,10 @@ describe("DiscoveryTable (shadcn data-table)", () => {
 
   it("marks non-sorted sortable headers aria-sort='none' and unsortable headers without it", () => {
     render(<DiscoveryTable data={rows} />);
+    // EXACT name: target only the "獲利" header sort button, never the
+    // "獲利區間" range-filter trigger (a substring match would hit both).
     const profitTh = screen
-      .getByRole("button", { name: rx(TX.colProfit) })
+      .getByRole("button", { name: TX.colProfit })
       .closest("th")!;
     expect(profitTh).toHaveAttribute("aria-sort", "none");
 
@@ -291,8 +313,12 @@ describe("DiscoveryTable (shadcn data-table)", () => {
 
   it("column-visibility menu hides a column", async () => {
     render(<DiscoveryTable data={rows} />);
+    // EXACT name: the "可複製性" header sort button only. The "可複製性區間"
+    // range trigger stays mounted regardless of column visibility, so a
+    // substring query would still match it and the post-hide
+    // not-in-document assertion would wrongly fail.
     const replicabilityHeader = () =>
-      screen.queryByRole("button", { name: rx(TX.colReplicability) });
+      screen.queryByRole("button", { name: TX.colReplicability });
     expect(replicabilityHeader()).toBeInTheDocument();
 
     await userEvent.click(
@@ -495,5 +521,167 @@ describe("DiscoveryTable per-row quick actions", () => {
     expect(push).toHaveBeenCalledWith(`/discovery/${ALPHA}`);
     expect(quickBacktest).not.toHaveBeenCalled();
     expect(updateLeaderStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe("DiscoveryTable score range filters", () => {
+  // Synthetic non-zero fixture across all three 0–100 score columns. (Real
+  // total_score / replicability_score are all 0 today due to a separate
+  // scoring bug fixed in parallel — the filter is exercised against the
+  // 0–100 schema, never the buggy data.) `Null` carries no scores so its
+  // null cells must drop out the moment any bound is set.
+  const scored: CandidateLeaderRow[] = [
+    makeRow({
+      wallet_address: "0x1111111111111111111111111111111111111111",
+      display_name: "Low",
+      profit_score: "20",
+      replicability_score: "15",
+      total_score: "18",
+    }),
+    makeRow({
+      wallet_address: "0x2222222222222222222222222222222222222222",
+      display_name: "Mid",
+      profit_score: "55",
+      replicability_score: "50",
+      total_score: "52",
+    }),
+    makeRow({
+      wallet_address: "0x3333333333333333333333333333333333333333",
+      display_name: "High",
+      profit_score: "90",
+      replicability_score: "85",
+      total_score: "88",
+    }),
+    makeRow({
+      wallet_address: "0x4444444444444444444444444444444444444444",
+      display_name: "Null",
+      profit_score: null,
+      replicability_score: null,
+      total_score: null,
+    }),
+  ];
+
+  async function openRange(title: string) {
+    await userEvent.click(screen.getByRole("button", { name: rx(title) }));
+  }
+
+  function minInput(title: string) {
+    return screen.getByRole("spinbutton", {
+      name: TX.rangeMinAria(title),
+    });
+  }
+  function maxInput(title: string) {
+    return screen.getByRole("spinbutton", {
+      name: TX.rangeMaxAria(title),
+    });
+  }
+
+  it("renders a range trigger for each of the three score columns", () => {
+    render(<DiscoveryTable data={scored} />);
+    expect(
+      screen.getByRole("button", { name: rx(TX.rangeProfit) })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: rx(TX.rangeReplicability) })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: rx(TX.rangeTotal) })
+    ).toBeInTheDocument();
+  });
+
+  it("exposes accessible labelled min & max number inputs (0–100)", async () => {
+    render(<DiscoveryTable data={scored} />);
+    await openRange(TX.rangeProfit);
+    const lo = minInput(TX.rangeProfit);
+    const hi = maxInput(TX.rangeProfit);
+    expect(lo).toHaveAttribute("type", "number");
+    expect(lo).toHaveAttribute("min", "0");
+    expect(lo).toHaveAttribute("max", "100");
+    expect(hi).toHaveAttribute("type", "number");
+    expect(hi).toHaveAttribute("max", "100");
+  });
+
+  it("profit min bound filters out lower-scoring rows (null excluded)", async () => {
+    render(<DiscoveryTable data={scored} />);
+    await openRange(TX.rangeProfit);
+    await userEvent.type(minInput(TX.rangeProfit), "50");
+    // Mid(55) + High(90) pass; Low(20) and Null(no score) drop out.
+    expect(names().sort()).toEqual(["High", "Mid"]);
+  });
+
+  it("profit max bound filters out higher-scoring rows", async () => {
+    render(<DiscoveryTable data={scored} />);
+    await openRange(TX.rangeProfit);
+    await userEvent.type(maxInput(TX.rangeProfit), "60");
+    // Low(20) + Mid(55) pass; High(90) and Null drop out.
+    expect(names().sort()).toEqual(["Low", "Mid"]);
+  });
+
+  it("min+max define an inclusive window on a score column", async () => {
+    render(<DiscoveryTable data={scored} />);
+    await openRange(TX.rangeTotal);
+    await userEvent.type(minInput(TX.rangeTotal), "18");
+    await userEvent.type(maxInput(TX.rangeTotal), "52");
+    // total_score: Low=18 (incl), Mid=52 (incl), High=88 (out), Null out.
+    expect(names().sort()).toEqual(["Low", "Mid"]);
+  });
+
+  it("the replicability range filters independently of profit/total", async () => {
+    render(<DiscoveryTable data={scored} />);
+    await openRange(TX.rangeReplicability);
+    await userEvent.type(minInput(TX.rangeReplicability), "80");
+    // replicability_score: only High=85 ≥ 80.
+    expect(names()).toEqual(["High"]);
+  });
+
+  it("an empty range never filters (all rows incl. null scores remain)", async () => {
+    render(<DiscoveryTable data={scored} />);
+    await openRange(TX.rangeProfit);
+    // open the popover but type nothing -> dataset untouched, no Reset shown
+    expect(bodyRows()).toHaveLength(4);
+    expect(
+      screen.queryByRole("button", { name: rx(TX.reset) })
+    ).not.toBeInTheDocument();
+  });
+
+  it("out-of-range / non-numeric input is treated as unbounded", async () => {
+    render(<DiscoveryTable data={scored} />);
+    await openRange(TX.rangeProfit);
+    // 250 clamps to 100 as a max -> only High(90)…? no, 100 max keeps all
+    // scored rows; assert the clamp by using it as a min instead.
+    await userEvent.type(minInput(TX.rangeProfit), "250");
+    // clamped to min=100 -> no scored row reaches 100 -> empty result
+    expect(bodyRows()).toHaveLength(0);
+  });
+
+  it("the per-filter Clear button resets just that range", async () => {
+    render(<DiscoveryTable data={scored} />);
+    await openRange(TX.rangeProfit);
+    await userEvent.type(minInput(TX.rangeProfit), "50");
+    expect(names().sort()).toEqual(["High", "Mid"]);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: rx(TX.rangeClear) })
+    );
+    expect(bodyRows()).toHaveLength(4);
+  });
+
+  it("a set range shows the global Reset, which clears it", async () => {
+    render(<DiscoveryTable data={scored} />);
+    expect(
+      screen.queryByRole("button", { name: rx(TX.reset) })
+    ).not.toBeInTheDocument();
+
+    await openRange(TX.rangeTotal);
+    await userEvent.type(minInput(TX.rangeTotal), "80");
+    expect(names()).toEqual(["High"]);
+
+    // Reset lives in the toolbar; close the popover then click it.
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(screen.getByRole("button", { name: rx(TX.reset) }));
+    expect(bodyRows()).toHaveLength(4);
+    expect(
+      screen.queryByRole("button", { name: rx(TX.reset) })
+    ).not.toBeInTheDocument();
   });
 });
