@@ -20,7 +20,7 @@ backtest, follow/reject a candidate).
 
 ## Brand & tone
 
-PolyEcho. Tagline: "跟單，是延遲的回聲" (copy-trading is a delayed echo).
+PolyEcho.
 Voice: calm, precise, factual, trustworthy. A quiet, dependable instrument,
 not a casino. Numbers must be legible at a glance and never lie. Confidence
 through restraint, not decoration.
