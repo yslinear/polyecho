@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { SidebarProvider } from "@/components/ui/sidebar";
+import { t } from "@/lib/i18n";
 
 // next/navigation is server-bound; mock usePathname so the client island
 // can compute active state without a Next.js runtime.
@@ -36,17 +37,26 @@ function renderSidebar() {
   );
 }
 
+// Locators are derived from the i18n dictionary, not hardcoded text: the
+// test asserts the sidebar STRUCTURE (label↔href, active state), and stays
+// correct if a translation string changes — while still proving the i18n
+// seam renders an accessible name for every item.
+const DASHBOARD = t("sidebar.items.dashboard");
+const LEADERS = t("sidebar.items.leaders");
+const DISCOVERY = t("sidebar.items.discovery");
+const BACKTEST = t("sidebar.items.backtest");
+
 const EXPECTED_NAV = [
-  ["Dashboard", "/"],
-  ["Leaders", "/leaders"],
-  ["Discovery", "/discovery"],
-  ["Backtest", "/backtest/new"],
-  ["Trades", "/trades"],
-  ["Positions", "/positions"],
-  ["Accounts", "/accounts"],
-  ["Alerts", "/alerts"],
-  ["Status", "/status"],
-  ["Settings", "/settings"],
+  [DASHBOARD, "/"],
+  [LEADERS, "/leaders"],
+  [DISCOVERY, "/discovery"],
+  [BACKTEST, "/backtest/new"],
+  [t("sidebar.items.trades"), "/trades"],
+  [t("sidebar.items.positions"), "/positions"],
+  [t("sidebar.items.accounts"), "/accounts"],
+  [t("sidebar.items.alerts"), "/alerts"],
+  [t("sidebar.items.status"), "/status"],
+  [t("sidebar.items.settings"), "/settings"],
 ] as const;
 
 describe("AppSidebar", () => {
@@ -71,7 +81,7 @@ describe("AppSidebar", () => {
     usePathname.mockReturnValue("/");
     renderSidebar();
     const dashboard = screen
-      .getByRole("link", { name: "Dashboard" })
+      .getByRole("link", { name: DASHBOARD })
       .closest("[data-active]");
     expect(dashboard).toHaveAttribute("data-active", "true");
   });
@@ -80,7 +90,7 @@ describe("AppSidebar", () => {
     usePathname.mockReturnValue("/discovery");
     renderSidebar();
     const dashboard = screen
-      .getByRole("link", { name: "Dashboard" })
+      .getByRole("link", { name: DASHBOARD })
       .closest("[data-active]");
     expect(dashboard).toHaveAttribute("data-active", "false");
   });
@@ -89,12 +99,12 @@ describe("AppSidebar", () => {
     usePathname.mockReturnValue("/discovery/0xabc123");
     renderSidebar();
     const discovery = screen
-      .getByRole("link", { name: "Discovery" })
+      .getByRole("link", { name: DISCOVERY })
       .closest("[data-active]");
     expect(discovery).toHaveAttribute("data-active", "true");
 
     const leaders = screen
-      .getByRole("link", { name: "Leaders" })
+      .getByRole("link", { name: LEADERS })
       .closest("[data-active]");
     expect(leaders).toHaveAttribute("data-active", "false");
   });
@@ -103,7 +113,7 @@ describe("AppSidebar", () => {
     usePathname.mockReturnValue("/backtest/new");
     renderSidebar();
     const backtest = screen
-      .getByRole("link", { name: "Backtest" })
+      .getByRole("link", { name: BACKTEST })
       .closest("[data-active]");
     expect(backtest).toHaveAttribute("data-active", "true");
   });
@@ -115,7 +125,7 @@ describe("AppSidebar", () => {
     usePathname.mockReturnValue("/backtest/abc-123-uuid");
     renderSidebar();
     const backtest = screen
-      .getByRole("link", { name: "Backtest" })
+      .getByRole("link", { name: BACKTEST })
       .closest("[data-active]");
     expect(backtest).toHaveAttribute("data-active", "true");
   });
@@ -124,14 +134,14 @@ describe("AppSidebar", () => {
   // correct one. Guards against the "/" matching everything and against
   // sibling sections leaking into each other.
   const ACTIVE_MATRIX: Array<[string, string]> = [
-    ["/", "Dashboard"],
-    ["/discovery", "Discovery"],
-    ["/discovery/0xabc", "Discovery"],
-    ["/backtest/new", "Backtest"],
-    ["/backtest/abc-123-uuid", "Backtest"],
-    ["/trades", "Trades"],
-    ["/positions", "Positions"],
-    ["/accounts", "Accounts"],
+    ["/", DASHBOARD],
+    ["/discovery", DISCOVERY],
+    ["/discovery/0xabc", DISCOVERY],
+    ["/backtest/new", BACKTEST],
+    ["/backtest/abc-123-uuid", BACKTEST],
+    ["/trades", t("sidebar.items.trades")],
+    ["/positions", t("sidebar.items.positions")],
+    ["/accounts", t("sidebar.items.accounts")],
   ];
 
   it.each(ACTIVE_MATRIX)(

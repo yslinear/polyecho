@@ -33,20 +33,25 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar";
+import { t } from "@/lib/i18n";
 import { isNavItemActive } from "@/lib/utils";
 
 const navItems = [
-  { href: "/", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/leaders", label: "Leaders", icon: Users },
-  { href: "/discovery", label: "Discovery", icon: Search },
-  { href: "/backtest/new", label: "Backtest", icon: FlaskConical },
-  { href: "/trades", label: "Trades", icon: History },
-  { href: "/positions", label: "Positions", icon: TrendingUp },
-  { href: "/accounts", label: "Accounts", icon: Wallet },
-  { href: "/alerts", label: "Alerts", icon: Bell },
-  { href: "/status", label: "Status", icon: Activity },
-  { href: "/settings", label: "Settings", icon: Settings },
-];
+  { href: "/", labelKey: "sidebar.items.dashboard", icon: LayoutDashboard },
+  { href: "/leaders", labelKey: "sidebar.items.leaders", icon: Users },
+  { href: "/discovery", labelKey: "sidebar.items.discovery", icon: Search },
+  {
+    href: "/backtest/new",
+    labelKey: "sidebar.items.backtest",
+    icon: FlaskConical,
+  },
+  { href: "/trades", labelKey: "sidebar.items.trades", icon: History },
+  { href: "/positions", labelKey: "sidebar.items.positions", icon: TrendingUp },
+  { href: "/accounts", labelKey: "sidebar.items.accounts", icon: Wallet },
+  { href: "/alerts", labelKey: "sidebar.items.alerts", icon: Bell },
+  { href: "/status", labelKey: "sidebar.items.status", icon: Activity },
+  { href: "/settings", labelKey: "sidebar.items.settings", icon: Settings },
+] as const;
 
 export function AppSidebar() {
   const pathname = usePathname();
@@ -66,11 +71,12 @@ export function AppSidebar() {
 
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Navigation</SidebarGroupLabel>
+          <SidebarGroupLabel>{t("sidebar.nav")}</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu aria-label="Primary navigation">
-              {navItems.map(({ href, label, icon: Icon }) => {
+              {navItems.map(({ href, labelKey, icon: Icon }) => {
                 const isActive = isNavItemActive(pathname, href);
+                const label = t(labelKey);
                 return (
                   <SidebarMenuItem key={href}>
                     <SidebarMenuButton
@@ -96,7 +102,7 @@ export function AppSidebar() {
 
       <SidebarFooter>
         <div className="px-2 py-1 text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
-          v0.3 · 127.0.0.1 only
+          {t("sidebar.footer")}
         </div>
       </SidebarFooter>
 
