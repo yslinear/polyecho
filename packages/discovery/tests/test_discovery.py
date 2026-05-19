@@ -3286,7 +3286,7 @@ class _HotMarketFixtureSpyDS(FixtureDataSource):
         super().__init__()
         self.gmbv_calls: list[dict[str, Any]] = []
 
-    async def get_markets_by_volume(  # type: ignore[override]
+    async def get_markets_by_volume(
         self, *, min_volume_24h: float = 100_000.0, limit: int = 200
     ) -> list[Any]:
         self.gmbv_calls.append(
