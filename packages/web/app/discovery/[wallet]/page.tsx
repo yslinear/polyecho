@@ -18,6 +18,7 @@ import { Pnl } from "@/components/pnl";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { formatDateTime } from "@/lib/format";
+import { t } from "@/lib/i18n";
 import { LeaderScoreChart } from "./leader-score-chart";
 
 // Reads the database on every request — never prerender at build time
@@ -45,7 +46,7 @@ function shortWallet(addr: string): string {
 // Canonical UTC-stable formatter (lib/format.ts) — identical output on the
 // server and the client, so no React hydration drift on timestamps.
 function fmtDate(d: Date | null | undefined): string {
-  if (!d) return "Not recorded";
+  if (!d) return t("discovery.detail.notRecorded");
   return formatDateTime(d);
 }
 
@@ -66,7 +67,11 @@ function isPnlKey(key: string): boolean {
 
 function renderStatValue(key: string, v: unknown) {
   if (v === null || v === undefined || v === "") {
-    return <span className="text-muted-foreground">Not set</span>;
+    return (
+      <span className="text-muted-foreground">
+        {t("discovery.detail.notSet")}
+      </span>
+    );
   }
   if (Array.isArray(v)) {
     return (
@@ -100,7 +105,9 @@ function StatsBlock({ title, data }: { title: string; data: unknown }) {
         {title}
       </h3>
       {entries.length === 0 ? (
-        <p className="text-xs text-muted-foreground">No data available.</p>
+        <p className="text-xs text-muted-foreground">
+          {t("discovery.detail.noDataAvailable")}
+        </p>
       ) : (
         <dl className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
           {entries.map(([k, v]) => (
@@ -155,7 +162,7 @@ export default async function LeaderDetailPage({ params }: PageProps) {
         href="/discovery"
         className="inline-flex items-center gap-1 rounded-sm text-sm text-muted-foreground underline-offset-4 transition-colors duration-150 ease-out hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
-        <span aria-hidden="true">&larr;</span> Back to Discovery
+        <span aria-hidden="true">&larr;</span> {t("discovery.detail.back")}
       </Link>
 
       {/* Header */}
@@ -179,16 +186,25 @@ export default async function LeaderDetailPage({ params }: PageProps) {
             href={`/backtest/new?leader=${encodeURIComponent(leader.wallet_address)}`}
             className="inline-flex h-9 items-center rounded-md border border-input px-4 text-sm font-medium transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           >
-            Run Backtest
+            {t("discovery.detail.runBacktest")}
           </Link>
         </div>
       </div>
 
       {/* Score pills */}
       <div className="flex flex-wrap gap-3">
-        <ScoreBadge label="Profit" value={leader.profit_score} />
-        <ScoreBadge label="Replicability" value={leader.replicability_score} />
-        <ScoreBadge label="Total" value={leader.total_score} />
+        <ScoreBadge
+          label={t("discovery.detail.score.profit")}
+          value={leader.profit_score}
+        />
+        <ScoreBadge
+          label={t("discovery.detail.score.replicability")}
+          value={leader.replicability_score}
+        />
+        <ScoreBadge
+          label={t("discovery.detail.score.total")}
+          value={leader.total_score}
+        />
       </div>
 
       <Separator />
@@ -196,10 +212,14 @@ export default async function LeaderDetailPage({ params }: PageProps) {
       {/* Tabs */}
       <Tabs defaultValue="overview">
         <TabsList>
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="stats">Stats</TabsTrigger>
+          <TabsTrigger value="overview">
+            {t("discovery.detail.tabs.overview")}
+          </TabsTrigger>
+          <TabsTrigger value="stats">
+            {t("discovery.detail.tabs.stats")}
+          </TabsTrigger>
           <TabsTrigger value="history">
-            Score History{" "}
+            {t("discovery.detail.tabs.history")}{" "}
             <span className="ml-1 text-xs tabular-nums text-muted-foreground">
               ({chartData.length})
             </span>
@@ -212,13 +232,15 @@ export default async function LeaderDetailPage({ params }: PageProps) {
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base font-semibold">
-                Profile
+                {t("discovery.detail.profile.title")}
               </CardTitle>
             </CardHeader>
             <CardContent>
               <dl className="grid grid-cols-1 gap-x-6 gap-y-4 text-sm sm:grid-cols-2">
                 <div>
-                  <dt className="text-xs text-muted-foreground">Sources</dt>
+                  <dt className="text-xs text-muted-foreground">
+                    {t("discovery.detail.profile.sources")}
+                  </dt>
                   <dd className="mt-1 flex flex-wrap gap-1">
                     {(leader.sources ?? []).length > 0 ? (
                       (leader.sources ?? []).map((s) => (
@@ -227,23 +249,29 @@ export default async function LeaderDetailPage({ params }: PageProps) {
                         </Badge>
                       ))
                     ) : (
-                      <span className="text-muted-foreground">Not set</span>
-                    )}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-muted-foreground">Strategy</dt>
-                  <dd className="mt-1">
-                    {leader.strategy_type ? (
-                      leader.strategy_type
-                    ) : (
-                      <span className="text-muted-foreground">Not set</span>
+                      <span className="text-muted-foreground">
+                        {t("discovery.detail.notSet")}
+                      </span>
                     )}
                   </dd>
                 </div>
                 <div>
                   <dt className="text-xs text-muted-foreground">
-                    First Discovered
+                    {t("discovery.detail.profile.strategy")}
+                  </dt>
+                  <dd className="mt-1">
+                    {leader.strategy_type ? (
+                      leader.strategy_type
+                    ) : (
+                      <span className="text-muted-foreground">
+                        {t("discovery.detail.notSet")}
+                      </span>
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-muted-foreground">
+                    {t("discovery.detail.profile.firstDiscovered")}
                   </dt>
                   <dd className="mt-1 tabular-nums">
                     {fmtDate(leader.first_discovered_at)}
@@ -251,7 +279,7 @@ export default async function LeaderDetailPage({ params }: PageProps) {
                 </div>
                 <div>
                   <dt className="text-xs text-muted-foreground">
-                    Last Active
+                    {t("discovery.detail.profile.lastActive")}
                   </dt>
                   <dd className="mt-1 tabular-nums">
                     {fmtDate(leader.last_active_at)}
@@ -259,7 +287,9 @@ export default async function LeaderDetailPage({ params }: PageProps) {
                 </div>
                 {leader.user_notes && (
                   <div className="sm:col-span-2">
-                    <dt className="text-xs text-muted-foreground">Notes</dt>
+                    <dt className="text-xs text-muted-foreground">
+                      {t("discovery.detail.profile.notes")}
+                    </dt>
                     <dd className="mt-1 whitespace-pre-wrap text-sm">
                       {leader.user_notes}
                     </dd>
@@ -274,7 +304,9 @@ export default async function LeaderDetailPage({ params }: PageProps) {
           <Card>
             <CardContent className="grid grid-cols-1 gap-x-8 gap-y-5 pt-6 sm:grid-cols-[2fr_1fr]">
               <div className="space-y-2">
-                <h3 className="text-sm font-semibold">Specialization</h3>
+                <h3 className="text-sm font-semibold">
+                  {t("discovery.detail.specialization.title")}
+                </h3>
                 <div className="flex flex-wrap gap-1.5">
                   {(leader.specialization ?? []).length > 0 ? (
                     (leader.specialization ?? []).map((s) => (
@@ -284,13 +316,15 @@ export default async function LeaderDetailPage({ params }: PageProps) {
                     ))
                   ) : (
                     <span className="text-xs text-muted-foreground">
-                      No specialization recorded.
+                      {t("discovery.detail.specialization.none")}
                     </span>
                   )}
                 </div>
               </div>
               <div className="space-y-2 sm:border-l sm:border-border sm:pl-8">
-                <h3 className="text-sm font-semibold">Risk Flags</h3>
+                <h3 className="text-sm font-semibold">
+                  {t("discovery.detail.riskFlags.title")}
+                </h3>
                 <div className="flex flex-wrap gap-1.5">
                   {(leader.risk_flags ?? []).length > 0 ? (
                     (leader.risk_flags ?? []).map((f) => (
@@ -304,7 +338,7 @@ export default async function LeaderDetailPage({ params }: PageProps) {
                     ))
                   ) : (
                     <span className="text-xs text-muted-foreground">
-                      No risk flags.
+                      {t("discovery.detail.riskFlags.none")}
                     </span>
                   )}
                 </div>
@@ -316,7 +350,7 @@ export default async function LeaderDetailPage({ params }: PageProps) {
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-base font-semibold">
-                Score Breakdown
+                {t("discovery.detail.breakdown.title")}
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -326,26 +360,58 @@ export default async function LeaderDetailPage({ params }: PageProps) {
               <div className="grid grid-cols-1 gap-x-8 gap-y-4 text-xs sm:grid-cols-2">
                 <div>
                   <p className="mb-1.5 font-semibold">
-                    profit_score (0&ndash;100)
+                    {t("discovery.detail.breakdown.profitHeading")}
                   </p>
                   <ul className="space-y-1 text-muted-foreground">
-                    <li>PnL: 25%</li>
-                    <li>Win rate: 20%</li>
-                    <li>Sharpe ratio: 20%</li>
-                    <li>Max drawdown: 15%</li>
-                    <li>Consistency: 10%</li>
-                    <li>Specialization: 10%</li>
+                    <li>{t("discovery.detail.breakdown.profitFactors.pnl")}</li>
+                    <li>
+                      {t("discovery.detail.breakdown.profitFactors.winRate")}
+                    </li>
+                    <li>
+                      {t("discovery.detail.breakdown.profitFactors.sharpe")}
+                    </li>
+                    <li>
+                      {t(
+                        "discovery.detail.breakdown.profitFactors.maxDrawdown",
+                      )}
+                    </li>
+                    <li>
+                      {t(
+                        "discovery.detail.breakdown.profitFactors.consistency",
+                      )}
+                    </li>
+                    <li>
+                      {t(
+                        "discovery.detail.breakdown.profitFactors.specialization",
+                      )}
+                    </li>
                   </ul>
                 </div>
                 <div>
                   <p className="mb-1.5 font-semibold">
-                    replicability_score (0&ndash;100)
+                    {t("discovery.detail.breakdown.replicabilityHeading")}
                   </p>
                   <ul className="space-y-1 text-muted-foreground">
-                    <li>Frequency match</li>
-                    <li>Capital match</li>
-                    <li>Burstiness (low = better)</li>
-                    <li>Active-hours overlap</li>
+                    <li>
+                      {t(
+                        "discovery.detail.breakdown.replicabilityFactors.frequencyMatch",
+                      )}
+                    </li>
+                    <li>
+                      {t(
+                        "discovery.detail.breakdown.replicabilityFactors.capitalMatch",
+                      )}
+                    </li>
+                    <li>
+                      {t(
+                        "discovery.detail.breakdown.replicabilityFactors.burstiness",
+                      )}
+                    </li>
+                    <li>
+                      {t(
+                        "discovery.detail.breakdown.replicabilityFactors.activeHoursOverlap",
+                      )}
+                    </li>
                   </ul>
                 </div>
               </div>
@@ -358,18 +424,27 @@ export default async function LeaderDetailPage({ params }: PageProps) {
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base font-semibold">
-                Performance Windows
+                {t("discovery.detail.stats.title")}
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="grid grid-cols-1 gap-x-10 gap-y-6 md:grid-cols-3">
-                <StatsBlock title="7-day" data={leader.stats_7d} />
-                <StatsBlock title="30-day" data={leader.stats_30d} />
-                <StatsBlock title="90-day" data={leader.stats_90d} />
+                <StatsBlock
+                  title={t("discovery.detail.stats.window7d")}
+                  data={leader.stats_7d}
+                />
+                <StatsBlock
+                  title={t("discovery.detail.stats.window30d")}
+                  data={leader.stats_30d}
+                />
+                <StatsBlock
+                  title={t("discovery.detail.stats.window90d")}
+                  data={leader.stats_90d}
+                />
               </div>
               <Separator />
               <StatsBlock
-                title="Frequency & Strategy (§5.3)"
+                title={t("discovery.detail.stats.frequencyStrategy")}
                 data={leader.frequency_stats}
               />
             </CardContent>
@@ -381,7 +456,7 @@ export default async function LeaderDetailPage({ params }: PageProps) {
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base font-semibold">
-                Score History
+                {t("discovery.detail.history.title")}
               </CardTitle>
             </CardHeader>
             <CardContent>
