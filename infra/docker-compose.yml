@@ -1,7 +1,9 @@
 # PolyEcho — Production Docker Compose
 # PRD §4.2 security model:
 #   - trader-core holds the private key and opens NO ports
-#   - db and dashboard-web bind to 127.0.0.1 only
+#   - db binds to 127.0.0.1 only; dashboard-web is published on 0.0.0.0:3006
+#     per explicit operator request (no-auth UI exposed beyond loopback —
+#     accepted; remote access is the operator's responsibility, PRD §5.9)
 #   - all Python services communicate via Postgres only
 #
 # Build context for all Python images: repo root (uv workspace requires it)
@@ -179,8 +181,12 @@ services:
       retries: 5
       start_period: 40s
     # Bind to localhost only — not exposed; remote access out of scope (PRD §5.9)
+    # Operator-requested: dashboard published on 0.0.0.0:3006 so it is
+    # reachable over Tailscale (mac-mini.tail3e1efb.ts.net:3006). NOTE:
+    # 0.0.0.0 also exposes the no-auth dashboard on EVERY interface incl.
+    # the LAN — explicitly accepted by the operator (see Security Model).
     ports:
-      - "127.0.0.1:3000:3000"
+      - "0.0.0.0:3006:3000"
 
   # ── CLI (on-demand, profile=tools) ───────────────────────────────────────────
   # Start with: docker compose -f infra/docker-compose.yml run --rm cli polyecho doctor
