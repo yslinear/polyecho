@@ -44,6 +44,13 @@ CREATE TABLE IF NOT EXISTS candidate_leaders (
   sources              TEXT[],
   first_discovered_at  TIMESTAMPTZ,
   last_active_at       TIMESTAMPTZ,
+  -- Phase-3 discovery cursor: high-water mark of the latest Data-API
+  -- TRADE timestamp processed for this wallet. Drives the hourly
+  -- large-new-position windowed re-scan (start=last_seen_ts) and the
+  -- daily full-scoring staleness gate so a wallet is not re-fetched /
+  -- re-scored when nothing changed (anti-duplication). NULLable: a
+  -- never-yet-scanned candidate legitimately has no cursor.
+  last_seen_ts         TIMESTAMPTZ,
   stats_7d             JSONB,
   stats_30d            JSONB,
   stats_90d            JSONB,
@@ -60,6 +67,15 @@ CREATE TABLE IF NOT EXISTS candidate_leaders (
   user_notes           TEXT,
   updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Idempotent forward-fill for DBs created before the Phase-3
+-- last_seen_ts discovery cursor existed. CREATE TABLE IF NOT EXISTS
+-- above is a no-op on a warm DB, so this guarded ADD COLUMN brings an
+-- already-existing candidate_leaders up to the current shape. NULLable
+-- (no backfill value) — a never-yet-scanned candidate has no cursor;
+-- ADD COLUMN IF NOT EXISTS makes re-apply a no-op.
+ALTER TABLE candidate_leaders
+  ADD COLUMN IF NOT EXISTS last_seen_ts TIMESTAMPTZ;
 
 -- ---------------------------------------------------------------------------
 -- candidate_score_history — daily snapshot (PRD §6.1)

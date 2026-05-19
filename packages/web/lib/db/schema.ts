@@ -70,6 +70,10 @@ export const candidateLeaders = pgTable("candidate_leaders", {
     withTimezone: true,
   }),
   last_active_at: timestamp("last_active_at", { withTimezone: true }),
+  /** Phase-3 discovery cursor: high-water mark of the latest Data-API
+   * TRADE ts processed (anti-duplication — drives the hourly windowed
+   * re-scan + daily staleness gate). */
+  last_seen_ts: timestamp("last_seen_ts", { withTimezone: true }),
   stats_7d: jsonb("stats_7d"),
   stats_30d: jsonb("stats_30d"),
   stats_90d: jsonb("stats_90d"),

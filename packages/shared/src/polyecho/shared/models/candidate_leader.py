@@ -42,6 +42,12 @@ class CandidateLeader(Base):
     last_active_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Phase-3 discovery cursor: high-water mark of the latest Data-API
+    # TRADE timestamp processed for this wallet (anti-duplication —
+    # drives the hourly windowed re-scan + the daily staleness gate).
+    last_seen_ts: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Rolling stats snapshots (JSONB allows schema-free evolution)
     stats_7d: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
