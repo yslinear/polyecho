@@ -7,8 +7,10 @@ Features
 --------
 * Internal pagination: ``get_leaderboard(limit=200)`` makes 4 paged calls.
 * Exponential-backoff retry (3 attempts, base 1 s, cap 30 s).
-* Simple circuit breaker: after 5 consecutive failures the breaker opens and
-  subsequent calls raise ``CircuitOpenError`` immediately for 60 s.
+* Simple circuit breaker: after 5 consecutive *transient* failures (5xx /
+  transport / 429) the breaker opens and subsequent calls raise
+  ``CircuitOpenError`` for 60 s. A deterministic non-429 4xx is a client
+  error: surfaced at once, never retried, and it never trips the breaker.
 * Defensive JSON→DTO mapping: unknown / missing fields are handled gracefully.
 * Secrets (API keys, private keys) are never logged.
 
@@ -166,6 +168,23 @@ class LiveDataSource:
                 self._record_success()
                 return resp.json()
             except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+                # A non-429 4xx is a DETERMINISTIC client error (bad
+                # params, a missing resource, the /activity
+                # over-pagination 400): retrying is futile and it must
+                # NOT count toward the shared circuit breaker — that
+                # breaker exists to back off a DOWN upstream (5xx /
+                # transport / 429 rate-limit), not to let one bad request
+                # starve every other wallet's fetch. Surface it at once.
+                if (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and 400 <= exc.response.status_code < 500
+                    and exc.response.status_code != 429
+                ):
+                    raise RuntimeError(
+                        f"LiveDataSource: GET {path} -> "
+                        f"{exc.response.status_code} client error "
+                        f"(not retried, circuit unaffected)"
+                    ) from exc
                 last_exc = exc
                 self._record_failure()
                 if attempt < _RETRY_ATTEMPTS - 1:
@@ -293,7 +312,7 @@ class LiveDataSource:
         if end is not None:
             params["end"] = int(end.timestamp())
 
-        max_offset = 10_000  # API hard cap
+        max_offset = 3_000  # /activity 400s at offset>=~3500; stay under
 
         while True:
             params["offset"] = offset
@@ -341,6 +360,12 @@ class LiveDataSource:
         PAGE = 500
         results: list[PositionRecord] = []
         offset = 0
+        # /positions (unlike /activity) never 400s, so a prolific or
+        # offset-ignoring wallet pages UNBOUNDED — observed: a real wallet
+        # drove offset past 469_000 in one sweep, hanging the whole
+        # discovery cycle. Bound it; 3000 positions far exceeds what the
+        # scorer needs for a representative portfolio sample.
+        max_offset = 3_000
 
         while True:
             data = await self._get(
@@ -374,6 +399,8 @@ class LiveDataSource:
 
             offset += len(rows)
             if len(rows) < PAGE:
+                break
+            if offset >= max_offset:
                 break
 
         return results

@@ -12,7 +12,8 @@ smoke-tests:
 * ``get_markets_by_volume`` cursor pagination + descending-volume early stop.
 * Exponential-backoff **retry** that eventually succeeds.
 * Retry exhaustion → ``RuntimeError`` chaining the last httpx error.
-* HTTP status errors (404/429/500) mapped to retry→RuntimeError.
+* Deterministic non-429 4xx → immediate RuntimeError (no retry, breaker
+  untouched); 429 / 5xx → retry→RuntimeError and feed the breaker.
 * Transport errors (``ConnectError``) mapped the same way.
 * Circuit breaker: opens after 5 consecutive failures, then short-circuits
   with ``CircuitOpenError`` and resets after the cool-down window.
@@ -338,14 +339,43 @@ class TestRetryBackoff:
 
 
 class TestHttpErrorMapping:
-    @pytest.mark.parametrize("status", [404, 429, 500, 502, 503])
-    def test_status_errors_become_runtimeerror(self, status: int) -> None:
+    @pytest.mark.parametrize("status", [429, 500, 502, 503])
+    def test_transient_status_errors_retry_then_runtimeerror(
+        self, status: int
+    ) -> None:
+        """429 (rate-limit) + 5xx are TRANSIENT: retried 3x then mapped to
+        RuntimeError, and they DO feed the circuit breaker."""
+        calls = {"n": 0}
+
         def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
             return httpx.Response(status, json={"error": "x"})
 
         ds = _ds_with_handler(handler)
         with pytest.raises(RuntimeError, match="failed after 3 attempts"):
             run(ds.get_positions("0xabc"))
+        assert calls["n"] == _RETRY_ATTEMPTS  # retried
+        assert ds._cb_failures == _RETRY_ATTEMPTS  # fed the breaker
+
+    @pytest.mark.parametrize("status", [400, 403, 404, 422])
+    def test_deterministic_4xx_raises_at_once_circuit_untouched(
+        self, status: int
+    ) -> None:
+        """A non-429 4xx is a DETERMINISTIC client error (e.g. the
+        Polymarket /activity over-pagination 400): raised at once, NOT
+        retried, and it must NOT trip the shared circuit breaker (one bad
+        request can't starve every other wallet's fetch)."""
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(status, json={"error": "x"})
+
+        ds = _ds_with_handler(handler)
+        with pytest.raises(RuntimeError, match="client error"):
+            run(ds.get_positions("0xabc"))
+        assert calls["n"] == 1  # NOT retried
+        assert ds._cb_failures == 0  # circuit breaker untouched
 
     def test_transport_error_becomes_runtimeerror(self) -> None:
         def handler(_request: httpx.Request) -> httpx.Response:
