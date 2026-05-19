@@ -20,6 +20,7 @@ import { Pnl } from "@/components/pnl";
 import { TraderHeartbeatStatus } from "@/components/trader-heartbeat-status";
 import { db } from "@/lib/db";
 import { myTrades, followRelations, events, settings } from "@/lib/db/schema";
+import { t } from "@/lib/i18n";
 import {
   TRADER_HEARTBEAT_KEY,
   coerceHeartbeat,
@@ -107,15 +108,16 @@ export default async function DashboardPage() {
     <div className="mx-auto max-w-6xl">
       <header className="mb-8">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
+          <h1 className="text-2xl font-bold tracking-tight">
+            {t("dashboard.title")}
+          </h1>
           <TraderHeartbeatStatus
             heartbeat={heartbeat}
             liveness={liveness}
           />
         </div>
         <p className="mt-1 text-sm text-muted-foreground">
-          Copy-trading at a glance. Read-only; pauses and follows are explicit
-          actions on their own pages.
+          {t("dashboard.subtitle")}
         </p>
       </header>
 
@@ -123,13 +125,13 @@ export default async function DashboardPage() {
           a row of identical cards. Today's net is the lead; realized,
           unrealized and open risk sit beside it as a connected reading. */}
       <section
-        aria-label="Position and risk summary"
+        aria-label={t("dashboard.summaryAriaLabel")}
         className="rounded-lg border bg-card"
       >
         <div className="grid gap-px overflow-hidden rounded-lg bg-border sm:grid-cols-[1.4fr_1fr_1fr_1fr]">
           <div className="bg-card p-6">
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Today&apos;s net PnL
+              {t("dashboard.todayPnl.label")}
             </p>
             <Pnl
               value={hasAnyTrades ? todayPnl : null}
@@ -137,39 +139,39 @@ export default async function DashboardPage() {
               className="mt-2 block text-3xl"
             />
             <p className="mt-2 text-xs text-muted-foreground">
-              Trades opened since 00:00 UTC.
+              {t("dashboard.todayPnl.caption")}
             </p>
           </div>
 
           <div className="bg-card p-6">
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Realized
+              {t("dashboard.realized.label")}
             </p>
             <Pnl
               value={closed.length > 0 ? realizedPnl : null}
               className="mt-2 block text-xl"
             />
             <p className="mt-2 text-xs text-muted-foreground">
-              {closed.length} closed
+              {t("dashboard.realized.caption", { count: closed.length })}
             </p>
           </div>
 
           <div className="bg-card p-6">
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Unrealized
+              {t("dashboard.unrealized.label")}
             </p>
             <Pnl
               value={openPositions > 0 ? unrealizedPnl : null}
               className="mt-2 block text-xl"
             />
             <p className="mt-2 text-xs text-muted-foreground">
-              {openPositions} open
+              {t("dashboard.unrealized.caption", { count: openPositions })}
             </p>
           </div>
 
           <div className="bg-card p-6">
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Open risk
+              {t("dashboard.openRisk.label")}
             </p>
             <p className="mt-2 text-xl font-semibold tabular-nums">
               {openPositions > 0 ? (
@@ -179,14 +181,13 @@ export default async function DashboardPage() {
               )}
             </p>
             <p className="mt-2 text-xs text-muted-foreground">
-              Entry notional at stake
+              {t("dashboard.openRisk.caption")}
             </p>
           </div>
         </div>
         {!hasAnyTrades && (
           <p className="border-t px-6 py-3 text-sm text-muted-foreground">
-            No copy-trades recorded yet. Follow a leader, then trader-core fills
-            will populate this.
+            {t("dashboard.noTrades")}
           </p>
         )}
       </section>
@@ -200,17 +201,18 @@ export default async function DashboardPage() {
               id="activity-heading"
               className="text-sm font-semibold tracking-tight"
             >
-              Recent activity
+              {t("dashboard.activity.heading")}
             </h2>
             <span className="text-xs text-muted-foreground">
-              Latest {Math.min(latestEvents.length, 8) || 0}
+              {t("dashboard.activity.latest", {
+                count: Math.min(latestEvents.length, 8) || 0,
+              })}
             </span>
           </div>
           <div className="rounded-lg border bg-card">
             {latestEvents.length === 0 ? (
               <p className="px-5 py-8 text-center text-sm text-muted-foreground">
-                Quiet. Fills, errors and risk-limit alerts from trader-core will
-                stream in here.
+                {t("dashboard.activity.empty")}
               </p>
             ) : (
               <ul className="divide-y">
@@ -245,12 +247,12 @@ export default async function DashboardPage() {
             id="coverage-heading"
             className="text-sm font-semibold tracking-tight"
           >
-            Coverage
+            {t("dashboard.coverage.heading")}
           </h2>
           <dl className="rounded-lg border bg-card">
             <div className="flex items-center justify-between px-5 py-4">
               <dt className="text-sm text-muted-foreground">
-                Leaders followed
+                {t("dashboard.coverage.leadersFollowed")}
               </dt>
               <dd className="text-base font-semibold tabular-nums">
                 {activeFollows}
@@ -262,7 +264,9 @@ export default async function DashboardPage() {
               </dd>
             </div>
             <div className="flex items-center justify-between border-t px-5 py-4">
-              <dt className="text-sm text-muted-foreground">Open positions</dt>
+              <dt className="text-sm text-muted-foreground">
+                {t("dashboard.coverage.openPositions")}
+              </dt>
               <dd className="text-base font-semibold tabular-nums">
                 {openPositions}
               </dd>
@@ -270,8 +274,7 @@ export default async function DashboardPage() {
           </dl>
           {following.length === 0 && (
             <p className="text-xs text-muted-foreground">
-              Not following anyone yet. Vet candidates in Discovery, then
-              follow from Leaders.
+              {t("dashboard.coverage.notFollowing")}
             </p>
           )}
         </section>
