@@ -2753,3 +2753,310 @@ class TestDiscoveryIdleKeepalive:
                 assert task.cancelled()
 
         asyncio.get_event_loop().run_until_complete(_run())
+
+
+# ---------------------------------------------------------------------------
+# 防再種 — fixture mode must NOT auto-seed the operator DB
+# ---------------------------------------------------------------------------
+class TestFixturePersistenceGate:
+    """The deployed discovery entrypoint must NOT persist the synthetic
+    fixture leaderboard into ``candidate_leaders`` in fixture-datasource
+    mode (default), so a live operator DB is never auto-polluted with fake
+    leaders — UNLESS ``POLYECHO_DISCOVERY_PERSIST_FIXTURE=1`` opts in.
+
+    The gate defaults OPEN and is flipped ONLY by ``__main__.main()``;
+    every other test drives the worker/upsert helpers directly (their own
+    mocked ``session_scope``), so those legitimately keep exercising
+    persistence — these tests pin BOTH halves of that contract.
+    """
+
+    _FS = FrequencyStats(
+        trades_per_day=2.0, active_days=25, median_gap_minutes=120.0,
+        avg_hold_hours=36.0, hold_to_resolution_pct=10.0,
+        concurrent_positions_avg=2.0, concurrent_positions_max=5,
+        burstiness=0.2, active_hours_utc=[0, 1, 2, 3],
+    )
+
+    @contextlib.contextmanager
+    def _gate(self, enabled: bool):  # type: ignore[no-untyped-def]
+        """Set the module gate, ALWAYS restoring the open default after —
+        a leaked global would corrupt every later persistence test."""
+        from polyecho.discovery import worker as w
+
+        try:
+            w.set_persistence_enabled(enabled)
+            yield
+        finally:
+            w.set_persistence_enabled(True)
+
+    # -- gate default --------------------------------------------------------
+    def test_gate_defaults_open(self) -> None:
+        """Regression: the gate MUST default open so the entire existing
+        suite keeps exercising fixture-data persistence unchanged."""
+        from polyecho.discovery.worker import persistence_enabled
+
+        assert persistence_enabled() is True
+
+    # -- worker write functions honour a CLOSED gate -------------------------
+    def test_upsert_candidate_skips_db_when_gate_closed(self) -> None:
+        from polyecho.discovery.worker import _upsert_candidate
+
+        scope_calls = {"n": 0}
+
+        async def _run() -> None:
+            with self._gate(False):
+                with patch(
+                    "polyecho.discovery.worker.session_scope"
+                ) as ms:
+                    ms.side_effect = lambda *a, **k: scope_calls.__setitem__(
+                        "n", scope_calls["n"] + 1
+                    )
+                    emitted, prior = await _upsert_candidate(
+                        W_SWING, "leaderboard", display_name="X",
+                        stats_7d={}, stats_30d={"pnl_usd": 1.0}, stats_90d={},
+                        freq_stats_30d=self._FS,
+                        strategy_type=StrategyType.SWING,
+                        p_score=99.0, r_score=99.0, f_score=99.0,
+                        risk_flags=[], last_active_at=None,
+                    )
+            # Brand-new-wallet sentinel — callers must see "not in DB yet".
+            assert emitted is False
+            assert prior is None
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        # session_scope (the DB write boundary) was NEVER opened.
+        assert scope_calls["n"] == 0
+
+    def test_upsert_thin_skips_db_when_gate_closed(self) -> None:
+        from polyecho.discovery.worker import _upsert_thin
+
+        scope_calls = {"n": 0}
+
+        async def _run() -> tuple[Any, Any, Any, Any]:
+            with self._gate(False):
+                with patch(
+                    "polyecho.discovery.worker.session_scope"
+                ) as ms:
+                    ms.side_effect = lambda *a, **k: scope_calls.__setitem__(
+                        "n", scope_calls["n"] + 1
+                    )
+                    return await _upsert_thin(
+                        W_SWING, "leaderboard", display_name="X",
+                        rank=1, leaderboard_pnl=123.0,
+                        leaderboard_volume=456.0,
+                    )
+
+        out = asyncio.get_event_loop().run_until_complete(_run())
+        # Brand-new-wallet sentinel (None, None, None, {}) and no DB write.
+        assert out == (None, None, None, {})
+        assert scope_calls["n"] == 0
+
+    def test_insert_drift_event_skips_db_when_gate_closed(self) -> None:
+        from polyecho.discovery.worker import _insert_drift_event
+
+        scope_calls = {"n": 0}
+
+        async def _run() -> None:
+            with self._gate(False):
+                with patch(
+                    "polyecho.discovery.worker.session_scope"
+                ) as ms:
+                    ms.side_effect = lambda *a, **k: scope_calls.__setitem__(
+                        "n", scope_calls["n"] + 1
+                    )
+                    await _insert_drift_event(W_SWING, "swing", "scalper")
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert scope_calls["n"] == 0
+
+    def test_open_gate_still_persists(self) -> None:
+        """Non-vacuity: with the gate OPEN the SAME call DOES open
+        session_scope — proving the skip is the gate, not the mock."""
+        from polyecho.discovery.worker import _upsert_thin
+
+        opened = {"n": 0}
+
+        async def _run() -> None:
+            with self._gate(True):
+                with patch(
+                    "polyecho.discovery.worker.session_scope"
+                ) as ms:
+                    sess = AsyncMock()
+                    sess.execute = AsyncMock(
+                        return_value=MagicMock(
+                            scalar_one_or_none=MagicMock(return_value=None)
+                        )
+                    )
+                    sess.add = MagicMock()
+
+                    def _enter(*_a: Any, **_k: Any) -> Any:
+                        opened["n"] += 1
+                        cm = MagicMock()
+                        cm.__aenter__ = AsyncMock(return_value=sess)
+                        cm.__aexit__ = AsyncMock(return_value=False)
+                        return cm
+
+                    ms.side_effect = _enter
+                    await _upsert_thin(
+                        W_SWING, "leaderboard", display_name="X",
+                        rank=1, leaderboard_pnl=1.0, leaderboard_volume=2.0,
+                    )
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert opened["n"] == 1
+
+    # -- __main__.main() is the boundary that flips the gate -----------------
+    def test_main_fixture_no_optin_disables_persistence(self) -> None:
+        """``main(once=True)`` under a REAL FixtureDataSource (no opt-in)
+        runs the full pipeline but the candidate-WRITE boundary is closed.
+
+        NOTE: ``session_scope`` is shared infra — the hourly L2 cursor
+        READ (``_read_cursors``) legitimately opens it and is NOT a
+        pollution path, so the precise invariant is "the gate is closed
+        for the deployed pass AND the three candidate-WRITE helpers
+        short-circuit", NOT "no session is ever opened".
+        """
+        import os
+
+        from polyecho.discovery import __main__ as m
+        from polyecho.discovery import worker as w
+        from polyecho.shared.config import get_settings
+        from polyecho.shared.datasource import FixtureDataSource
+
+        gate_during_pass: dict[str, bool] = {}
+        upsert_thin_writes = {"n": 0}
+        upsert_cand_writes = {"n": 0}
+
+        real_run_once = m._run_once
+
+        async def _run_once_capture(worker: Any) -> None:
+            # The gate the *deployed pass* actually observes.
+            gate_during_pass["enabled"] = w.persistence_enabled()
+            await real_run_once(worker)
+
+        # Wrap the real write helpers: count only calls that get PAST the
+        # gate into the actual DB-write body (session_scope opened).
+        real_thin = w._upsert_thin
+        real_cand = w._upsert_candidate
+
+        async def _thin_spy(*a: Any, **k: Any):  # type: ignore[no-untyped-def]
+            with patch(
+                "polyecho.discovery.worker.session_scope"
+            ) as ms:
+                ms.side_effect = lambda *x, **y: upsert_thin_writes.__setitem__(
+                    "n", upsert_thin_writes["n"] + 1
+                )
+                return await real_thin(*a, **k)
+
+        async def _cand_spy(*a: Any, **k: Any):  # type: ignore[no-untyped-def]
+            with patch(
+                "polyecho.discovery.worker.session_scope"
+            ) as ms:
+                ms.side_effect = lambda *x, **y: upsert_cand_writes.__setitem__(
+                    "n", upsert_cand_writes["n"] + 1
+                )
+                return await real_cand(*a, **k)
+
+        async def _run() -> None:
+            with patch.object(
+                m, "get_datasource", return_value=FixtureDataSource()
+            ), patch.object(
+                m, "_run_once", _run_once_capture
+            ), patch.object(
+                w, "_upsert_thin", _thin_spy
+            ), patch.object(
+                w, "_upsert_candidate", _cand_spy
+            ):
+                await m.main(once=True)
+
+        try:
+            with patch.dict(
+                os.environ,
+                {"POLYECHO_DATASOURCE": "fixture"},
+                clear=False,
+            ):
+                os.environ.pop("POLYECHO_DISCOVERY_PERSIST_FIXTURE", None)
+                get_settings.cache_clear()
+                asyncio.get_event_loop().run_until_complete(_run())
+        finally:
+            get_settings.cache_clear()
+            m.set_persistence_enabled(True)
+
+        # The deployed pass observed a CLOSED gate …
+        assert gate_during_pass.get("enabled") is False
+        # … and NO candidate write (thin OR full) ever opened its
+        # session_scope body — 防再種 holds end-to-end even though the
+        # fixture leaderboard WAS ranked (the read path is intact).
+        assert upsert_thin_writes["n"] == 0
+        assert upsert_cand_writes["n"] == 0
+
+    def test_main_fixture_with_optin_keeps_persistence(self) -> None:
+        """Opt-in (``POLYECHO_DISCOVERY_PERSIST_FIXTURE=1``) restores
+        persistence even on the fixture datasource."""
+        import os
+
+        from polyecho.discovery import __main__ as m
+        from polyecho.discovery.worker import persistence_enabled
+        from polyecho.shared.config import get_settings
+        from polyecho.shared.datasource import FixtureDataSource
+
+        seen: dict[str, bool] = {}
+
+        async def _run_once_spy(worker: Any) -> None:
+            # Capture the gate state the deployed pass would actually use.
+            seen["enabled"] = persistence_enabled()
+
+        async def _run() -> None:
+            with patch.object(
+                m, "get_datasource", return_value=FixtureDataSource()
+            ), patch.object(m, "_run_once", _run_once_spy):
+                await m.main(once=True)
+
+        try:
+            with patch.dict(
+                os.environ,
+                {
+                    "POLYECHO_DATASOURCE": "fixture",
+                    "POLYECHO_DISCOVERY_PERSIST_FIXTURE": "1",
+                },
+                clear=False,
+            ):
+                get_settings.cache_clear()
+                asyncio.get_event_loop().run_until_complete(_run())
+        finally:
+            get_settings.cache_clear()
+            m.set_persistence_enabled(True)
+
+        assert seen.get("enabled") is True
+
+    def test_main_live_like_datasource_keeps_persistence(self) -> None:
+        """A non-FixtureDataSource (live / live-like) must NEVER trip the
+        fixture gate — persistence stays enabled (gates on the resolved
+        datasource object, not just the settings string)."""
+        from polyecho.discovery import __main__ as m
+        from polyecho.discovery.worker import persistence_enabled
+
+        seen: dict[str, bool] = {}
+
+        class _NotFixture:
+            async def __aenter__(self) -> _NotFixture:
+                return self
+
+            async def __aexit__(self, *exc: object) -> None:
+                return None
+
+        async def _run_once_spy(worker: Any) -> None:
+            seen["enabled"] = persistence_enabled()
+
+        async def _run() -> None:
+            with patch.object(
+                m, "get_datasource", return_value=_NotFixture()
+            ), patch.object(m, "_run_once", _run_once_spy):
+                await m.main(once=True)
+
+        try:
+            asyncio.get_event_loop().run_until_complete(_run())
+        finally:
+            m.set_persistence_enabled(True)
+
+        assert seen.get("enabled") is True

@@ -76,6 +76,48 @@ logger = logging.getLogger(__name__)
 
 _SEED_PATH = Path(__file__).parent / "smart_money_seed.json"
 
+# --- Fixture-mode DB-persistence gate (防再種) -----------------------------
+#
+# WHY: in ``POLYECHO_DATASOURCE=fixture`` the worker ranks the *synthetic*
+# fixture leaderboard (demo wallets like ``0xscalper2000…``) and would
+# UPSERT them into the operator's ``candidate_leaders`` — auto-polluting a
+# live operator DB with fake leaders.  Fixture mode is the default safe /
+# test path and must NOT auto-seed the DB.
+#
+# DESIGN: a process-wide boolean, default ``True`` so the gate is a NO-OP
+# unless something explicitly closes it.  ONLY the deployed entrypoint
+# (:func:`polyecho.discovery.__main__.main`) closes it — and only when the
+# *resolved* datasource is a ``FixtureDataSource`` AND the operator has not
+# opted in via ``POLYECHO_DISCOVERY_PERSIST_FIXTURE=1``.  Because the gate
+# defaults open and is flipped ONLY by ``main()``, every test that drives
+# the worker / upsert helpers directly (their own mocked ``session_scope``,
+# never through ``main()``) is unaffected — the entire discovery suite
+# legitimately keeps exercising persistence with fixture data.  The gate is
+# the deployed-entrypoint/datasource WRITE boundary, nothing weaker.
+_persist_enabled: bool = True
+
+
+def set_persistence_enabled(enabled: bool) -> None:
+    """Open (``True``) / close (``False``) the DB-persistence gate.
+
+    Called once by :func:`polyecho.discovery.__main__.main` before any
+    pass runs.  Idempotent; safe to call repeatedly.  Not part of the
+    per-wallet hot path (a single module global read), so it adds no
+    measurable overhead and keeps determinism (no I/O, no clock).
+    """
+    global _persist_enabled
+    _persist_enabled = enabled
+
+
+def persistence_enabled() -> bool:
+    """Whether the discovery worker may write candidate rows to the DB.
+
+    ``True`` by default (every direct test path); flipped to ``False`` by
+    the deployed entrypoint under fixture-datasource-without-opt-in so
+    fixture mode never auto-seeds the operator DB.
+    """
+    return _persist_enabled
+
 # --- High-score candidate notification threshold (PRD §5.2 / §8.1) --------
 # The PRD ties the dashboard "watching" tier to a strong dual-dimension
 # score; there is no hard-coded number in the PRD, so we pick a sensible
@@ -497,6 +539,21 @@ async def _upsert_candidate(
     same-wallet ``_process_wallet``.  (On SQLite ``FOR UPDATE`` is a
     no-op, which is fine — tests don't exercise true row contention.)
     """
+    # 防再種 WRITE BOUNDARY: in fixture-datasource mode (no opt-in) the
+    # deployed entrypoint closes the persistence gate so this synthetic
+    # fixture candidate is NEVER written to the operator DB.  Returning the
+    # brand-new-wallet sentinel ``(False, None)`` keeps every caller's
+    # control flow byte-identical to "wallet not in DB yet": no high-score
+    # event, and ``prior_last_seen_ts=None`` so the hourly windowed scan
+    # just falls back to its 24 h trailing window (exactly the empty-DB
+    # path).  The gate defaults OPEN, so direct-call tests are unaffected.
+    if not _persist_enabled:
+        logger.debug(
+            "fixture_persist_skipped",
+            extra={"wallet": wallet, "source": source, "fn": "_upsert_candidate"},
+        )
+        return False, None
+
     # P1-9a: key score-history by the UTC calendar day, NOT the server's
     # LOCAL date.  ``date.today()`` uses the process-local timezone, so a
     # non-UTC container would write history under the wrong day while every
@@ -684,6 +741,17 @@ async def _upsert_candidate(
 
 async def _insert_drift_event(wallet: str, strategy_30d: str, strategy_7d: str) -> None:
     """Insert a strategy_drift Event row (PRD §5.8)."""
+    # 防再種: a drift Event is a downstream side-effect of a *persisted*
+    # fixture candidate.  When the persistence gate is closed (fixture
+    # mode, no opt-in) the candidate itself was never written, so its
+    # synthetic drift Event must not pollute the operator DB either.
+    if not _persist_enabled:
+        logger.debug(
+            "fixture_persist_skipped",
+            extra={"wallet": wallet, "fn": "_insert_drift_event"},
+        )
+        return
+
     async with session_scope() as session:
         session.add(
             Event(
@@ -735,6 +803,20 @@ async def _upsert_thin(
     previously-stored ``{rank, leaderboard_pnl, leaderboard_volume}``
     (``{}`` for a brand-new wallet) — the delta baseline.
     """
+    # 防再種 WRITE BOUNDARY (Phase-1 thin path): in fixture mode without
+    # opt-in the deployed entrypoint closes the gate so this synthetic
+    # leaderboard entry is NEVER written.  Return the brand-new-wallet
+    # sentinel ``(None, None, None, {})`` — identical to "wallet not in DB
+    # yet", so ``discover_leaderboard``'s staleness/needs-detail predicates
+    # behave exactly as on an empty DB and the (also-gated)
+    # ``_upsert_candidate`` downstream simply writes nothing either.
+    if not _persist_enabled:
+        logger.debug(
+            "fixture_persist_skipped",
+            extra={"wallet": wallet, "source": source, "fn": "_upsert_thin"},
+        )
+        return None, None, None, {}
+
     async with session_scope() as session:
         result = await session.execute(
             select(CandidateLeader)

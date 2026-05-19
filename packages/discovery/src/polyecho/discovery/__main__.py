@@ -31,7 +31,15 @@ from datetime import timedelta
 
 from polyecho.discovery._lifecycle import datasource_lifecycle
 from polyecho.discovery.worker import DiscoveryWorker
-from polyecho.shared.datasource import get_datasource
+
+# Explicit re-export (PEP 484): the deployed-entrypoint persistence gate is
+# part of __main__'s public surface — main() flips it and the deployed-pass
+# tests reach/patch it via this module. The redundant alias tells mypy this
+# is an intentional re-export (mypy no-implicit-reexport / attr-defined).
+from polyecho.discovery.worker import (
+    set_persistence_enabled as set_persistence_enabled,
+)
+from polyecho.shared.datasource import FixtureDataSource, get_datasource
 from polyecho.shared.logging import configure_logging
 
 # F0 heartbeat contract (FROZEN, lives in packages/shared — code AGAINST
@@ -283,6 +291,46 @@ async def main(*, once: bool = False) -> None:
     # no ``__aenter__``/``__aexit__``), so the fixture path is preserved
     # byte-for-byte while the live path now actually runs.
     async with datasource_lifecycle(get_datasource()) as ds:
+        # 防再種 — fixture mode must NOT auto-seed the operator DB.
+        #
+        # In ``POLYECHO_DATASOURCE=fixture`` the worker would rank the
+        # *synthetic* fixture leaderboard (demo wallets like
+        # ``0xscalper2000…``) and UPSERT them into the operator's
+        # ``candidate_leaders`` — polluting a live DB with fake leaders.
+        # The DEPLOYED ENTRYPOINT is the correct, test-safe place to gate
+        # this: we key on the *resolved datasource object* (not just the
+        # settings string) so a live-like fake (lifecycle tests patch
+        # ``get_datasource``) is correctly NOT treated as fixture, while a
+        # real ``FixtureDataSource`` closes the worker's persistence gate
+        # UNLESS the operator explicitly opts in via
+        # ``POLYECHO_DISCOVERY_PERSIST_FIXTURE=1``.  The fixture DATASOURCE
+        # mechanism itself is untouched (still the default safe/test read
+        # path); only the DB *write* is suppressed.  The gate defaults
+        # OPEN and is flipped ONLY here, so every test that drives the
+        # worker / upsert helpers directly keeps exercising persistence.
+        from polyecho.shared.config import get_settings
+
+        persist_fixture = get_settings().discovery_persist_fixture
+        if isinstance(ds, FixtureDataSource) and not persist_fixture:
+            set_persistence_enabled(False)
+            logger.warning(
+                "fixture_datasource_persistence_disabled",
+                extra={
+                    "reason": (
+                        "POLYECHO_DATASOURCE=fixture and "
+                        "POLYECHO_DISCOVERY_PERSIST_FIXTURE not set — "
+                        "discovery will rank the fixture leaderboard but "
+                        "will NOT write candidate_leaders to the DB "
+                        "(set POLYECHO_DISCOVERY_PERSIST_FIXTURE=1 to "
+                        "opt in)."
+                    ),
+                },
+            )
+        else:
+            # Explicit: live datasource, or fixture-with-opt-in → the
+            # worker persists normally (gate stays at its open default).
+            set_persistence_enabled(True)
+
         worker = DiscoveryWorker(ds)
 
         if once:

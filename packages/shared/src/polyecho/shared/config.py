@@ -172,6 +172,20 @@ class Settings(BaseSettings):
             "'live' calls the Polymarket Data API at polymarket_data_api_url."
         ),
     )
+    discovery_persist_fixture: bool = Field(
+        default=False,
+        description=(
+            "Opt-in: when False (the default) and the discovery worker is "
+            "running on the FIXTURE datasource, the deployed discovery "
+            "entrypoint does NOT persist its synthetic fixture-ranked "
+            "candidate_leaders into the operator DB — fixture mode stays a "
+            "pure no-side-effect demo/test path and never auto-seeds the "
+            "live operator DB with fake leaders.  Set to True (env "
+            "POLYECHO_DISCOVERY_PERSIST_FIXTURE=1) only if you deliberately "
+            "want the fixture leaderboard written to the DB (e.g. seeding a "
+            "local demo).  No effect under the 'live' datasource."
+        ),
+    )
 
     # ------------------------------------------------------------------
     # Live trading — Phase-4 HARD safety lock (brief §9; default OFF)

@@ -22,6 +22,17 @@ export const discovery = {
       replicability: "可複製性",
       total: "總分",
     },
+    /** Header status Badge — the raw candidate_leaders.user_status enum
+     *  (new/watching/following/rejected). An UNMAPPED status degrades to
+     *  the raw enum verbatim (never a crash). Mirrors the values used by
+     *  table.statusOptions but kept co-located so the detail page owns
+     *  its own copy. "Leader" stays English (PROPER-NOUN POLICY). */
+    statusLabel: {
+      new: "新發現",
+      watching: "觀察中",
+      following: "跟單中",
+      rejected: "已排除",
+    },
     tabs: {
       overview: "概覽",
       stats: "統計",
@@ -68,6 +79,33 @@ export const discovery = {
       window30d: "30 日",
       window90d: "90 日",
       frequencyStrategy: "頻率與策略（§5.3）",
+      /** Raw `stats_*` / `frequency_stats` JSONB keys produced by the
+       *  discovery worker (packages/discovery worker `_compute_stats` +
+       *  `FrequencyStats.to_dict()`). The StatsBlock renders these as the
+       *  dt labels; without this map they leak the English DB key.
+       *  PROPER-NOUN POLICY: PnL / Sharpe stay English inside the label;
+       *  an UNMAPPED key falls back to the raw key verbatim (so a new
+       *  worker key degrades to English, never crashes — matches i18n.ts
+       *  missing-key behaviour). */
+      fields: {
+        pnl_usd: "PnL（USD）",
+        win_rate: "勝率",
+        sharpe: "Sharpe 比率",
+        max_drawdown: "最大回撤",
+        consistency: "穩定度",
+        specialization: "專精度",
+        trades_per_day: "每日交易數",
+        total_trades: "總交易數",
+        first_trade_at: "首次交易時間",
+        active_days: "活躍天數",
+        median_gap_minutes: "交易間隔中位數（分鐘）",
+        avg_hold_hours: "平均持有時數",
+        hold_to_resolution_pct: "持有至結算比例",
+        concurrent_positions_avg: "同時持倉數（平均）",
+        concurrent_positions_max: "同時持倉數（最高）",
+        burstiness: "爆發性（越低越好）",
+        active_hours_utc: "活躍時段（UTC）",
+      },
     },
     history: {
       title: "分數歷史",

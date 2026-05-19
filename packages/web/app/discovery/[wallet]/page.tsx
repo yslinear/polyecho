@@ -18,7 +18,7 @@ import { Pnl } from "@/components/pnl";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { formatDateTime } from "@/lib/format";
-import { t } from "@/lib/i18n";
+import { t, type I18nKey } from "@/lib/i18n";
 import { LeaderScoreChart } from "./leader-score-chart";
 
 // Reads the database on every request — never prerender at build time
@@ -59,6 +59,31 @@ const STATUS_VARIANT: Record<
   following: "default",
   rejected: "destructive",
 };
+
+// stats_*/frequency_stats JSONB keys are produced by the discovery worker
+// in English (snake_case DB keys). Route them through the discovery locale
+// via the dynamic `t(`prefix.${k}`)` seam (the i18n orphan-guard treats the
+// static template prefix as covering every leaf beneath it). `t()` returns
+// the *key itself* on a miss, so an UNMAPPED worker key (a new/unknown key)
+// must degrade to the raw key verbatim — visible, never a crash — mirroring
+// lib/i18n.ts's missing-key ethos.
+// NOTE: the literal `t(\`discovery.detail.stats.fields.${...}\`)` prefix is
+// inlined (not a const) ON PURPOSE — the i18n orphan-guard
+// (__tests__/lib/i18n.test.ts) treats a STATIC template prefix in a `t(\`…\`)`
+// call as covering every leaf beneath it; a variable prefix would read as 0
+// references and the new keys would be flagged orphan.
+function statFieldLabel(key: string): string {
+  const out = t(`discovery.detail.stats.fields.${key}` as I18nKey);
+  return out === `discovery.detail.stats.fields.${key}` ? key : out;
+}
+
+// candidate_leaders.user_status is a raw English enum; localise it for the
+// header Badge. An UNMAPPED status degrades to the raw enum verbatim. Same
+// inlined-literal-prefix rationale as statFieldLabel (orphan-guard coverage).
+function statusLabel(status: string): string {
+  const out = t(`discovery.detail.statusLabel.${status}` as I18nKey);
+  return out === `discovery.detail.statusLabel.${status}` ? status : out;
+}
 
 // A stat key whose value should read with gain/loss semantics.
 function isPnlKey(key: string): boolean {
@@ -112,7 +137,12 @@ function StatsBlock({ title, data }: { title: string; data: unknown }) {
         <dl className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
           {entries.map(([k, v]) => (
             <div key={k} className="contents">
-              <dt className="truncate text-muted-foreground">{k}</dt>
+              <dt
+                className="truncate text-muted-foreground"
+                title={statFieldLabel(k)}
+              >
+                {statFieldLabel(k)}
+              </dt>
               <dd className="truncate text-right font-medium tabular-nums">
                 {renderStatValue(k, v)}
               </dd>
@@ -178,9 +208,9 @@ export default async function LeaderDetailPage({ params }: PageProps) {
         <div className="flex items-center gap-2">
           <Badge
             variant={STATUS_VARIANT[leader.user_status] ?? "secondary"}
-            className="px-3 py-1 text-sm capitalize"
+            className="px-3 py-1 text-sm"
           >
-            {leader.user_status}
+            {statusLabel(leader.user_status)}
           </Badge>
           <Link
             href={`/backtest/new?leader=${encodeURIComponent(leader.wallet_address)}`}
