@@ -32,6 +32,19 @@ function makeBuilder() {
 
 vi.mock("@/lib/db", () => ({ db: makeBuilder() }));
 vi.mock("@/lib/env", () => ({ env: { POLYECHO_DB_URL_DRIZZLE: "stub" } }));
+// /accounts now embeds the <ImportAccountForm> client island (the
+// operator-authorised web key-import override). Like the existing
+// alerts-page.test.tsx (whose page renders the router-using
+// <CreateDangerousAction> island), a server-page render that transitively
+// mounts a client island must stub next/navigation + sonner so the bare
+// jsdom render has a router ("invariant expected app router to be mounted")
+// and a toast sink. This does not change what the empty-state asserts.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: vi.fn() }),
+}));
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn() },
+}));
 
 import PositionsPage from "@/app/positions/page";
 import AccountsPage from "@/app/accounts/page";

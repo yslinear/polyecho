@@ -17,6 +17,7 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { backtestJobs, candidateLeaders } from "@/lib/db/schema";
+import { EVM_ADDRESS_RE } from "@/lib/format";
 
 // ---------------------------------------------------------------------------
 // Balanced template preset — PRD §5.6
@@ -51,15 +52,6 @@ const LEADER_STATUSES: ReadonlySet<string> = new Set<LeaderStatus>([
   "following",
   "rejected",
 ]);
-
-/**
- * rev-web R16 HIGH: `wallet` is persisted into `backtest_jobs.leader_addresses`
- * and a Server Action is a public RPC. Validate it is a non-empty, bounded
- * `0x`-prefixed 40-hex-char EVM address shape BEFORE the insert (the client
- * island only ever sends a discovered candidate address; an arbitrary /
- * unbounded string must never reach the DB).
- */
-const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
 /**
  * quickBacktest — one-click 90-day Balanced backtest for a single leader.

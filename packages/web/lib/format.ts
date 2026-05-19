@@ -61,6 +61,21 @@ export function shortAddress(addr: string | null | undefined): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
+/**
+ * EVM address shape: `0x` + 40 hex chars (case-insensitive). Shared by the
+ * discovery Server Action's input guard and the web key-import flow — a
+ * Server Action is a public RPC, so an arbitrary / unbounded string must
+ * never reach the DB (rev-web R16). Shape-only; does NOT checksum.
+ */
+export const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
+/**
+ * secp256k1 private key as the CLI accepts it: an optionally-`0x`-prefixed
+ * 64-hex (32-byte) string. Shape-only — the trimmed string is stored
+ * verbatim (the CLI does not re-encode) so trader-core round-trips it back.
+ */
+export const PRIVATE_KEY_RE = /^(0x)?[0-9a-fA-F]{64}$/;
+
 /** ISO-ish date string (YYYY-MM-DD HH:mm) from a Date | null, UTC, stable. */
 export function formatDateTime(v: Date | string | null | undefined): string {
   if (!v) return t("tables.common.notRecorded");

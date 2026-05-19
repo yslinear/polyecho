@@ -97,6 +97,45 @@ export const tables = {
     },
     copied: "已複製",
     copyAddress: "複製位址",
+    /** Operator-authorised web key-import override (recorded). The default
+     *  model is CLI-only; the operator knowingly enabled this. Proper nouns
+     *  (EOA / funder / AES-256-GCM / CLI) stay English per PROPER-NOUN
+     *  POLICY. */
+    import: {
+      heading: "從 Web 匯入私鑰",
+      intro:
+        "預設模式為僅限 CLI 匯入；此功能為操作員明確授權的覆寫（已記錄）。私鑰會以 AES-256-GCM 加密儲存，永不顯示或記錄。需通過危險操作確認密碼。",
+      openButton: "匯入私鑰",
+      cancel: "取消",
+      nameLabel: "帳戶名稱（選填）",
+      namePlaceholder: "預設為 EOA 位址",
+      eoaLabel: "EOA 位址",
+      eoaPlaceholder: "0x… 簽章者位址",
+      sigTypeLabel: "簽章類型",
+      sigType0: "0 · EOA（funder 即簽章者）",
+      sigType1: "1 · POLY_PROXY（需顯式 funder）",
+      sigType2: "2 · POLY_GNOSIS_SAFE（需顯式 funder）",
+      sigType3: "3 · POLY_1271（需顯式 funder）",
+      funderLabel: "Funder 位址",
+      funderPlaceholder: "0x… 經鏈上驗證的 funder",
+      funderHintType0: "type 0：funder 自動等於 EOA，無需填寫。",
+      funderHintOther:
+        "type 1/2/3：請填入經鏈上驗證的 funder 位址。type 1 的 CREATE2 推導僅 CLI 端有可信實作，本頁不臆測。",
+      privateKeyLabel: "私鑰",
+      privateKeyPlaceholder: "0x… 64 個十六進位字元（永不顯示）",
+      encPassLabel: "私鑰加密密語",
+      encPassPlaceholder: "trader-core 解密所需的密語",
+      dangerPassLabel: "危險操作確認密碼",
+      dangerPassPlaceholder: "由 CLI set-danger-passphrase 佈建",
+      submit: "加密並匯入",
+      submitting: "匯入中…",
+      errEoa: "EOA 位址格式無效（需為 0x 加 40 個十六進位字元）。",
+      errPrivateKey: "私鑰格式無效（需為 64 個十六進位字元，可選 0x 前綴）。",
+      errEncPass: "請輸入私鑰加密密語。",
+      errDangerPass: "請輸入危險操作確認密碼。",
+      errFunder: "type 1/2/3 需填入經鏈上驗證的 funder 位址。",
+      errFailed: "匯入失敗，請重試。",
+    },
   },
   leaders: {
     title: "Leaders",

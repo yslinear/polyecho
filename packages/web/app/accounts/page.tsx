@@ -22,6 +22,7 @@ import {
 import { signatureTypeLabel } from "@/lib/format";
 import { t } from "@/lib/i18n";
 import { CopyAddress } from "./copy-address";
+import { ImportAccountForm } from "./import-account-form";
 
 export const dynamic = "force-dynamic";
 
@@ -103,6 +104,13 @@ export default async function AccountsPage() {
             )}
         </p>
       </div>
+
+      <section className="space-y-3">
+        <h2 className="text-sm font-semibold tracking-tight">
+          {t("tables.accounts.import.heading")}
+        </h2>
+        <ImportAccountForm />
+      </section>
 
       {rows.length === 0 ? (
         <div className="rounded-lg border border-dashed py-16 text-center">
