@@ -134,7 +134,7 @@ function StatsBlock({ title, data }: { title: string; data: unknown }) {
           {t("discovery.detail.noDataAvailable")}
         </p>
       ) : (
-        <dl className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
+        <dl className="grid grid-cols-1 gap-x-6 gap-y-1.5 text-xs sm:grid-cols-2">
           {entries.map(([k, v]) => (
             <div key={k} className="contents">
               <dt
@@ -143,7 +143,7 @@ function StatsBlock({ title, data }: { title: string; data: unknown }) {
               >
                 {statFieldLabel(k)}
               </dt>
-              <dd className="truncate text-right font-medium tabular-nums">
+              <dd className="text-right font-medium tabular-nums">
                 {renderStatValue(k, v)}
               </dd>
             </div>

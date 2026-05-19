@@ -183,9 +183,10 @@ export function DataTable<TData, TValue>({
         </DropdownMenu>
       </div>
 
-      {/* Table */}
-      <div className="rounded-lg border overflow-hidden">
-        <Table>
+      {/* Table — scroll the container on narrow viewports (never the page);
+          min-w keeps columns intact so tabular figures are never clipped. */}
+      <div className="rounded-lg border overflow-x-auto">
+        <Table className="min-w-[48rem]">
           <TableHeader className="sticky top-0 z-10 bg-muted">
             {table.getHeaderGroups().map((hg) => (
               <TableRow key={hg.id}>

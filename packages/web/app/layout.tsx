@@ -87,7 +87,10 @@ export default async function RootLayout({
               <GlobalPauseToggle paused={globalPaused} />
             </header>
 
-            <main id="main" className="flex-1 overflow-y-auto p-6">
+            <main
+              id="main"
+              className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-6"
+            >
               {children}
             </main>
           </SidebarInset>

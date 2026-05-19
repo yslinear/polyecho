@@ -86,8 +86,8 @@ function RowAction({ row }: { row: LeaderRow }) {
 
 export function LeadersTable({ rows }: { rows: LeaderRow[] }) {
   return (
-    <div className="overflow-hidden rounded-lg border">
-      <Table>
+    <div className="overflow-x-auto rounded-lg border">
+      <Table className="min-w-[44rem]">
         <TableHeader className="sticky top-0 z-10 bg-muted">
           <TableRow className="hover:bg-transparent">
             <TableHead>{t("tables.leaders.col.leader")}</TableHead>

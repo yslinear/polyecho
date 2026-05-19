@@ -127,8 +127,8 @@ export default async function AccountsPage() {
           </p>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-lg border">
-          <Table>
+        <div className="overflow-x-auto rounded-lg border">
+          <Table className="min-w-[34rem]">
             <TableHeader className="sticky top-0 z-10 bg-muted">
               <TableRow className="hover:bg-transparent">
                 <TableHead>{t("tables.accounts.col.name")}</TableHead>
