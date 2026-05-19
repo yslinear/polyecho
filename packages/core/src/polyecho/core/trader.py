@@ -1419,14 +1419,13 @@ class TraderCore:
         """
         try:
             async with asyncio.timeout(INTEGRATION_PROBE_TIMEOUT_SECONDS):
-                from polyecho.shared.health import (
-                    run_all_probes,
-                    write_integration_status,
-                )
-
                 from polyecho.core.ws_probe import (
                     probe_polymarket_ws_market,
                     probe_polymarket_ws_user,
+                )
+                from polyecho.shared.health import (
+                    run_all_probes,
+                    write_integration_status,
                 )
 
                 snapshot = await run_all_probes()
