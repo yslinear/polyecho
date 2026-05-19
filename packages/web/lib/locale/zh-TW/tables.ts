@@ -9,6 +9,27 @@ export const tables = {
     notRecorded: "未記錄",
     notYet: "尚未",
   },
+  /** copy_skips.skip_reason taxonomy badge labels (frozen SkipReason
+   *  enum; rendered by lib/skip-reasons via the skips table).
+   *  `slippage`/`market` stay English per PROPER-NOUN POLICY. */
+  skipReasons: {
+    dup: "重複",
+    notFollowing: "未跟隨",
+    filterKeyword: "關鍵字過濾",
+    filterPriceBand: "價格區間",
+    filterMarketEnd: "market 即將結束",
+    orderbookSpread: "價差過大",
+    orderbookDepth: "深度不足",
+    positionCap: "持倉上限",
+    belowMinSize: "低於最小數量",
+    dailyOrderCap: "單日下單上限",
+    dailyLossCap: "單日虧損上限",
+    portfolioCap: "投資組合上限",
+    slippageReject: "slippage 拒單",
+    strategyDrift: "策略偏移",
+    dataUnavailable: "資料無法取得",
+    liveLocked: "Live 已 LOCKED",
+  },
   trades: {
     title: "交易",
     subtitleEmpty: "trader-core 執行的每一筆跟單交易都會記錄在這裡。",

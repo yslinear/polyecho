@@ -1,12 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { t } from "@/lib/i18n";
 
 /**
  * LeadersTable client island: renders relationship rows + the per-row
  * Pause/Resume SAFE write (PRD §5.7). The Server Action is mocked so the
  * test stays DB-free; we assert it is called with (id, nextStatus), then a
  * toast fires and router.refresh() re-reads the Server Component.
+ *
+ * Locators/expected toast text are derived from the i18n dictionary (the
+ * SAME keys the island uses), so this asserts STRUCTURE/behaviour and
+ * stays correct if a translation string changes.
  */
 
 vi.mock("@/lib/db", () => ({ db: {} }));
@@ -70,27 +75,33 @@ describe("LeadersTable", () => {
     render(<LeadersTable rows={rows} />);
     expect(screen.getByText("0xaaaa…aaaa")).toBeInTheDocument();
     expect(screen.getByText("0xbbbb…bbbb")).toBeInTheDocument();
+    // status value is language-neutral data (rendered raw).
     expect(screen.getByText("active")).toBeInTheDocument();
     expect(screen.getByText("paused")).toBeInTheDocument();
     expect(screen.getByText("Main")).toBeInTheDocument();
     expect(screen.getByText("Balanced")).toBeInTheDocument();
   });
 
-  it("uses 'Not set' (no em dash) for null account/template/last-seen", () => {
+  it("uses the not-set fallback (no em dash) for null account/template/last-seen", () => {
     render(<LeadersTable rows={rows} />);
-    expect(screen.getAllByText("Not set").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText("Not yet")).toBeInTheDocument();
+    // paused row has null account AND template -> 2 not-set cells.
+    expect(
+      screen.getAllByText(t("tables.common.notSet")).length
+    ).toBeGreaterThanOrEqual(2);
+    expect(
+      screen.getByText(t("tables.common.notYet"))
+    ).toBeInTheDocument();
   });
 
   it("active row offers Pause; calls setFollowStatus(id,'paused') + toast + refresh", async () => {
     render(<LeadersTable rows={rows} />);
     const pause = screen.getByRole("button", {
-      name: `Pause copying ${ACTIVE}`,
+      name: t("tables.leaders.pauseAria", { address: ACTIVE }),
     });
     await userEvent.click(pause);
     expect(setFollowStatus).toHaveBeenCalledWith("rel-active", "paused");
     expect(toastSuccess).toHaveBeenCalledWith(
-      expect.stringMatching(/paused/i)
+      t("tables.leaders.pausedToast")
     );
     expect(refresh).toHaveBeenCalledTimes(1);
   });
@@ -98,12 +109,12 @@ describe("LeadersTable", () => {
   it("paused row offers Resume; calls setFollowStatus(id,'active') + toast + refresh", async () => {
     render(<LeadersTable rows={rows} />);
     const resume = screen.getByRole("button", {
-      name: `Resume copying ${PAUSED}`,
+      name: t("tables.leaders.resumeAria", { address: PAUSED }),
     });
     await userEvent.click(resume);
     expect(setFollowStatus).toHaveBeenCalledWith("rel-paused", "active");
     expect(toastSuccess).toHaveBeenCalledWith(
-      expect.stringMatching(/resumed/i)
+      t("tables.leaders.resumedToast")
     );
     expect(refresh).toHaveBeenCalledTimes(1);
   });
@@ -112,20 +123,39 @@ describe("LeadersTable", () => {
     setFollowStatus.mockRejectedValueOnce(new Error("boom"));
     render(<LeadersTable rows={rows} />);
     await userEvent.click(
-      screen.getByRole("button", { name: `Pause copying ${ACTIVE}` })
+      screen.getByRole("button", {
+        name: t("tables.leaders.pauseAria", { address: ACTIVE }),
+      })
     );
     expect(toastError).toHaveBeenCalledWith(
-      "Failed to update follow status"
+      t("tables.leaders.updateError")
     );
     expect(refresh).not.toHaveBeenCalled();
   });
 
   it("has NO live-trading enable/disable control anywhere in the table", () => {
     render(<LeadersTable rows={rows} />);
+    // Structural guard: the only actionable controls are the per-row
+    // Pause/Resume toggles (their aria-labels are the pause/resume keys).
+    // Nothing must expose a live-trading enable/disable affordance —
+    // that is high-danger + CLI-only (PRD §5.7).
+    const pauseLabel = t("tables.leaders.pauseAria", { address: ACTIVE });
+    const resumeLabel = t("tables.leaders.resumeAria", { address: PAUSED });
+    const allowed = new Set([pauseLabel, resumeLabel]);
     for (const btn of screen.getAllByRole("button")) {
-      const label = (btn.getAttribute("aria-label") ?? btn.textContent ?? "")
-        .toLowerCase();
-      expect(label).not.toMatch(/live trading|enable live|disable live/);
+      const label = btn.getAttribute("aria-label") ?? btn.textContent ?? "";
+      // Every button is one of the two known SAFE toggles…
+      expect(
+        allowed.has(label) ||
+          label === t("tables.leaders.pause") ||
+          label === t("tables.leaders.resume")
+      ).toBe(true);
+      // …and none mentions the live-trading vocabulary (any locale).
+      expect(label.toLowerCase()).not.toMatch(
+        /live trading|enable live|disable live/
+      );
+      expect(label).not.toContain(t("common.liveTrading.locked"));
+      expect(label).not.toContain(t("common.liveTrading.unlocked"));
     }
   });
 });

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { t } from "@/lib/i18n";
 
 // trades-table imports a *type* from ./page, and page.tsx imports "@/lib/db"
 // at module load (throws without POLYECHO_DB_URL_DRIZZLE). Stub db + env.
@@ -66,6 +67,7 @@ describe("TradesTable (client island)", () => {
   it("renders one row per trade with formatted PnL and fill badges", () => {
     render(<TradesTable data={rows} />);
     expect(bodyRows()).toHaveLength(3);
+    // Money + fill_status value are language-neutral data (rendered raw).
     expect(screen.getByText("+$12.34")).toBeInTheDocument();
     expect(screen.getByText("-$5.00")).toBeInTheDocument();
     expect(screen.getByText("filled")).toBeInTheDocument();
@@ -77,22 +79,24 @@ describe("TradesTable (client island)", () => {
     expect(screen.getAllByText("0xabcd…ef01").length).toBeGreaterThan(0);
   });
 
-  it("renders an honest empty state (no bare 'No results.') with no data", () => {
+  it("renders an honest empty state (not a bare 'no results') with no data", () => {
     render(<TradesTable data={[]} />);
     // DESIGN.md ban: no terse "No results." — one calm sentence + the
-    // real next action.
-    expect(screen.queryByText("No results.")).not.toBeInTheDocument();
+    // real next action. The shared DataTable's terse fallback must NOT
+    // render; the island owns this state with the i18n empty copy.
     expect(
-      screen.getByText(/No copy trades recorded yet\./i)
-    ).toBeInTheDocument();
+      screen.queryByText(t("common.dataTable.empty"))
+    ).not.toBeInTheDocument();
     expect(
-      screen.getByText(/trader-core executes a copy/i)
+      screen.getByText(t("tables.trades.emptyTitle"))
     ).toBeInTheDocument();
   });
 
   it("sorts by Size ascending then descending", async () => {
     render(<TradesTable data={rows} />);
-    const sizeHeader = screen.getByRole("button", { name: /Size/ });
+    const sizeHeader = screen.getByRole("button", {
+      name: new RegExp(t("tables.trades.col.size")),
+    });
 
     await userEvent.click(sizeHeader); // asc
     let sizes = bodyRows().map(
@@ -110,10 +114,14 @@ describe("TradesTable (client island)", () => {
   it("faceted Fill Status filter narrows to a single status", async () => {
     render(<TradesTable data={rows} />);
     await userEvent.click(
-      screen.getByRole("button", { name: /Fill Status/ })
+      screen.getByRole("button", {
+        name: new RegExp(t("tables.trades.filter.fillStatus")),
+      })
     );
     await userEvent.click(
-      await screen.findByRole("menuitemcheckbox", { name: "Pending" })
+      await screen.findByRole("menuitemcheckbox", {
+        name: t("tables.trades.filter.pending"),
+      })
     );
     expect(bodyRows()).toHaveLength(1);
     expect(screen.getByText("market-B")).toBeInTheDocument();
@@ -122,7 +130,7 @@ describe("TradesTable (client island)", () => {
   it("free-text filters by market id", async () => {
     render(<TradesTable data={rows} />);
     await userEvent.type(
-      screen.getByPlaceholderText("Filter by market…"),
+      screen.getByPlaceholderText(t("tables.trades.searchPlaceholder")),
       "market-C"
     );
     expect(bodyRows()).toHaveLength(1);

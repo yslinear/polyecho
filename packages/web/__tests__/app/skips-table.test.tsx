@@ -1,12 +1,16 @@
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
+import { t } from "@/lib/i18n";
 
 /**
  * SkipsTable (read-only) + skip-reason taxonomy badges.
  *
  * Asserts the table renders a row per copy_skip, maps reasons to the
- * frozen SkipReason taxonomy labels/variants, and shows a calm empty state
- * when there are no skips.
+ * frozen SkipReason taxonomy labels/variants, and shows a calm empty
+ * state when there are no skips. Locators are derived from the i18n
+ * dictionary (the SAME keys lib/skip-reasons + the island use), so the
+ * test asserts STRUCTURE/behaviour and stays correct if a translation
+ * string changes.
  */
 
 import { SkipsTable, type SkipRow } from "@/app/leaders/skips-table";
@@ -35,11 +39,27 @@ const rows: SkipRow[] = [
 ];
 
 describe("skip-reasons taxonomy", () => {
-  it("maps known reasons to human labels", () => {
-    expect(skipReasonLabel("daily_loss_cap")).toBe("Daily loss cap");
-    expect(skipReasonLabel("dup")).toBe("Duplicate");
-    expect(skipReasonLabel("data_unavailable")).toBe("Data unavailable");
-    expect(skipReasonLabel("live_locked")).toBe("Live locked");
+  it("maps known reasons to the localized taxonomy label", () => {
+    // The label is the i18n value for that reason's dict key — derived
+    // from the dictionary so a translation edit doesn't break the test,
+    // while still proving the taxonomy→i18n seam resolves a real string.
+    expect(skipReasonLabel("daily_loss_cap")).toBe(
+      t("tables.skipReasons.dailyLossCap")
+    );
+    expect(skipReasonLabel("dup")).toBe(t("tables.skipReasons.dup"));
+    expect(skipReasonLabel("data_unavailable")).toBe(
+      t("tables.skipReasons.dataUnavailable")
+    );
+    expect(skipReasonLabel("live_locked")).toBe(
+      t("tables.skipReasons.liveLocked")
+    );
+    // Each known reason resolves to a non-empty string that is NOT the
+    // raw enum value (i.e. the dict key actually exists).
+    for (const reason of ["daily_loss_cap", "dup", "live_locked"]) {
+      const label = skipReasonLabel(reason);
+      expect(label.length).toBeGreaterThan(0);
+      expect(label).not.toBe(reason);
+    }
   });
 
   it("falls back to the raw value for an unknown reason", () => {
@@ -59,8 +79,12 @@ describe("skip-reasons taxonomy", () => {
 describe("SkipsTable", () => {
   it("renders one row per skip with taxonomy reason badges", () => {
     render(<SkipsTable rows={rows} limit={50} />);
-    expect(screen.getByText("Daily loss cap")).toBeInTheDocument();
-    expect(screen.getByText("Duplicate")).toBeInTheDocument();
+    expect(
+      screen.getByText(t("tables.skipReasons.dailyLossCap"))
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(t("tables.skipReasons.dup"))
+    ).toBeInTheDocument();
     expect(
       screen.getByText("daily loss limit reached")
     ).toBeInTheDocument();
@@ -68,18 +92,21 @@ describe("SkipsTable", () => {
     expect(screen.getByText("0xaaaa…aaaa")).toBeInTheDocument();
   });
 
-  it("uses 'Not set' for null leader/condition/detail (no em dash)", () => {
+  it("uses the not-set fallback for null leader/condition/detail (no em dash)", () => {
     render(<SkipsTable rows={rows} limit={50} />);
-    expect(screen.getAllByText("Not set").length).toBeGreaterThanOrEqual(2);
+    // row 2 has null leader, condition AND detail -> 3 cells fall back.
+    expect(
+      screen.getAllByText(t("tables.common.notSet")).length
+    ).toBeGreaterThanOrEqual(2);
   });
 
   it("shows a calm empty state when there are no skips", () => {
     render(<SkipsTable rows={[]} limit={50} />);
     expect(
-      screen.getByText(/No skips logged yet\./i)
+      screen.getByText(t("tables.leaders.skips.subtitleEmpty"))
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/reason from the taxonomy/i)
+      screen.getByText(t("tables.leaders.skips.emptyTitle"))
     ).toBeInTheDocument();
   });
 });

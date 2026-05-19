@@ -1,11 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
+import { t } from "@/lib/i18n";
 
 /**
  * /positions data-shaping: open my_trades rows render with FIFO
  * matched/remaining quantities, side badge, <Pnl/> money and a stable
  * opened-at. The Drizzle client is mocked with a chainable builder that
  * resolves the terminal await to a controlled row array (no DB/network).
+ *
+ * Prose locators are derived from the i18n dictionary (the SAME keys the
+ * page uses); numeric/date cells are language-neutral data.
  */
 
 let rows: unknown[] = [];
@@ -50,7 +54,9 @@ describe("/positions data-shaping", () => {
     ];
     render(await PositionsPage());
 
-    expect(screen.getByText("1 open position.")).toBeInTheDocument();
+    expect(
+      screen.getByText(t("tables.positions.subtitleCount", { count: 1 }))
+    ).toBeInTheDocument();
     const row = screen.getByText("mkt-abc").closest("tr")!;
     const cells = within(row).getAllByRole("cell");
     // Market, Leader, Side, Size, Entry, Matched, Remaining, Fill, PnL, Opened
@@ -69,10 +75,10 @@ describe("/positions data-shaping", () => {
     rows = [];
     render(await PositionsPage());
     expect(
-      screen.getByText(/No open positions\./i)
+      screen.getByText(t("tables.positions.subtitleEmpty"))
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/trader-core opens a copy/i)
+      screen.getByText(t("tables.positions.emptyTitle"))
     ).toBeInTheDocument();
   });
 });
