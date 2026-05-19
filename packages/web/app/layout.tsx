@@ -5,7 +5,7 @@
  * responsibility, out of project scope. Do NOT add auth middleware.
  */
 
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import { eq } from "drizzle-orm";
@@ -30,6 +30,18 @@ export const metadata: Metadata = {
   description: "Personal Polymarket copy-trading monitor",
   // PWA manifest is served by app/manifest.ts; Next injects the
   // <link rel="manifest"> automatically — do NOT hard-code it here.
+};
+
+/**
+ * The manifest declares `display: standalone`, so the operator runs this
+ * as a home-screen PWA on their phone. `viewportFit: "cover"` lets the
+ * shell use `env(safe-area-inset-*)` so the header/trigger clear the
+ * notch/Dynamic Island and the mobile drawer clears the home indicator.
+ */
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 /**
@@ -77,9 +89,9 @@ export default async function RootLayout({
           <AppSidebar />
           <SidebarInset>
             {/* Top header bar — calm, instrument chrome. */}
-            <header className="flex h-12 shrink-0 items-center gap-3 border-b bg-background/95 px-4 supports-[backdrop-filter]:bg-background/80">
+            <header className="flex min-h-12 shrink-0 items-center gap-3 border-b bg-background/95 px-4 pt-[env(safe-area-inset-top)] supports-[backdrop-filter]:bg-background/80">
               <SidebarTrigger
-                className="-ml-1 focus-visible:ring-2 focus-visible:ring-ring"
+                className="-ml-1 size-9 md:size-7 focus-visible:ring-2 focus-visible:ring-ring"
                 aria-label="Toggle navigation sidebar"
               />
               <div className="flex-1" />

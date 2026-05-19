@@ -32,6 +32,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
+  useSidebar,
 } from "@/components/ui/sidebar";
 import { t } from "@/lib/i18n";
 import { isNavItemActive } from "@/lib/utils";
@@ -55,6 +56,10 @@ const navItems = [
 
 export function AppSidebar() {
   const pathname = usePathname();
+  // Close the mobile off-canvas drawer on navigation — without this the
+  // full-screen Sheet + scrim stay open over the new page on every tap
+  // (the dominant cause of the poor phone UX).  No-op on desktop.
+  const { setOpenMobile } = useSidebar();
 
   return (
     <Sidebar collapsible="icon">
@@ -89,6 +94,7 @@ export function AppSidebar() {
                       <Link
                         href={href}
                         aria-current={isActive ? "page" : undefined}
+                        onClick={() => setOpenMobile(false)}
                       >
                         <Icon aria-hidden="true" />
                         <span>{label}</span>
