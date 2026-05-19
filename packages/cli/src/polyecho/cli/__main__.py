@@ -25,6 +25,7 @@ from polyecho.cli.discovery import app as discovery_app
 from polyecho.cli.doctor import doctor
 from polyecho.cli.logs import app as logs_app
 from polyecho.cli.push import app as push_app
+from polyecho.cli.settings import app as settings_app
 from polyecho.cli.trader import app as trader_app
 
 app = typer.Typer(
@@ -54,6 +55,11 @@ app.add_typer(
     alerts_app,
     name="alerts",
     help="View recent push events (the events log).",
+)
+app.add_typer(
+    settings_app,
+    name="settings",
+    help="Runtime settings (DB-backed; mirrors web /settings).",
 )
 
 # Top-level commands
