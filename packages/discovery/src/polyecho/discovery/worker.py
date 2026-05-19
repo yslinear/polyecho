@@ -35,10 +35,12 @@ If ``insider_suspect`` appears in risk flags the record is saved with
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from datetime import date as date_type
 from pathlib import Path
@@ -171,9 +173,110 @@ _LARGE_POSITION_SEED_LEADERBOARD_LIMIT = 50
 _LARGE_POSITION_DATA_API_OFFSET_CAP = 10_000
 
 
+# --- Phase-3 performance / anti-duplication tuning ------------------------
+#
+# L1 — bounded concurrency.  The per-wallet pipeline issues several
+# independent network reads; running every wallet strictly sequentially
+# made a full leaderboard sweep O(N) round-trips wall-clock.  We fan the
+# wallet loop out with ``asyncio.gather`` but cap the in-flight count at
+# ``_DISCOVERY_CONCURRENCY`` via a single module-level semaphore so we
+# never open an unbounded number of sockets against the Polymarket
+# data-api (politeness + memory bound).  8 is a deliberately conservative
+# default (the live source already paginates internally per call).
+_DISCOVERY_CONCURRENCY = 8
+
+# L2 — daily full-scoring staleness gate.  A wallet whose ``last_active_at``
+# is unchanged AND whose ``last_seen_ts`` cursor is newer than
+# ``now - _DISCOVERY_STALENESS_DAYS`` is skipped by the *daily* full-score
+# path (its rolling 7/30/90d stats cannot have moved).  This is a GATE,
+# not a windowed fetch — the daily path still needs the full window when
+# it does run (rolling stats), so we never shrink that fetch.
+_DISCOVERY_STALENESS_DAYS = 1
+
+# L3 — tiered detail budget.  Phase 1 of the daily sweep upserts a THIN
+# row for every leaderboard entry (no per-wallet network call).  The
+# expensive full ``_process_wallet`` then runs only for the wallets that
+# are new / crossed a rank·pnl delta / are staler than
+# ``_DISCOVERY_STALE_DETAIL_DAYS`` — capped at ``_DISCOVERY_DETAIL_BUDGET``
+# per daily sweep so a single sweep can never blow the §7.1 time budget.
+_DISCOVERY_DETAIL_BUDGET = 50
+
+# A thin row is promoted to a full re-score when its leaderboard rank
+# improved by ≥ this many places OR its leaderboard pnl moved by ≥ this
+# fraction since the last full score (a materially changed trader is
+# worth the expensive recompute even if not yet stale).
+_DISCOVERY_RANK_DELTA = 5
+_DISCOVERY_PNL_DELTA_FRAC = 0.20
+
+# A thin row with no other trigger is still force-promoted to a full
+# re-score once it is this many days stale (so a quiet but still-tracked
+# wallet is eventually refreshed even if it never moves on the board).
+_DISCOVERY_STALE_DETAIL_DAYS = 7
+
+# ``last_seen_ts`` means "every trade up to AND INCLUDING this ts has
+# already been processed".  The frozen datasource ``start=`` filter is
+# INCLUSIVE (``timestamp >= start``), so to make the windowed re-scan
+# pick up only the *un-seen* tail we advance the lower bound by one
+# microsecond past the cursor — otherwise the boundary trade (ts ==
+# cursor) is re-fetched and the wallet is re-surfaced every hour
+# (the exact duplication this layer removes).  1 µs is below Polymarket
+# ts resolution so it can never skip a genuinely newer trade.
+_CURSOR_EXCLUSIVE_EPSILON = timedelta(microseconds=1)
+
+
+# L1 concurrency gate.  An ``asyncio.Semaphore`` binds to the event loop
+# that is running when it is FIRST awaited; creating one at import time
+# would bind it to whatever loop existed then and raise
+# "bound to a different event loop" the moment discovery runs under a
+# different loop (e.g. a fresh per-test loop, or a service that builds
+# its own loop after import).  So the semaphore is created lazily and
+# cached PER RUNNING LOOP — global within a loop (the cap is
+# process-global for a given event loop) yet loop-safe.
+_loop_sems: dict[Any, asyncio.Semaphore] = {}
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """Return the ``_DISCOVERY_CONCURRENCY`` semaphore for the *current*
+    running loop, creating (and caching) it on first use in that loop."""
+    loop = asyncio.get_running_loop()
+    # Prune semaphores whose loop has been closed (e.g. finished test
+    # loops) so this cache never grows unbounded across many loops.
+    for stale in [lp for lp in _loop_sems if lp.is_closed()]:
+        del _loop_sems[stale]
+    sem = _loop_sems.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(_DISCOVERY_CONCURRENCY)
+        _loop_sems[loop] = sem
+    return sem
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+async def _bounded_gather(
+    keys: list[str],
+    coro_factory: Callable[[str], Awaitable[None]],
+) -> None:
+    """Run ``coro_factory(key)`` for every key, ≤ N concurrently.
+
+    L1 determinism contract: this is used ONLY for the independent
+    per-wallet *side-effecting* pipeline (each call upserts its own
+    wallet's rows under its own ``SELECT … FOR UPDATE`` txn — there is no
+    shared in-memory accumulator), so concurrent completion order does
+    not affect persisted state.  Callers that build an in-memory result
+    set MUST still feed the DB in a stable (sorted) order — every such
+    call site sorts ``keys`` before handing them here.
+    """
+
+    sem = _get_semaphore()
+
+    async def _guarded(key: str) -> None:
+        async with sem:
+            await coro_factory(key)
+
+    await asyncio.gather(*(_guarded(k) for k in keys))
 
 
 def _window_activity(
@@ -339,14 +442,32 @@ async def _upsert_candidate(
     f_score: float,
     risk_flags: list[str],
     last_active_at: datetime | None,
-) -> bool:
+    last_seen_ts: datetime | None = None,
+) -> tuple[bool, datetime | None]:
     """Upsert a CandidateLeader row and append a CandidateScoreHistory row.
 
+    Args:
+        last_seen_ts: Phase-3 (L2) discovery cursor high-water mark to
+            persist for this wallet.  Folded into the SAME locked txn as
+            the upsert; the column is advanced *monotonically*
+            (``max(new, prior)``) so a windowed re-scan can never move
+            the cursor backwards.  ``None`` leaves the stored cursor
+            unchanged (callers that do not own the cursor — e.g. the
+            leaderboard/hot-market daily paths — pass ``None``).
+
     Returns:
-        ``True`` iff a ``CANDIDATE_HIGH_SCORE`` event was emitted for this
-        wallet on this call (an upward threshold crossing).  Used only to
-        feed the per-pass ``emitted`` heartbeat counter (task 2); it does
-        not affect persistence or scoring.
+        ``(emitted_high_score, prior_last_seen_ts)``.
+
+        ``emitted_high_score`` is ``True`` iff a ``CANDIDATE_HIGH_SCORE``
+        event was emitted for this wallet on this call (an upward
+        threshold crossing).  Used only to feed the per-pass ``emitted``
+        heartbeat counter (task 2); it does not affect persistence or
+        scoring.
+
+        ``prior_last_seen_ts`` is the value of ``CandidateLeader.
+        last_seen_ts`` that was read (under the FOR UPDATE lock) BEFORE
+        this call advanced it — folded out of the existing locked SELECT
+        so the hourly windowed scan never needs a second query (L2).
 
     Uses raw INSERT … ON CONFLICT for PostgreSQL; falls back to SELECT + add
     for SQLite (tests with in-memory DB).
@@ -409,6 +530,23 @@ async def _upsert_candidate(
             prev_score is None or prev_score < HIGH_SCORE_THRESHOLD
         )
 
+        # L2: read the EXISTING discovery cursor out of the SAME locked
+        # SELECT (no extra query) and advance it monotonically.  A
+        # windowed re-scan must never regress the high-water mark, so the
+        # persisted value is max(new seen ts, prior cursor).  When the
+        # caller passes ``last_seen_ts=None`` (it does not own the cursor)
+        # the stored value is left exactly as-is.
+        prior_last_seen_ts: datetime | None = (
+            existing.last_seen_ts if existing is not None else None
+        )
+        new_last_seen_ts: datetime | None = prior_last_seen_ts
+        if last_seen_ts is not None:
+            new_last_seen_ts = (
+                last_seen_ts
+                if prior_last_seen_ts is None
+                else max(prior_last_seen_ts, last_seen_ts)
+            )
+
         if existing is None:
             leader = CandidateLeader(
                 wallet_address=wallet,
@@ -416,6 +554,7 @@ async def _upsert_candidate(
                 sources=[source],
                 first_discovered_at=datetime.now(tz=UTC),
                 last_active_at=last_active_at,
+                last_seen_ts=new_last_seen_ts,
                 stats_7d=stats_7d,
                 stats_30d=stats_30d,
                 stats_90d=stats_90d,
@@ -434,6 +573,11 @@ async def _upsert_candidate(
             existing.sources = merged_sources
             # first_discovered_at: keep original
             existing.last_active_at = last_active_at or existing.last_active_at
+            # L2: monotonic cursor advance (never regress on a windowed
+            # re-scan).  ``new_last_seen_ts`` already folds in the prior
+            # value, so an unconditional assign is safe and is a no-op
+            # when the caller passed ``last_seen_ts=None``.
+            existing.last_seen_ts = new_last_seen_ts
             existing.display_name = display_name or existing.display_name
             existing.stats_7d = stats_7d
             existing.stats_30d = stats_30d
@@ -532,8 +676,10 @@ async def _upsert_candidate(
     )
 
     # Tell the caller whether a high-score event fired (for the per-pass
-    # ``emitted`` heartbeat counter only — no behavioural effect).
-    return should_emit_high_score
+    # ``emitted`` heartbeat counter only — no behavioural effect) and the
+    # PRIOR cursor value read under the lock (L2 — lets the hourly scan
+    # advance its window without a second query).
+    return should_emit_high_score, prior_last_seen_ts
 
 
 async def _insert_drift_event(wallet: str, strategy_30d: str, strategy_7d: str) -> None:
@@ -554,6 +700,236 @@ async def _insert_drift_event(wallet: str, strategy_30d: str, strategy_7d: str) 
         "strategy_drift detected",
         extra={"wallet": wallet, "strategy_30d": strategy_30d, "strategy_7d": strategy_7d},
     )
+
+
+async def _upsert_thin(
+    wallet: str,
+    source: str,
+    *,
+    display_name: str | None,
+    rank: int | None,
+    leaderboard_pnl: float | None,
+    leaderboard_volume: float | None,
+) -> tuple[datetime | None, datetime | None, float | None, dict[str, Any]]:
+    """L3 Phase-1 THIN upsert — identity + leaderboard signal only.
+
+    The daily sweep can afford to touch EVERY leaderboard entry because
+    this path makes NO per-wallet network call: it persists only what
+    ``get_leaderboard`` already returned (rank + pnl + volume) plus the
+    discovery ``source``.  It deliberately does NOT write the rolling
+    ``stats_*`` / ``frequency_stats`` / scores — those need the expensive
+    ``_process_wallet`` fetch, which Phase 2 runs for the budgeted subset
+    only.
+
+    The leaderboard pnl/vol snapshot is stored under
+    ``stats_leaderboard`` inside ``backtest_default`` (a free-form JSONB
+    column already in the schema — NO schema change for the thin signal);
+    a brand-new wallet gets a row so Phase-2 selection / the dashboard
+    can see it immediately even before its first full score.
+
+    Returns the PRIOR ``(last_active_at, last_seen_ts, total_score,
+    prior_thin_signal)`` read under a ``SELECT … FOR UPDATE`` lock (one
+    query) so the caller can decide — without any extra round-trip —
+    whether this wallet is new / materially moved / stale enough to
+    spend a Phase-2 detail slot.  ``prior_thin_signal`` is the
+    previously-stored ``{rank, leaderboard_pnl, leaderboard_volume}``
+    (``{}`` for a brand-new wallet) — the delta baseline.
+    """
+    async with session_scope() as session:
+        result = await session.execute(
+            select(CandidateLeader)
+            .where(CandidateLeader.wallet_address == wallet)
+            .with_for_update()
+        )
+        existing: CandidateLeader | None = result.scalar_one_or_none()
+
+        prior_last_active_at = existing.last_active_at if existing else None
+        prior_last_seen_ts = existing.last_seen_ts if existing else None
+        prior_total_score = (
+            float(existing.total_score)
+            if existing is not None and existing.total_score is not None
+            else None
+        )
+        prior_thin_signal: dict[str, Any] = {}
+        if existing is not None and existing.backtest_default:
+            raw_prior = existing.backtest_default.get("stats_leaderboard")
+            if isinstance(raw_prior, dict):
+                prior_thin_signal = dict(raw_prior)
+
+        thin_signal = {
+            "rank": rank,
+            "leaderboard_pnl": leaderboard_pnl,
+            "leaderboard_volume": leaderboard_volume,
+        }
+        if existing is None:
+            leader = CandidateLeader(
+                wallet_address=wallet,
+                display_name=display_name,
+                sources=[source],
+                first_discovered_at=datetime.now(tz=UTC),
+                backtest_default={"stats_leaderboard": thin_signal},
+                user_status="new",
+            )
+            session.add(leader)
+        else:
+            existing.sources = sorted(set(existing.sources or []) | {source})
+            existing.display_name = display_name or existing.display_name
+            merged = dict(existing.backtest_default or {})
+            merged["stats_leaderboard"] = thin_signal
+            existing.backtest_default = merged
+
+    return (
+        prior_last_active_at,
+        prior_last_seen_ts,
+        prior_total_score,
+        prior_thin_signal,
+    )
+
+
+async def _read_cursors(wallets: set[str]) -> dict[str, datetime | None]:
+    """Batch-read ``last_seen_ts`` for *wallets* in ONE query (L2).
+
+    The hourly large-new-position scan needs each wallet's prior cursor
+    to push ``start=last_seen_ts`` down into the detection
+    ``get_user_activity`` call.  Reading them one-by-one would re-add the
+    per-wallet round-trip the redesign removes, so this issues a single
+    ``SELECT wallet_address, last_seen_ts WHERE wallet_address IN (...)``.
+    Wallets with no row (or a NULL cursor) map to ``None`` → the caller
+    falls back to the 24 h trailing window for them (first-seen
+    behaviour, unchanged).
+    """
+    if not wallets:
+        return {}
+    cursors: dict[str, datetime | None] = {}
+    # Best-effort: a cursor-read hiccup must NEVER break the hourly scan.
+    # On any failure we return ``{}`` → every wallet falls back to the
+    # 24 h trailing window (exactly the pre-Phase-3 behaviour), so the
+    # optimisation degrades safely instead of failing the pass.  This
+    # mirrors the worker-wide best-effort discipline
+    # (``_safe_emit_high_score`` / ``_log_cycle_duration``).
+    try:
+        async with session_scope() as session:
+            result = await session.execute(
+                select(
+                    CandidateLeader.wallet_address,
+                    CandidateLeader.last_seen_ts,
+                ).where(CandidateLeader.wallet_address.in_(sorted(wallets)))
+            )
+            for wallet_address, last_seen_ts in result.all():
+                cursors[wallet_address] = last_seen_ts
+    except Exception as exc:  # noqa: BLE001 - cursor read is best-effort
+        logger.warning(
+            "discovery_cursor_read_failed_falling_back_to_window",
+            extra={"error": str(exc), "pool_size": len(wallets)},
+        )
+        return {}
+    return cursors
+
+
+def _daily_staleness_skip(
+    *,
+    prior_last_seen_ts: datetime | None,
+    prior_total_score: float | None,
+    prior_leaderboard_pnl: float | None,
+    new_leaderboard_pnl: float | None,
+    now: datetime,
+) -> bool:
+    """L2 daily full-scoring STALENESS GATE (pure — deterministic).
+
+    The daily path's rolling 7/30/90d stats can only change if the
+    wallet realised new P&L since the last full score.  We must decide
+    this WITHOUT a per-wallet fetch (that fetch is the cost the redesign
+    removes), so the cheap, already-available proxy for "``last_active_at``
+    unchanged" is the leaderboard ``pnl`` from ``get_leaderboard`` (Phase
+    1 stored it as the thin signal — a wallet whose leaderboard pnl is
+    bit-identical this sweep has realised no new closed P&L).
+
+    Skip the expensive full re-score when BOTH hold:
+
+    * leaderboard ``pnl`` is **unchanged** vs the prior stored thin
+      signal (proxy: no new realised activity since the last full
+      score), AND
+    * ``last_seen_ts`` is **within the daily cadence** (newer than
+      ``now - _DISCOVERY_STALENESS_DAYS`` — scanned recently enough).
+
+    This is a GATE, not a windowed fetch: when it does NOT skip, the
+    caller still does the FULL-window score (rolling stats need the whole
+    window — never shrunk).  A wallet never fully scored
+    (no ``prior_total_score``) is NEVER gated here — it must get a first
+    real score (that decision belongs to ``_needs_full_detail``'s NEW
+    branch).
+    """
+    if prior_total_score is None:
+        return False  # never scored → never gate (let NEW logic decide)
+    if prior_leaderboard_pnl is None or new_leaderboard_pnl is None:
+        return False  # can't prove "unchanged" → don't gate (safe default)
+    if new_leaderboard_pnl != prior_leaderboard_pnl:
+        return False  # realised new P&L → stats moved → must re-score
+    if prior_last_seen_ts is None:
+        return False  # no cursor → not provably within cadence → re-score
+    # leaderboard pnl unchanged AND cursor within the daily cadence → the
+    # rolling stats cannot have moved; safe to skip this sweep.
+    return prior_last_seen_ts >= now - timedelta(days=_DISCOVERY_STALENESS_DAYS)
+
+
+def _needs_full_detail(
+    *,
+    prior_last_active_at: datetime | None,
+    prior_last_seen_ts: datetime | None,
+    prior_total_score: float | None,
+    prior_thin_signal: dict[str, Any],
+    rank: int | None,
+    leaderboard_pnl: float | None,
+    now: datetime,
+) -> bool:
+    """L3 Phase-2 selection predicate (pure — deterministic, no I/O).
+
+    Promote a thin row to the expensive full ``_process_wallet`` when it
+    is *new*, has *materially moved* on the board, or is *stale*:
+
+    * NEW                — never fully scored yet (no prior total_score
+      AND no prior cursor): always worth a first real score.
+    * MATERIALLY MOVED   — leaderboard rank improved (numerically
+      decreased) by ≥ ``_DISCOVERY_RANK_DELTA`` OR leaderboard pnl moved
+      by ≥ ``_DISCOVERY_PNL_DELTA_FRAC`` (relative) vs the prior stored
+      thin signal.
+    * STALE              — ``last_seen_ts`` (or, lacking it,
+      ``last_active_at``) is older than ``_DISCOVERY_STALE_DETAIL_DAYS``.
+
+    Everything else is left as the cheap thin row this sweep.  Every
+    branch is pure on its inputs → two identical sweeps select the
+    identical subset (determinism).
+    """
+    if prior_total_score is None and prior_last_seen_ts is None:
+        return True  # never fully scored — first real score is mandatory
+
+    stale_ref = prior_last_seen_ts or prior_last_active_at
+    if stale_ref is None:
+        return True
+    if stale_ref < now - timedelta(days=_DISCOVERY_STALE_DETAIL_DAYS):
+        return True
+
+    # Materially-moved checks vs the prior stored thin signal.  Missing
+    # data ⇒ no trigger (never spuriously spend the budget).
+    prev_rank = prior_thin_signal.get("rank")
+    if (
+        rank is not None
+        and isinstance(prev_rank, int)
+        and prev_rank - rank >= _DISCOVERY_RANK_DELTA
+    ):
+        return True  # climbed ≥ N places up the board
+
+    prev_pnl = prior_thin_signal.get("leaderboard_pnl")
+    if (
+        leaderboard_pnl is not None
+        and isinstance(prev_pnl, (int, float))
+        and abs(prev_pnl) > 0.0
+        and abs(leaderboard_pnl - prev_pnl) / abs(prev_pnl)
+        >= _DISCOVERY_PNL_DELTA_FRAC
+    ):
+        return True  # pnl swung materially either way
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -627,18 +1003,37 @@ class DiscoveryWorker:
         source: str,
         *,
         display_name: str | None = None,
-    ) -> None:
+        start: datetime | None = None,
+    ) -> datetime | None:
         """Full pipeline for a single wallet: fetch → compute → persist.
+
+        Args:
+            start: L2 windowed-cursor lower bound.  ONLY the hourly
+                large-new-position scan passes this (``start=last_seen_ts``)
+                — that path is pure ">$threshold trade since cursor?"
+                detection, so a windowed TRADE fetch is correct and
+                drastically cuts the re-scan duplication.  The daily
+                full-scoring path passes ``start=None`` (rolling 7/30/90d
+                stats need the full window — it must NOT be shrunk; its
+                cheapness comes from the L2 staleness GATE in the caller,
+                not from a smaller fetch).
+
+        Returns:
+            The PRIOR ``CandidateLeader.last_seen_ts`` for this wallet
+            (read under the upsert's FOR UPDATE lock, no extra query).
+            ``None`` when the wallet is brand-new or the fetch failed.
 
         Steps
         -----
-        1. Fetch 90-day activity + open positions via datasource.
+        1. Fetch activity (TRADE + REDEEM) + open positions via
+           datasource — the 3 independent reads run as ONE
+           ``asyncio.gather`` (L1).
         2. Slice into 7d / 30d / 90d windows.
         3. Compute stats + frequency stats for each window.
         4. Classify strategy (30d) and detect drift (30d vs 7d).
         5. Detect risk flags.
         6. Score (profit + replicability → final).
-        7. Upsert DB rows.
+        7. Upsert DB rows (advancing the L2 ``last_seen_ts`` cursor).
         8. Insert ``strategy_drift`` Event if flagged.
         """
         logger.debug("processing wallet", extra={"wallet": wallet, "source": source})
@@ -650,19 +1045,34 @@ class DiscoveryWorker:
         self._pass_counters["scanned"] += 1
 
         try:
-            activity_90d = await self._ds.get_user_activity(
-                wallet, activity_type="TRADE", limit=None
+            # L1: the 3 independent reads have no data dependency on each
+            # other — issue them concurrently (one gather) instead of
+            # three serial awaits.  ``return_exceptions=False`` so any
+            # failure still funnels into the existing except-block
+            # (unchanged failure semantics: scanned-not-scored, early
+            # return).
+            activity_90d, redeems_90d, positions = await asyncio.gather(
+                self._ds.get_user_activity(
+                    wallet, start=start, activity_type="TRADE", limit=None
+                ),
+                self._ds.get_user_activity(
+                    wallet, start=start, activity_type="REDEEM", limit=None
+                ),
+                self._ds.get_positions(wallet, size_threshold=0.0),
             )
-            # Also fetch REDEEMs for hold-to-resolution analysis
-            redeems_90d = await self._ds.get_user_activity(
-                wallet, activity_type="REDEEM", limit=None
+            # Determinism (L1): the live/fixture sources return
+            # TIMESTAMP-DESC; downstream windowing/scoring is
+            # order-independent, but re-sort into a single stable
+            # (timestamp, then activity_type) order BEFORE any
+            # stats/persistence so two fixture runs are byte-identical
+            # regardless of gather completion order.
+            all_activity: list[ActivityRecord] = sorted(
+                list(activity_90d) + list(redeems_90d),
+                key=lambda r: (r.timestamp, r.activity_type),
             )
-            all_activity: list[ActivityRecord] = list(activity_90d) + list(redeems_90d)
-
-            positions = await self._ds.get_positions(wallet, size_threshold=0.0)
         except Exception:
             logger.exception("failed to fetch data for wallet", extra={"wallet": wallet})
-            return
+            return None
 
         self._known_wallets.add(wallet)
 
@@ -706,13 +1116,19 @@ class DiscoveryWorker:
         )
         f_score = final_score(p_score, r_score)
 
-        # last_active_at: most recent trade timestamp in 90d window
+        # last_active_at: most recent trade timestamp in 90d window.
+        # This same value is the L2 ``last_seen_ts`` cursor high-water
+        # mark — the latest TRADE ts we have now processed for this
+        # wallet.  Persisting it (monotonically, inside _upsert_candidate)
+        # lets the hourly windowed scan pass ``start=last_seen_ts`` next
+        # cycle and skip everything already seen (anti-duplication).
         trades_only = [r for r in all_activity if r.activity_type == "TRADE"]
         last_active_at: datetime | None = None
         if trades_only:
             last_active_at = max(r.timestamp for r in trades_only)
+        latest_seen_ts = last_active_at
 
-        emitted_high_score = await _upsert_candidate(
+        emitted_high_score, prior_last_seen_ts = await _upsert_candidate(
             wallet,
             source,
             display_name=display_name,
@@ -726,6 +1142,7 @@ class DiscoveryWorker:
             f_score=f_score,
             risk_flags=risk_flags,
             last_active_at=last_active_at,
+            last_seen_ts=latest_seen_ts,
         )
 
         # The wallet completed the full compute + upsert → "scored".
@@ -737,6 +1154,10 @@ class DiscoveryWorker:
         if "strategy_drift" in risk_flags:
             await _insert_drift_event(wallet, strategy_type.value, strategy_7d.value)
 
+        # L2: the PRIOR cursor (read under the upsert lock — no extra
+        # query) lets the hourly caller advance its window deterministically.
+        return prior_last_seen_ts
+
     # ------------------------------------------------------------------
     # Source 1: Polymarket Leaderboard (daily)
     # ------------------------------------------------------------------
@@ -744,8 +1165,22 @@ class DiscoveryWorker:
     async def discover_leaderboard(self) -> None:
         """Fetch top-200 traders from the Polymarket leaderboard (PRD §5.2).
 
-        Uses ``get_leaderboard(time_period="MONTH", order_by="PNL", limit=200)``.
-        Processes each wallet through the full pipeline.
+        L3 tiered budget
+        -----------------
+        * Phase 1 (cheap, every sweep): ``get_leaderboard`` returns
+          rank/pnl/volume with NO per-wallet call — upsert a THIN
+          ``CandidateLeader`` (identity + rank + leaderboard pnl/vol +
+          ``leaderboard`` source) for EVERY entry.
+        * Phase 2 (expensive, budgeted): run the full ``_process_wallet``
+          ONLY for the wallets that are new / materially moved / stale
+          (``_needs_full_detail``), capped at ``_DISCOVERY_DETAIL_BUDGET``
+          per sweep.  ``last_seen_ts`` / ``last_active_at`` (read out of
+          the thin upsert's locked SELECT — no extra query) drive
+          selection.
+
+        Determinism: entries are processed in a stable sorted order and
+        the Phase-2 subset is selected by a pure predicate, so two
+        fixture sweeps persist byte-identically.
         """
         logger.info("discover_leaderboard: start")
         entries = await self._ds.get_leaderboard(
@@ -756,12 +1191,80 @@ class DiscoveryWorker:
         )
         logger.info("discover_leaderboard: fetched %d entries", len(entries))
 
-        for entry in entries:
-            await self._process_wallet(
+        now = datetime.now(tz=UTC)
+        # Stable order: by wallet address (the same discipline the rest
+        # of the worker uses — ``sorted(new_wallets)``) so Phase-1 writes
+        # and Phase-2 selection are reproducible under FixtureDataSource.
+        ordered = sorted(entries, key=lambda e: e.wallet)
+
+        # ── Phase 1 — thin upsert for every entry (no network/wallet call).
+        detail_candidates: list[Any] = []
+        for entry in ordered:
+            (
+                prior_la,
+                prior_ls,
+                prior_score,
+                prior_signal,
+            ) = await _upsert_thin(
                 entry.wallet,
                 "leaderboard",
                 display_name=entry.username,
+                rank=entry.rank,
+                leaderboard_pnl=entry.pnl,
+                leaderboard_volume=entry.volume,
             )
+            # L2 daily staleness GATE first: if the leaderboard pnl is
+            # unchanged (proxy for "no new activity") AND the cursor is
+            # within the daily cadence, the rolling stats cannot have
+            # moved — skip the expensive full score this sweep regardless
+            # of the richer L3 predicate.  (NEW wallets are never gated:
+            # _daily_staleness_skip returns False when prior_total_score
+            # is None, so they still flow into _needs_full_detail.)
+            if _daily_staleness_skip(
+                prior_last_seen_ts=prior_ls,
+                prior_total_score=prior_score,
+                prior_leaderboard_pnl=prior_signal.get("leaderboard_pnl"),
+                new_leaderboard_pnl=entry.pnl,
+                now=now,
+            ):
+                continue
+            if _needs_full_detail(
+                prior_last_active_at=prior_la,
+                prior_last_seen_ts=prior_ls,
+                prior_total_score=prior_score,
+                prior_thin_signal=prior_signal,
+                rank=entry.rank,
+                leaderboard_pnl=entry.pnl,
+                now=now,
+            ):
+                detail_candidates.append(entry)
+
+        # ── Phase 2 — budgeted full score for the selected subset only.
+        # ``detail_candidates`` is already in stable wallet order (built
+        # from ``ordered``); the budget slice is therefore deterministic.
+        budgeted = detail_candidates[:_DISCOVERY_DETAIL_BUDGET]
+        logger.info(
+            "discover_leaderboard: %d/%d entries selected for full detail "
+            "(budget %d)",
+            len(budgeted),
+            len(ordered),
+            _DISCOVERY_DETAIL_BUDGET,
+        )
+
+        by_wallet = {e.wallet: e for e in budgeted}
+
+        async def _full(wallet: str) -> None:
+            await self._process_wallet(
+                wallet,
+                "leaderboard",
+                display_name=by_wallet[wallet].username,
+            )
+
+        # L1: bounded-concurrency fan-out.  Keys are sorted so the (DB-
+        # side-effecting, independent-per-wallet) work is dispatched in a
+        # stable order; per-wallet upserts are individually transactional
+        # so completion order does not affect persisted state.
+        await _bounded_gather(sorted(by_wallet), _full)
 
         logger.info("discover_leaderboard: done")
 
@@ -794,10 +1297,20 @@ class DiscoveryWorker:
                 continue
 
             for pos in holders:
-                if pos.wallet in seen:
-                    continue
                 seen.add(pos.wallet)
-                await self._process_wallet(pos.wallet, "hot_market_holders")
+
+        # L1: dedup → stable sorted order → bounded-concurrency fan-out.
+        # The per-market fetch loop stays sequential (it depends on the
+        # market list and dedups across markets); only the independent
+        # per-wallet pipeline is parallelised.  Sorting the keys preserves
+        # the deterministic processing order the prior code had (it
+        # processed in first-seen order; sorting is a *stronger*
+        # determinism guarantee and matches the worker-wide
+        # ``sorted(...)`` discipline so fixture runs are reproducible).
+        async def _full(wallet: str) -> None:
+            await self._process_wallet(wallet, "hot_market_holders")
+
+        await _bounded_gather(sorted(seen), _full)
 
         logger.info("discover_hot_market_holders: done")
 
@@ -836,8 +1349,27 @@ class DiscoveryWorker:
           (a) already-known candidates in ``self._known_wallets``, and
           (b) a leaderboard slice (cold-start seed when (a) is small).
 
-        Determinism: results are processed in sorted wallet order so the
-        run is reproducible under :class:`FixtureDataSource`.
+        L2 windowed cursor (anti-duplication)
+        -------------------------------------
+        This is the hourly 24 h re-scan — the biggest source of
+        duplicated work, and it is pure ">$threshold trade since cursor?"
+        detection (NOT rolling stats).  So for every wallet that already
+        has a persisted ``last_seen_ts`` we push ``start=last_seen_ts``
+        (when it is *newer* than the 24 h trailing window) down into
+        ``get_user_activity`` — the frozen datasource already supports
+        ``start=``; we only pass it.  A wallet whose newest trade ts is
+        ≤ its stored cursor therefore returns NO rows and is correctly
+        NOT re-surfaced.  Cursors are read in ONE batched query
+        (``_read_cursors``), never per-wallet.
+
+        L1 bounded concurrency
+        ----------------------
+        Both the detection scan and the full re-score of matched wallets
+        fan out via ``_bounded_gather`` (≤ ``_DISCOVERY_CONCURRENCY``).
+        Matches are collected into a set and the full-score pass iterates
+        ``sorted(new_wallets)`` so persistence order is deterministic
+        under :class:`FixtureDataSource` regardless of gather completion
+        order.
 
         TODO(verify): full coverage needs a Polygon CTF Exchange event-log
         scan — deferred to Phase 4 (shares the chain-listener infra).  This
@@ -863,16 +1395,33 @@ class DiscoveryWorker:
         window_start = datetime.now(tz=UTC) - timedelta(
             hours=_LARGE_POSITION_WINDOW_HOURS
         )
+        # L2: one batched cursor read for the whole pool (no per-wallet
+        # query).  Per wallet the effective lower bound is the LATER of
+        # the 24 h trailing window and its persisted cursor — so we never
+        # widen past 24 h, and a wallet already scanned up to a recent
+        # cursor re-fetches only the un-seen tail (often nothing).
+        cursors = await _read_cursors(wallet_pool)
         new_wallets: set[str] = set()
 
-        for wallet in wallet_pool:
+        async def _scan(wallet: str) -> None:
+            cursor = cursors.get(wallet)
+            effective_start = window_start
+            if cursor is not None:
+                # Cursor is INCLUSIVE-seen → scan strictly AFTER it
+                # (datasource ``start=`` is ``>=``).  Take the later of
+                # the 24 h window and (cursor + 1 µs) so we never widen
+                # past 24 h and never re-fetch the already-seen boundary
+                # trade.
+                cursor_exclusive = cursor + _CURSOR_EXCLUSIVE_EPSILON
+                if cursor_exclusive > effective_start:
+                    effective_start = cursor_exclusive
             try:
-                # limit=None → fetch the FULL 24 h window (datasource
+                # limit=None → fetch the FULL window (datasource
                 # paginates internally).  No arbitrary page cap can
                 # truncate the wallet's largest fill out of the scan.
                 activity = await self._ds.get_user_activity(
                     wallet,
-                    start=window_start,
+                    start=effective_start,
                     activity_type="TRADE",
                     limit=None,
                 )
@@ -881,7 +1430,7 @@ class DiscoveryWorker:
                     "large-position scan: activity fetch failed",
                     extra={"wallet": wallet},
                 )
-                continue
+                return
 
             # Truncation can now only happen at the data-api's hard
             # 10 000-row offset cap (pathological in a 24 h window).  If
@@ -899,16 +1448,29 @@ class DiscoveryWorker:
                 )
 
             if any(self._is_large_new_entry(rec) for rec in activity):
+                # Single-threaded asyncio event loop → set.add across
+                # gathered coroutines is safe (no true parallelism).
                 new_wallets.add(wallet)
+
+        # L1: bounded-concurrency detection scan.  Keys sorted only for a
+        # deterministic dispatch order; ``new_wallets`` is re-sorted below
+        # before any persistence so the result is order-independent.
+        await _bounded_gather(sorted(wallet_pool), _scan)
 
         logger.info(
             "discover_large_new_positions: %d wallets with large new positions",
             len(new_wallets),
         )
 
-        # Sorted for deterministic ordering under FixtureDataSource.
-        for wallet in sorted(new_wallets):
+        # Determinism: sort the matched set BEFORE the side-effecting
+        # full-score pass so persisted order is reproducible (L1).  Each
+        # ``_process_wallet`` advances the wallet's ``last_seen_ts``
+        # cursor in its own txn (L2) so the NEXT hourly run skips what
+        # this run just saw.
+        async def _full(wallet: str) -> None:
             await self._process_wallet(wallet, "large_new_positions")
+
+        await _bounded_gather(sorted(new_wallets), _full)
 
         logger.info("discover_large_new_positions: done")
 

@@ -2357,9 +2357,15 @@ class TestR10I4NinetyDayWindowing:
 
         captured: dict[str, Any] = {}
 
-        async def _fake_upsert(*a: Any, **kw: Any) -> None:
+        async def _fake_upsert(
+            *a: Any, **kw: Any
+        ) -> tuple[bool, datetime | None]:
             captured["stats_90d"] = kw["stats_90d"]
             captured["stats_30d"] = kw["stats_30d"]
+            # Phase-3: _upsert_candidate now returns
+            # (emitted_high_score, prior_last_seen_ts) which
+            # _process_wallet unpacks — match that contract.
+            return False, None
 
         now = datetime.now(tz=UTC)
         # 10 trades inside the last 90d + 40 trades 200 days ago (must be
