@@ -179,6 +179,10 @@ export function probeLabel(key: string): string {
       return t("status.probeLabel.polygonRpc");
     case "vpn_egress":
       return t("status.probeLabel.vpnEgress");
+    case "polymarket_ws_user":
+      return t("status.probeLabel.polymarketWsUser");
+    case "polymarket_ws_market":
+      return t("status.probeLabel.polymarketWsMarket");
     default:
       // Unknown future probe: humanise the snake_case key, never echo raw.
       return key

@@ -75,5 +75,7 @@ export const status = {
     polymarketDataApi: "Polymarket Data API",
     polygonRpc: "Polygon RPC",
     vpnEgress: "VPN 對外連線",
+    polymarketWsUser: "Polymarket WebSocket（User）",
+    polymarketWsMarket: "Polymarket WebSocket（Market）",
   },
 } as const;

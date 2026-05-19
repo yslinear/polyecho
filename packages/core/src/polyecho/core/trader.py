@@ -1406,11 +1406,16 @@ class TraderCore:
           caught and swallowed; only ``CancelledError`` propagates so a
           real shutdown still tears the task down promptly.
 
-        It calls **only** the FROZEN shared
+        It calls the FROZEN shared
         :func:`polyecho.shared.health.run_all_probes` /
-        :func:`~polyecho.shared.health.write_integration_status`; it
-        touches no engine state, no ``FifoLedger``, no order/redeem path,
-        and NEVER ``assert_live_allowed`` (it is read → write-status only).
+        :func:`~polyecho.shared.health.write_integration_status` and, on
+        top of the frozen snapshot, merges the NON-frozen bounded
+        fail-soft WS reachability probes (:mod:`polyecho.core.ws_probe`)
+        under the ``polymarket_ws_user`` / ``polymarket_ws_market`` keys
+        — the frozen health contract has no WS probe and the dashboard
+        renders ``integration.probes`` generically.  It still touches no
+        engine state, no ``FifoLedger``, no order/redeem path, and NEVER
+        ``assert_live_allowed`` (it is read → write-status only).
         """
         try:
             async with asyncio.timeout(INTEGRATION_PROBE_TIMEOUT_SECONDS):
@@ -1419,7 +1424,22 @@ class TraderCore:
                     write_integration_status,
                 )
 
+                from polyecho.core.ws_probe import (
+                    probe_polymarket_ws_market,
+                    probe_polymarket_ws_user,
+                )
+
                 snapshot = await run_all_probes()
+                # Merge the non-frozen WS reachability probes into the
+                # frozen snapshot before persisting.  Each is bounded +
+                # fail-soft (returns a ProbeResult, never raises), so the
+                # sweep's contract is unchanged.
+                snapshot["polymarket_ws_user"] = (
+                    await probe_polymarket_ws_user()
+                )
+                snapshot["polymarket_ws_market"] = (
+                    await probe_polymarket_ws_market()
+                )
                 await write_integration_status(snapshot)
             self.integration_probe_runs += 1
             logger.info(
