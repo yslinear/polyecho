@@ -355,7 +355,9 @@ export default async function LeaderDetailPage({ params }: PageProps) {
             </CardHeader>
             <CardContent className="space-y-4">
               <p className="rounded-md bg-muted px-3 py-2 font-mono text-xs text-muted-foreground">
-                total_score = profit_score &times; (replicability_score / 100)
+                {/* Formula over DB column names (proper nouns); not
+                    translatable copy. */}
+                {"total_score = profit_score × (replicability_score / 100)"}
               </p>
               <div className="grid grid-cols-1 gap-x-8 gap-y-4 text-xs sm:grid-cols-2">
                 <div>

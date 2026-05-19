@@ -4,7 +4,12 @@
  * Drizzle returns `numeric` columns as strings and `timestamp` columns as
  * `Date`. These helpers turn nullable DB values into stable, test-friendly
  * display strings — no locale surprises, no `any`.
+ *
+ * User-facing fallbacks ("not set" / "not recorded" / "unknown") render in
+ * tables and cards, so they go through the sync `t()` (Server+Client safe).
+ * The timezone / number logic below is locale-independent and unchanged.
  */
+import { t } from "@/lib/i18n";
 
 /** Parse a Drizzle numeric (string | number | null) into a finite number or null. */
 export function toNum(v: string | number | null | undefined): number | null {
@@ -51,16 +56,16 @@ export function pnlColor(v: string | number | null | undefined): string {
 
 /** Shorten a 0x address: 0x1234…abcd. Returns input unchanged if too short. */
 export function shortAddress(addr: string | null | undefined): string {
-  if (!addr) return "Not set";
+  if (!addr) return t("tables.common.notSet");
   if (addr.length <= 12) return addr;
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
 /** ISO-ish date string (YYYY-MM-DD HH:mm) from a Date | null, UTC, stable. */
 export function formatDateTime(v: Date | string | null | undefined): string {
-  if (!v) return "Not recorded";
+  if (!v) return t("tables.common.notRecorded");
   const d = v instanceof Date ? v : new Date(v);
-  if (Number.isNaN(d.getTime())) return "Not recorded";
+  if (Number.isNaN(d.getTime())) return t("tables.common.notRecorded");
   const pad = (x: number) => String(x).padStart(2, "0");
   return (
     `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}` +
@@ -70,9 +75,9 @@ export function formatDateTime(v: Date | string | null | undefined): string {
 
 /** Date-only (YYYY-MM-DD), UTC. */
 export function formatDate(v: Date | string | null | undefined): string {
-  if (!v) return "Not recorded";
+  if (!v) return t("tables.common.notRecorded");
   const d = v instanceof Date ? v : new Date(v);
-  if (Number.isNaN(d.getTime())) return "Not recorded";
+  if (Number.isNaN(d.getTime())) return t("tables.common.notRecorded");
   const pad = (x: number) => String(x).padStart(2, "0");
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(
     d.getUTCDate()
@@ -83,8 +88,10 @@ export function formatDate(v: Date | string | null | undefined): string {
  * Human label for accounts.signature_type.
  * 0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE, 3=POLY_1271 (PRD §6.1).
  */
-export function signatureTypeLabel(t: number | null | undefined): string {
-  switch (t) {
+export function signatureTypeLabel(
+  code: number | null | undefined
+): string {
+  switch (code) {
     case 0:
       return "EOA";
     case 1:
@@ -94,7 +101,7 @@ export function signatureTypeLabel(t: number | null | undefined): string {
     case 3:
       return "POLY_1271";
     default:
-      return "Unknown";
+      return t("common.unknown");
   }
 }
 
@@ -116,15 +123,16 @@ export function startOfTodayUtc(now: Date = new Date()): Date {
 /**
  * Compact zh-TW relative time, past only (e.g. "12 秒前", "3 分鐘前",
  * "2 小時前", "5 天前"). Used by the bot-heartbeat pill. Returns
- * "Not recorded" for unparseable input. No em dashes, no locale surprises.
+ * the not-recorded fallback for unparseable input. No em dashes, no
+ * locale surprises.
  */
 export function formatRelativeTime(
   v: Date | string | null | undefined,
   now: Date = new Date()
 ): string {
-  if (!v) return "Not recorded";
+  if (!v) return t("tables.common.notRecorded");
   const d = v instanceof Date ? v : new Date(v);
-  if (Number.isNaN(d.getTime())) return "Not recorded";
+  if (Number.isNaN(d.getTime())) return t("tables.common.notRecorded");
   const secs = Math.max(0, Math.floor((now.getTime() - d.getTime()) / 1000));
   if (secs < 60) return `${secs} 秒前`;
   const mins = Math.floor(secs / 60);

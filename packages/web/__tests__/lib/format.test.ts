@@ -13,6 +13,14 @@ import {
   startOfTodayUtc,
   sumPnlSince,
 } from "@/lib/format";
+import { t } from "@/lib/i18n";
+
+// The nullish/invalid fallbacks render in tables+cards and are localised
+// (zh-TW) via `t()`. Assert against the SAME dict keys format.ts uses, so
+// this stays green if the wording changes but the wiring does not.
+const NOT_SET = t("tables.common.notSet");
+const NOT_RECORDED = t("tables.common.notRecorded");
+const UNKNOWN = t("common.unknown");
 
 describe("toNum", () => {
   it("parses numeric strings and numbers", () => {
@@ -68,8 +76,8 @@ describe("shortAddress", () => {
   });
   it("returns short input unchanged and a textual placeholder for nullish", () => {
     expect(shortAddress("0x1234")).toBe("0x1234");
-    expect(shortAddress(null)).toBe("Not set");
-    expect(shortAddress(undefined)).toBe("Not set");
+    expect(shortAddress(null)).toBe(NOT_SET);
+    expect(shortAddress(undefined)).toBe(NOT_SET);
   });
 });
 
@@ -83,19 +91,19 @@ describe("formatDateTime / formatDate", () => {
     expect(formatDateTime("2026-01-02T03:04:00.000Z")).toBe(
       "2026-01-02 03:04"
     );
-    expect(formatDateTime(null)).toBe("Not recorded");
-    expect(formatDate("not-a-date")).toBe("Not recorded");
+    expect(formatDateTime(null)).toBe(NOT_RECORDED);
+    expect(formatDate("not-a-date")).toBe(NOT_RECORDED);
   });
 });
 
 describe("signatureTypeLabel", () => {
-  it("maps known codes and falls back to Unknown", () => {
+  it("maps known codes and falls back to the unknown label", () => {
     expect(signatureTypeLabel(0)).toBe("EOA");
     expect(signatureTypeLabel(1)).toBe("POLY_PROXY");
     expect(signatureTypeLabel(2)).toBe("POLY_GNOSIS_SAFE");
     expect(signatureTypeLabel(3)).toBe("POLY_1271");
-    expect(signatureTypeLabel(null)).toBe("Unknown");
-    expect(signatureTypeLabel(99)).toBe("Unknown");
+    expect(signatureTypeLabel(null)).toBe(UNKNOWN);
+    expect(signatureTypeLabel(99)).toBe(UNKNOWN);
   });
 });
 

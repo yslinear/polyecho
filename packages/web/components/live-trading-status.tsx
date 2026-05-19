@@ -73,7 +73,9 @@ export function LiveTradingStatus({
       <p className="max-w-prose text-sm text-muted-foreground">
         {t("common.liveTrading.explainerBefore")}
         <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
-          POLYECHO_LIVE_TRADING
+          {/* Environment-variable name — proper noun per common.ts
+              PROPER-NOUN POLICY, not translatable copy. */}
+          {"POLYECHO_LIVE_TRADING"}
         </code>
         {t("common.liveTrading.explainerAfter")}
       </p>

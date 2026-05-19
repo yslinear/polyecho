@@ -156,7 +156,6 @@ export const discovery = {
     },
     /** {{wallet}} = the wallet address (not translated). */
     rowActionsAria: "{{wallet}} 的操作",
-    viewLeaderAria: "檢視 Leader {{wallet}}",
   },
   /** /discovery/[wallet] LeaderScoreChart island. */
   chart: {

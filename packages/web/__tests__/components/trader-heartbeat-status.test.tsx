@@ -5,9 +5,9 @@ import { render, screen } from "@testing-library/react";
  * <TraderHeartbeatStatus /> + the settings-keys coercion/liveness it
  * depends on — PRD §7.4 / P1-5 bot liveness, READ-ONLY.
  *
- *  - recent heartbeat -> "運行中" + relative "最後心跳"
- *  - stale heartbeat  -> "停止 / 無心跳（> N 分鐘）"
- *  - missing row      -> "無心跳"
+ *  - recent heartbeat -> "運行中" + relative "最後 heartbeat"
+ *  - stale heartbeat  -> "停止 / 無 heartbeat（> N 分鐘）"
+ *  - missing row      -> "無 heartbeat"
  *  - renders NO control (no button/switch/checkbox)
  */
 

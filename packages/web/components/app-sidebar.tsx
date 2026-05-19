@@ -61,7 +61,9 @@ export function AppSidebar() {
       <SidebarHeader>
         <div className="flex flex-col gap-0.5 px-1 py-1">
           <span className="text-lg font-bold tracking-tight group-data-[collapsible=icon]:hidden">
-            PolyEcho
+            {/* Product brand name — proper noun per common.ts
+                PROPER-NOUN POLICY, never translated. */}
+            {"PolyEcho"}
           </span>
           <span className="hidden text-lg font-bold tracking-tight group-data-[collapsible=icon]:block">
             PE

@@ -101,7 +101,9 @@ export default async function LeadersPage() {
             </span>{" "}
             {t("tables.leaders.emptyMiddle")}{" "}
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
-              polyecho discovery promote &lt;wallet&gt;
+              {/* Literal CLI command — proper noun per common.ts
+                  PROPER-NOUN POLICY, intentionally not translated. */}
+              {"polyecho discovery promote <wallet>"}
             </code>{" "}
             {t("tables.leaders.emptySuffix")}
           </p>

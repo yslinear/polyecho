@@ -21,10 +21,11 @@ export const status = {
     phase: "階段",
     datasource: "Datasource",
     unknown: "未知",
-    /** Heartbeat counter labels. */
+    /** Heartbeat counter labels. `copied` = the copy-trade action; the
+     *  copy-trade concept is locked to 跟單 project-wide (cf. tables.ts). */
     counters: {
       detected: "偵測",
-      copied: "複製",
+      copied: "跟單",
       skipped: "略過",
       placed: "下單",
     },

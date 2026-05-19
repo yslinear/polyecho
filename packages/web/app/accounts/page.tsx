@@ -92,7 +92,11 @@ export default async function AccountsPage() {
                       key="cmd"
                       className="rounded bg-background px-1 py-0.5 font-mono text-xs"
                     >
-                      polyecho account import &lt;eoa&gt;
+                      {/* Literal CLI command — proper noun per common.ts
+                          PROPER-NOUN POLICY, intentionally not translated.
+                          String expression (not JSXText) so the i18n
+                          regression guard correctly treats it as exempt. */}
+                      {"polyecho account import <eoa>"}
                     </code>,
                     part,
                   ],
@@ -113,7 +117,9 @@ export default async function AccountsPage() {
                         key="cmd"
                         className="rounded bg-muted px-1 py-0.5 font-mono text-xs"
                       >
-                        polyecho account import &lt;eoa&gt;
+                        {/* Literal CLI command — proper noun per common.ts
+                            PROPER-NOUN POLICY, intentionally not translated. */}
+                        {"polyecho account import <eoa>"}
                       </code>,
                       part,
                     ],

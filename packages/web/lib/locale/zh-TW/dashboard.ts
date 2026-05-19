@@ -3,7 +3,7 @@
 export const dashboard = {
   title: "總覽",
   subtitle:
-    "複製交易概覽。唯讀；暫停與跟單為各自頁面上的明確操作。",
+    "跟單概覽。唯讀；暫停與跟單為各自頁面上的明確操作。",
   summaryAriaLabel: "持倉與風險摘要",
   todayPnl: {
     label: "今日淨 PnL",
@@ -22,7 +22,7 @@ export const dashboard = {
     caption: "在場的進場名目金額",
   },
   noTrades:
-    "尚無複製交易紀錄。跟隨一位 Leader 後，trader-core 的成交將填入此處。",
+    "尚無跟單交易記錄。跟隨一位 Leader 後，trader-core 的成交將填入此處。",
   activity: {
     heading: "近期動態",
     latest: "最新 {{count}} 筆",

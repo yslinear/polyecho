@@ -315,7 +315,9 @@ export default async function BacktestResultPage({ params }: PageProps) {
             <p className="text-sm text-muted-foreground">
               {t("backtest.result.failed.bodyPrefix")}
               <code className="rounded bg-muted px-1 text-xs">
-                polyecho logs backtest
+                {/* Literal CLI command — proper noun per common.ts
+                    PROPER-NOUN POLICY, intentionally not translated. */}
+                {"polyecho logs backtest"}
               </code>
               {t("backtest.result.failed.bodySuffix")}
             </p>

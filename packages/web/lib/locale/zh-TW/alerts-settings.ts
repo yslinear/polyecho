@@ -34,7 +34,7 @@ export const alertsSettings = {
       colSummary: "摘要",
       colPush: "推播",
       colTime: "時間",
-      noSummary: "未紀錄",
+      noSummary: "未記錄",
       delivered: "已送達",
       notPushed: "未推播",
     },

@@ -15,6 +15,8 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
+import { t } from "@/lib/i18n";
+
 export interface ScorePoint {
   date: string; // ISO YYYY-MM-DD
   total_score: number | null;
@@ -28,7 +30,7 @@ export function DataChart({ data }: DataChartProps) {
   if (data.length === 0) {
     return (
       <p className="text-sm text-muted-foreground py-6 text-center">
-        No score history recorded yet.
+        {t("common.chart.noData")}
       </p>
     );
   }

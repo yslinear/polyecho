@@ -17,6 +17,7 @@ import { GlobalPauseToggle } from "@/components/global-pause-toggle";
 import { db } from "@/lib/db";
 import { settings } from "@/lib/db/schema";
 import { GLOBAL_PAUSED_KEY, coerceBoolSetting } from "@/lib/settings-keys";
+import { t } from "@/lib/i18n";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -70,7 +71,7 @@ export default async function RootLayout({
           href="#main"
           className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-3 focus:z-50 focus:rounded-md focus:bg-card focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
         >
-          Skip to content
+          {t("common.a11y.skipToContent")}
         </a>
         <SidebarProvider>
           <AppSidebar />

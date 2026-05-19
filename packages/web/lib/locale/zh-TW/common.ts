@@ -4,22 +4,33 @@
  * PROPER-NOUN POLICY (applies to every locale module): technical / brand
  * terms stay in English and are NOT translated — Polymarket, CLOB, Data API,
  * Polygon, RPC, VPN, VAPID, PnL, USD, UTC, CLI, API, HTTP, Leader(s),
- * wallet, proxy, datasource, backtest, slippage, latency. Translate the
- * surrounding UI prose only; keep these tokens verbatim inside the values.
+ * wallet, proxy, datasource, backtest, slippage, latency, heartbeat.
+ * Translate the surrounding UI prose only; keep these tokens verbatim
+ * inside the values. (`heartbeat` is an ops term — PRD + status.ts use it
+ * in English throughout; do not render it as 心跳.)
+ *
+ * TERMINOLOGY LOCKS:
+ *  - copy-trade → 跟單 everywhere (never 複製交易 / 複製 for the concept;
+ *    複製 stays only for literal clipboard-copy, e.g. tables.copyAddress).
+ *  - position is an INTENTIONAL domain split, kept on purpose:
+ *      持倉 = live holdings (trades / positions / dashboard),
+ *      部位 = backtest sizing (backtest module).
+ *    These are distinct concepts; do NOT unify them.
+ *  - zh-TW noun/verb: 紀錄 = the noun ("a record"), 記錄 = the verb
+ *    ("to record"). Use the correct form for the sentence.
  */
 export const common = {
+  /** Generic fallback for an unmapped enum value (used by lib/format.ts
+   *  signatureTypeLabel). 未知 = "unknown". */
   unknown: "未知",
-  never: "從未",
-  noData: "尚無資料",
-  loading: "載入中…",
-  none: "—",
-  /** Liveness vocabulary reused by sidebar / status / dashboard. */
-  status: {
-    up: "正常",
-    down: "中斷",
-    stale: "逾時",
-    ok: "正常",
-    running: "執行中",
+  /** Visually-hidden chrome a11y copy we own (root-layout skip-link).
+   *  shadcn/ui primitive sr-only text stays upstream-verbatim. */
+  a11y: {
+    skipToContent: "跳至主要內容",
+  },
+  /** Generic chart island empty-state (shared DataChart wrapper). */
+  chart: {
+    noData: "尚無分數歷史記錄。",
   },
   /** <ScoreBadge> tier labels (text, never colour-only). */
   scoreBadge: {
@@ -81,16 +92,17 @@ export const common = {
     explainerAfter:
       "，由 trader-core 讀取，且僅能在 CLI 變更（PRD §5.7 high-danger 等級）。儀表板刻意不提供啟用或停用 live trading 的任何控制。",
   },
-  /** <TraderHeartbeatStatus> read-only follow-engine liveness (PRD §7.4). */
+  /** <TraderHeartbeatStatus> read-only follow-engine liveness (PRD §7.4).
+   *  `heartbeat` kept English by PROPER-NOUN POLICY (ops term). */
   heartbeat: {
     /** {{time}} = relative time string (already formatted). */
-    running: "跟單引擎：運行中 · 最後心跳 {{time}}",
+    running: "跟單引擎：運行中 · 最後 heartbeat {{time}}",
     /** {{minutes}} = stale threshold in minutes (number, not translated). */
-    stale: "跟單引擎：停止 / 無心跳（> {{minutes}} 分鐘）",
-    missing: "跟單引擎：無心跳",
+    stale: "跟單引擎：停止 / 無 heartbeat（> {{minutes}} 分鐘）",
+    missing: "跟單引擎：無 heartbeat",
     titleRunning: "跟單引擎正在運行。此為唯讀指示，無啟停控制。",
     /** {{minutes}} = stale threshold in minutes (number, not translated). */
-    titleStale: "跟單引擎無新心跳超過 {{minutes}} 分鐘。此為唯讀指示，無啟停控制。",
+    titleStale: "跟單引擎無新 heartbeat 超過 {{minutes}} 分鐘。此為唯讀指示，無啟停控制。",
   },
 } as const;
 
