@@ -3,11 +3,27 @@
  * worker-liveness verdict or an integration-probe verdict is rendered.
  *
  * DESIGN.md "Color never the sole signal" / accessibility: every state is
- * conveyed by THREE redundant channels — a shadcn Badge variant, a Lucide
- * icon, and a plain text label. A colour-blind operator (or a greyscale
- * screenshot) reads the icon + label; colour is reinforcement only. The
- * page and the cross-language contract test both import this map so the
- * rendered verdict can never drift from what the test asserts.
+ * conveyed by FOUR redundant channels — a plain text label (load-bearing),
+ * a Lucide icon (shape differs per state, not just hue), a shadcn Badge
+ * variant, and a calm semantic `tone`. A colour-blind operator (or a
+ * greyscale screenshot) reads the icon + label alone; the tone is pure
+ * reinforcement. The page and the cross-language contract test both import
+ * this map so the rendered verdict can never drift from what the test
+ * asserts.
+ *
+ * The `tone` colour system (resolved to a soft-tint pill by <StatusBadge/>,
+ * tokens in app/globals.css `--status-*`). Three verbs, three calm hues,
+ * tinted toward the brand cool-azure family, chroma pulled down at the
+ * extremes so /status reads as a quiet instrument, never an alarm panel:
+ *
+ *   "ok"      running / probe-OK  — healthy; gain-adjacent green, but
+ *                                   calmer than PnL --gain (liveness ≠ money)
+ *   "warn"    stale (> 5 min)     — a WARNING, not a failure; a distinct
+ *                                   amber so it can NEVER read as `down`
+ *                                   (fixes stale==down colour collision)
+ *   "down"    probe DOWN          — a real failure; loss/destructive family
+ *   "neutral" missing / no-data   — "no data ≠ down" (PolyHermes zero-vs-
+ *                                   unavailable): muted, NOT a colour alarm
  */
 
 import {
@@ -23,6 +39,14 @@ import type { HeartbeatLiveness } from "@/lib/settings-keys";
 import { type ProbeVerdict, HEARTBEAT_STALE_MINUTES } from "@/lib/settings-keys";
 import { t } from "@/lib/i18n";
 
+/**
+ * Semantic colour family for a verdict (the calm /status palette). Resolved
+ * to a concrete soft-tint pill by <StatusBadge/>; the underlying tokens live
+ * in app/globals.css (`--status-ok|warn|down*`, tuned for light AND dark).
+ * Colour is the LAST of the four channels — pure reinforcement, never alone.
+ */
+export type StatusTone = "ok" | "warn" | "down" | "neutral";
+
 export interface StatusPresentation {
   /** Plain text label — the primary, never-color-only signal. */
   label: string;
@@ -30,6 +54,8 @@ export interface StatusPresentation {
   variant: NonNullable<BadgeProps["variant"]>;
   /** Lucide glyph (reinforcement; shape differs per state, not just hue). */
   Icon: LucideIcon;
+  /** Calm semantic colour family (reinforcement; resolved by StatusBadge). */
+  tone: StatusTone;
   /** Stable hook for tests / e2e — the raw verdict string. */
   token: string;
 }
@@ -37,10 +63,15 @@ export interface StatusPresentation {
 /**
  * Worker liveness → presentation.
  *
- *  running → "Running"          secondary  CheckCircle2
- *  stale   → "Stale (> 5 min)"  destructive AlertTriangle
- *  missing → "No data"          outline     CircleSlash   (NOT a failure —
- *            PolyHermes "zero vs unavailable": no row ≠ a down worker)
+ *  running → "Running"          secondary  CheckCircle2  tone ok
+ *  stale   → "Stale (> 5 min)"  destructive AlertTriangle tone warn
+ *  missing → "No data"          outline     CircleSlash   tone neutral
+ *            (NOT a failure — PolyHermes "zero vs unavailable": no row ≠ a
+ *            down worker; stays neutral, never a colour alarm)
+ *
+ * The Badge `variant` is the FROZEN cross-stack contract channel (the test
+ * pins it); the calm semantic colour rides the separate `tone` channel so
+ * `stale` finally reads amber (a warning) instead of sharing `down`'s red.
  */
 export function workerPresentation(
   liveness: HeartbeatLiveness
@@ -51,6 +82,7 @@ export function workerPresentation(
         label: t("status.verdict.running"),
         variant: "secondary",
         Icon: CheckCircle2,
+        tone: "ok",
         token: "running",
       };
     case "stale":
@@ -60,6 +92,7 @@ export function workerPresentation(
         }),
         variant: "destructive",
         Icon: AlertTriangle,
+        tone: "warn",
         token: "stale",
       };
     default:
@@ -67,6 +100,7 @@ export function workerPresentation(
         label: t("status.verdict.noData"),
         variant: "outline",
         Icon: CircleSlash,
+        tone: "neutral",
         token: "missing",
       };
   }
@@ -75,10 +109,10 @@ export function workerPresentation(
 /**
  * Integration-probe verdict → presentation.
  *
- *  ok   → "OK"    secondary   CheckCircle2
- *  down → "Down"  destructive XCircle      (a REAL failure, distinct from a
- *         worker's "No data" — different icon + label so the two never read
- *         the same even in greyscale)
+ *  ok   → "OK"    secondary   CheckCircle2  tone ok
+ *  down → "Down"  destructive XCircle       tone down  (a REAL failure,
+ *         distinct from a worker's "No data" — different icon + label + tone
+ *         so the two never read the same even in greyscale)
  */
 export function probePresentation(
   verdict: ProbeVerdict
@@ -88,6 +122,7 @@ export function probePresentation(
       label: t("status.verdict.ok"),
       variant: "secondary",
       Icon: CheckCircle2,
+      tone: "ok",
       token: "ok",
     };
   }
@@ -95,16 +130,20 @@ export function probePresentation(
     label: t("status.verdict.down"),
     variant: "destructive",
     Icon: XCircle,
+    tone: "down",
     token: "down",
   };
 }
 
-/** A coerced-but-absent integration_status row → an honest "no data" badge. */
+/** A coerced-but-absent integration_status row → an honest "no data" badge.
+ *  Neutral tone on purpose: an absent probe row is "unavailable", NOT a
+ *  failure (PolyHermes zero-vs-unavailable) — it must not flash `down`'s red. */
 export function integrationNoData(): StatusPresentation {
   return {
     label: t("status.verdict.noData"),
     variant: "outline",
     Icon: CircleSlash,
+    tone: "neutral",
     token: "missing",
   };
 }

@@ -46,6 +46,24 @@ const config: Config = {
         // PnL semantics — paired with sign/arrow/figure, never color-only.
         gain: "hsl(var(--gain))",
         loss: "hsl(var(--loss))",
+        // Status-verdict semantics (/status) — soft-tint pill per verdict,
+        // always paired with a distinct icon + text label, never color-only
+        // (DESIGN.md "Color never the sole signal", colour-blind safe).
+        "status-ok": {
+          DEFAULT: "hsl(var(--status-ok))",
+          foreground: "hsl(var(--status-ok-foreground))",
+          border: "hsl(var(--status-ok-border))",
+        },
+        "status-warn": {
+          DEFAULT: "hsl(var(--status-warn))",
+          foreground: "hsl(var(--status-warn-foreground))",
+          border: "hsl(var(--status-warn-border))",
+        },
+        "status-down": {
+          DEFAULT: "hsl(var(--status-down))",
+          foreground: "hsl(var(--status-down-foreground))",
+          border: "hsl(var(--status-down-border))",
+        },
         sidebar: {
           DEFAULT: "hsl(var(--sidebar))",
           foreground: "hsl(var(--sidebar-foreground))",

@@ -35,6 +35,34 @@
     /* PnL semantics — reinforcement only, never the sole signal */
     --gain: 158 62% 36%;
     --loss: 8 68% 49%;
+    /*
+     * Status-verdict semantics (/status only) — a calm, soft-tint pill per
+     * verdict. Three verbs, three hues, ALWAYS paired with a distinct Lucide
+     * icon + text label (colour is reinforcement, never the sole signal —
+     * DESIGN.md "Color never the sole signal", colour-blind safe). Each is a
+     * tinted neutral derived in OKLCH then expressed in the shadcn H S% L%
+     * mechanism: chroma is pulled DOWN at the extremes (ok/down ~L0.55,
+     * C~0.09; warn slightly warmer) and every value still leans the brand
+     * cool-azure family so it reads as instrument, not alarm panel. NOT raw
+     * Tailwind palette. fg/bg verified >=4.5:1 (AA text) in BOTH themes.
+     *
+     *   ok      running / probe-OK  — healthy, gain-adjacent (calmer than PnL
+     *                                 --gain: liveness is not money)
+     *   warn    stale (> 5 min)     — a WARNING, not a failure; a distinct
+     *                                 amber so it can never read as `down`
+     *   down    probe DOWN          — a real failure, loss/destructive family
+     *   (missing/no-data keeps the neutral `outline` Badge — "no data != down",
+     *    PolyHermes zero-vs-unavailable — so it needs no status colour token)
+     */
+    --status-ok: 152 44% 94%;
+    --status-ok-foreground: 152 46% 26%;
+    --status-ok-border: 152 40% 80%;
+    --status-warn: 40 80% 92%;
+    --status-warn-foreground: 36 68% 30%;
+    --status-warn-border: 40 70% 76%;
+    --status-down: 8 66% 94%;
+    --status-down-foreground: 6 64% 40%;
+    --status-down-border: 8 60% 82%;
     /* Sidebar CSS vars */
     --sidebar: 215 28% 96%;
     --sidebar-foreground: 222 30% 13%;
@@ -69,6 +97,18 @@
     /* PnL semantics — reinforcement only, never the sole signal */
     --gain: 158 52% 52%;
     --loss: 8 70% 62%;
+    /* Status-verdict semantics — dark is tuned independently (NOT inverted):
+       deep low-chroma tinted fills, lifted readable foregrounds. Same three
+       verbs; missing still uses neutral `outline`. fg/bg >=4.5:1 verified. */
+    --status-ok: 158 30% 16%;
+    --status-ok-foreground: 150 42% 72%;
+    --status-ok-border: 156 26% 30%;
+    --status-warn: 38 42% 16%;
+    --status-warn-foreground: 40 78% 68%;
+    --status-warn-border: 38 38% 32%;
+    --status-down: 8 46% 17%;
+    --status-down-foreground: 8 72% 72%;
+    --status-down-border: 8 40% 33%;
     /* Sidebar CSS vars dark */
     --sidebar: 222 34% 10%;
     --sidebar-foreground: 215 22% 90%;

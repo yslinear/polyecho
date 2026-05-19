@@ -24,8 +24,10 @@ import { t } from "@/lib/i18n";
 // Expected labels are derived from the SAME `status.verdict.*` keys the
 // presentation map uses, so this CROSS-STACK contract still pins the
 // running/stale/missing + ok/down behaviour while being robust to
-// translation (the variant/token/icon channels are the colour-blind-safe
-// invariants and remain asserted verbatim).
+// translation (the variant/token/tone/icon channels are the colour-blind-
+// safe invariants and remain asserted verbatim — `tone` is the calm
+// semantic colour family resolved by <StatusBadge/>: ok/warn/down/neutral,
+// with `stale -> warn` so a warning can never share `down`'s red).
 const L_RUNNING = t("status.verdict.running");
 const L_STALE = t("status.verdict.stale", {
   minutes: HEARTBEAT_STALE_MINUTES,
@@ -162,6 +164,7 @@ describe("cross-stack: per-worker heartbeat -> running/stale/missing", () => {
       expect(p.token).toBe("running");
       expect(p.label).toBe(L_RUNNING);
       expect(p.variant).toBe("secondary");
+      expect(p.tone).toBe("ok");
     }
   });
 
@@ -183,6 +186,9 @@ describe("cross-stack: per-worker heartbeat -> running/stale/missing", () => {
     expect(p.token).toBe("stale");
     expect(p.label).toBe(L_STALE);
     expect(p.variant).toBe("destructive");
+    // The colour fix: stale is a WARNING, not a failure — its own amber
+    // tone, never `down`'s red, even though it shares the Badge variant.
+    expect(p.tone).toBe("warn");
   });
 
   it("an absent / garbage / null-ts row -> 'missing' (No data, NOT down)", () => {
@@ -199,6 +205,8 @@ describe("cross-stack: per-worker heartbeat -> running/stale/missing", () => {
     expect(p.token).toBe("missing");
     expect(p.label).toBe(L_NO_DATA);
     expect(p.variant).toBe("outline");
+    // "no data" is unavailable, NOT down: neutral tone (no colour alarm).
+    expect(p.tone).toBe("neutral");
   });
 
   it("a partial payload (only the load-bearing ts) still degrades cleanly", () => {
@@ -234,6 +242,7 @@ describe("cross-stack: integration_status -> ok/down + checked_at", () => {
     expect(okP.token).toBe("ok");
     expect(okP.label).toBe(L_OK);
     expect(okP.variant).toBe("secondary");
+    expect(okP.tone).toBe("ok");
 
     // The load-bearing failure: ok:false must read as a REAL down, with a
     // distinct presentation from a worker's "No data".
@@ -244,6 +253,9 @@ describe("cross-stack: integration_status -> ok/down + checked_at", () => {
     expect(downP.token).toBe("down");
     expect(downP.label).toBe(L_DOWN);
     expect(downP.variant).toBe("destructive");
+    // A real failure: `down` owns the loss/destructive colour family —
+    // distinct from a worker's neutral "No data" even in greyscale.
+    expect(downP.tone).toBe("down");
   });
 
   it("also parses the legacy {value:..} envelope", () => {
@@ -293,6 +305,7 @@ describe("cross-stack: integration_status -> ok/down + checked_at", () => {
     expect(integrationNoData().token).toBe("missing");
     expect(integrationNoData().label).toBe(L_NO_DATA);
     expect(integrationNoData().variant).toBe("outline");
+    expect(integrationNoData().tone).toBe("neutral");
   });
 
   it("a probe missing fields degrades, never throws (ok:false = fail-safe)", () => {
