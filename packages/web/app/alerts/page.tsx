@@ -30,6 +30,7 @@ import {
   timeRemaining,
 } from "@/lib/alerts";
 import { formatDateTime } from "@/lib/format";
+import { t } from "@/lib/i18n";
 
 export const dynamic = "force-dynamic";
 
@@ -84,18 +85,21 @@ export default async function AlertsPage() {
   return (
     <div className="space-y-10">
       <header className="space-y-1.5">
-        <h1 className="text-2xl font-bold tracking-tight">警示中心</h1>
+        <h1 className="text-2xl font-bold tracking-tight">
+          {t("alertsSettings.alerts.title")}
+        </h1>
         <p className="max-w-prose text-sm text-muted-foreground">
-          系統事件、推播狀態與待確認的危險操作。本頁只讀取與確認，
-          所有警示由 trader-core 與推播服務產生。
+          {t("alertsSettings.alerts.intro")}
         </p>
       </header>
 
       <section className="space-y-3">
         <div className="space-y-1">
-          <h2 className="text-base font-semibold">推播通知</h2>
+          <h2 className="text-base font-semibold">
+            {t("alertsSettings.alerts.push.heading")}
+          </h2>
           <p className="max-w-prose text-sm text-muted-foreground">
-            在此裝置開啟 Web Push，重要事件即時送達。每個裝置各自訂閱。
+            {t("alertsSettings.alerts.push.help")}
           </p>
         </div>
         <PushSubscribe vapidPublicKey={vapidPublicKey} />
@@ -103,10 +107,11 @@ export default async function AlertsPage() {
 
       <section className="space-y-3 border-t pt-8">
         <div className="space-y-1">
-          <h2 className="text-base font-semibold">待確認的危險操作</h2>
+          <h2 className="text-base font-semibold">
+            {t("alertsSettings.alerts.pending.heading")}
+          </h2>
           <p className="max-w-prose text-sm text-muted-foreground">
-            手動賣出 / 緊急清倉需 5 秒倒數與通行碼二次確認（PRD §5.7）。
-            trader-core 只執行已確認的請求。
+            {t("alertsSettings.alerts.pending.help")}
           </p>
         </div>
 
@@ -114,7 +119,7 @@ export default async function AlertsPage() {
 
         {pendingRows.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            目前沒有待確認的操作。
+            {t("alertsSettings.alerts.pending.empty")}
           </p>
         ) : (
           <ul className="space-y-3">
@@ -128,12 +133,15 @@ export default async function AlertsPage() {
                     {pendingActionLabel(p.action_type)}
                   </span>
                   <span className="text-xs tabular-nums text-muted-foreground">
-                    建立於 {formatDateTime(p.created_at)} · 剩餘{" "}
-                    {timeRemaining(p.expires_at)}
+                    {t("alertsSettings.alerts.pending.meta", {
+                      created: formatDateTime(p.created_at),
+                      remaining: timeRemaining(p.expires_at),
+                    })}
                   </span>
                 </div>
                 <p className="font-mono text-xs text-muted-foreground">
-                  {paramsSummary(p.params) || "（無參數）"}
+                  {paramsSummary(p.params) ||
+                    t("alertsSettings.alerts.pending.noParams")}
                 </p>
                 <ConfirmPendingRow
                   id={p.id}
@@ -151,9 +159,13 @@ export default async function AlertsPage() {
 
       <section className="space-y-4 border-t pt-8">
         <div className="space-y-1">
-          <h2 className="text-base font-semibold">最近事件</h2>
+          <h2 className="text-base font-semibold">
+            {t("alertsSettings.alerts.recent.heading")}
+          </h2>
           <p className="max-w-prose text-sm text-muted-foreground">
-            最新在前，最多 {EVENTS_LIMIT} 筆。可依嚴重度篩選。
+            {t("alertsSettings.alerts.recent.help", {
+              limit: EVENTS_LIMIT,
+            })}
           </p>
         </div>
         <AlertsList rows={eventRows} />

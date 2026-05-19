@@ -18,6 +18,7 @@ import {
   coerceRiskMode,
 } from "@/lib/settings-keys";
 import { PushSubscribe } from "@/components/push-subscribe";
+import { t } from "@/lib/i18n";
 import { ProxyForm } from "./proxy-form";
 import { RiskModeForm } from "./risk-mode-form";
 
@@ -44,19 +45,21 @@ export default async function SettingsPage() {
   return (
     <div className="mx-auto max-w-2xl space-y-8">
       <header className="space-y-1.5">
-        <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
+        <h1 className="text-2xl font-bold tracking-tight">
+          {t("alertsSettings.settings.title")}
+        </h1>
         <p className="max-w-prose text-sm text-muted-foreground">
-          Global trading configuration. Changes are written through deliberate
-          server actions; dangerous operations stay on the CLI.
+          {t("alertsSettings.settings.intro")}
         </p>
       </header>
 
       <section className="space-y-4">
         <div className="space-y-1">
-          <h2 className="text-base font-semibold">Polymarket proxy</h2>
+          <h2 className="text-base font-semibold">
+            {t("alertsSettings.settings.proxy.heading")}
+          </h2>
           <p className="max-w-prose text-sm text-muted-foreground">
-            Outbound HTTP proxy for every Polymarket request. Leave it blank to
-            connect directly.
+            {t("alertsSettings.settings.proxy.help")}
           </p>
         </div>
 
@@ -68,10 +71,11 @@ export default async function SettingsPage() {
 
       <section className="space-y-4 border-t pt-6">
         <div className="space-y-1">
-          <h2 className="text-base font-semibold">旅行 / 保守模式</h2>
+          <h2 className="text-base font-semibold">
+            {t("alertsSettings.settings.riskMode.heading")}
+          </h2>
           <p className="max-w-prose text-sm text-muted-foreground">
-            保守模式會自動收緊跟單比例與風險上限（PRD §5.6），適合外出或
-            無法即時盯盤時使用。trader-core 即時讀取，立即生效，無需重啟。
+            {t("alertsSettings.settings.riskMode.help")}
           </p>
         </div>
         <RiskModeForm current={riskMode} />
@@ -79,21 +83,26 @@ export default async function SettingsPage() {
 
       <section className="space-y-4 border-t pt-6">
         <div className="space-y-1">
-          <h2 className="text-base font-semibold">推播通知</h2>
+          <h2 className="text-base font-semibold">
+            {t("alertsSettings.settings.push.heading")}
+          </h2>
           <p className="max-w-prose text-sm text-muted-foreground">
-            在此裝置開啟 Web Push，重要事件即時送達。完整警示記錄請見{" "}
-            <span className="font-medium text-foreground">警示中心</span>。
+            {t("alertsSettings.settings.push.helpPrefix")}{" "}
+            <span className="font-medium text-foreground">
+              {t("alertsSettings.settings.push.helpLink")}
+            </span>
+            {t("alertsSettings.settings.push.helpSuffix")}
           </p>
         </div>
         <PushSubscribe vapidPublicKey={vapidPublicKey} />
       </section>
 
       <section className="space-y-3 border-t pt-6">
-        <h2 className="text-base font-semibold">Copy templates &amp; risk</h2>
+        <h2 className="text-base font-semibold">
+          {t("alertsSettings.settings.copyTemplates.heading")}
+        </h2>
         <p className="max-w-prose text-sm text-muted-foreground">
-          Conservative / Balanced / Aggressive templates, daily loss limits
-          and the category whitelist are edited from the CLI for now. They
-          will move here in a later phase.
+          {t("alertsSettings.settings.copyTemplates.help")}
         </p>
       </section>
     </div>
