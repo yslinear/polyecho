@@ -89,6 +89,20 @@ INTEGRATION_PROBE_TIMEOUT_SECONDS: float = 20.0
 #: into a tight loop.
 _MIN_INTEGRATION_PROBE_INTERVAL_SECONDS: float = 5.0
 
+#: Idle keepalive cadence (seconds) for the PARKED fixture/supervised
+#: engine (false-stale fix).  After ``run_once`` the fixture engine parks
+#: forever (``_park`` == an Event that is never set), so it emits NO
+#: further ``trader_heartbeat`` — but ``/status`` flags any worker whose
+#: last heartbeat is older than ``HEARTBEAT_STALE_SECONDS`` (300 s) as
+#: 逾時/stale.  A healthy parked engine is therefore false-flagged ~5 min
+#: after its single startup pass.  The parked loop now re-stamps a
+#: ``phase="idle"`` heartbeat every ~90 s (well under the 5-min window,
+#: >3× margin) via the SAME fail-soft ``_write_heartbeat`` seam.  This is
+#: the FIX; the stale threshold itself is deliberately left unchanged.
+#: It is OFF the order/redeem path, never touches the live-lock, and only
+#: runs in the parked/idle path (live WS/RPC mode is unaffected).
+IDLE_KEEPALIVE_INTERVAL_SECONDS: float = 90.0
+
 #: Funder USDC balance (in USD) at/under which SYSTEM_LOW_BALANCE fires.
 #:
 #: Rationale: Polymarket's CLOB enforces a $1 minimum order notional, and a
@@ -1475,5 +1489,46 @@ class TraderCore:
                 self._integration_probe_loop()
             )
 
-    async def _park(self) -> None:  # pragma: no cover - supervised loop
-        await asyncio.Event().wait()
+    async def _park(self) -> None:
+        """Idle the parked fixture engine while keeping liveness fresh.
+
+        False-stale fix.  The previous body was a bare
+        ``await asyncio.Event().wait()`` — it parked forever and emitted NO
+        further heartbeat, so a perfectly-healthy fixture engine was
+        false-flagged 逾時/stale by ``/status`` ~5 min after its single
+        startup ``run_once`` pass (the only heartbeats were that pass's
+        ``cycle_start`` / ``cycle_complete``).
+
+        Instead of an inert wait, the parked engine now re-stamps a
+        ``phase="idle"`` heartbeat every
+        :data:`IDLE_KEEPALIVE_INTERVAL_SECONDS` via the SAME
+        :meth:`_write_heartbeat` seam the cycle heartbeats use (canonical
+        FROZEN-shared write + legacy in-proc mirror/hook, all best-effort).
+        The reported counters are simply the last cycle's tallies (the
+        engine is idle, so they are correct/unchanged) — ``_write_heartbeat``
+        always reads ``self.stats``.
+
+        Contract preservation:
+
+        * **Live-lock / order-redeem path untouched** — this only writes a
+          liveness row; it never calls ``assert_live_allowed`` and does not
+          touch the ledger, queue, or any SDK.  Live WS/RPC mode does not
+          reach here (live stream tasks attach in ``run`` instead).
+        * **Fail-soft** — :meth:`_write_heartbeat` swallows every heartbeat
+          failure (including an absent shared package) and only lets
+          :class:`asyncio.CancelledError` propagate, so a heartbeat problem
+          can never abort the parked engine.
+        * **TaskGroup-safe** — like :meth:`_integration_probe_loop`, this is
+          a true never-exit ``while True`` that re-raises ONLY
+          ``CancelledError``; it can never trip the supervising
+          ``TaskGroup``'s "one child raises ⇒ cancel siblings" rule and
+          tear the engine down.  A cooperative shutdown cancels it cleanly.
+        """
+        while True:  # pragma: no cover - supervised loop
+            try:
+                await asyncio.sleep(IDLE_KEEPALIVE_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                raise  # cooperative shutdown — never swallow cancellation
+            # Best-effort liveness re-stamp (same fail-soft seam as the
+            # cycle heartbeats); cannot raise except CancelledError.
+            await self._write_heartbeat(phase="idle")

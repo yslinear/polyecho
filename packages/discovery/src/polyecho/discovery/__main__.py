@@ -63,6 +63,27 @@ _WEEKLY_INTERVAL = timedelta(days=7)
 _RETRY_SLEEP_INITIAL = timedelta(seconds=60)
 _RETRY_SLEEP_MAX = timedelta(hours=1)
 
+# Idle keepalive cadence (false-stale fix).
+#
+# The daily/hourly/weekly cadence loops emit a ``discovery_heartbeat`` only
+# once per *completed pass*.  The daily loop then ``asyncio.sleep``s ~24 h
+# until its next run, so between two daily passes the worker writes NO
+# heartbeat for a whole day even though it is perfectly healthy.  ``/status``
+# flags any worker whose last heartbeat is older than
+# ``HEARTBEAT_STALE_SECONDS`` (300 s / 5 min) as 逾時/stale — so a sleeping
+# discovery worker is false-flagged ~5 min after its last pass.
+#
+# A dedicated background task therefore emits a lightweight ``phase="idle"``
+# keepalive heartbeat every ~90 s (well under the 5-min stale window, with
+# >3× margin so a slow/blocked single write still can't trip the threshold).
+# It uses the SAME fail-soft ``_emit_discovery_heartbeat`` path as the real
+# passes, so a heartbeat-subsystem problem can never abort the worker; the
+# settings row is last-write-wins, so a keepalive racing a real per-pass
+# heartbeat is harmless (worst case: one heartbeat overwrites another with
+# fresh-enough liveness).  This is the FIX — the stale threshold itself is
+# deliberately left unchanged.
+_IDLE_KEEPALIVE_INTERVAL = timedelta(seconds=90)
+
 
 async def _emit_discovery_heartbeat(
     worker: DiscoveryWorker, *, phase: str
@@ -120,6 +141,41 @@ async def _emit_discovery_heartbeat(
             "discovery_heartbeat_failed_continuing",
             extra={"phase": phase, "error": str(exc)},
         )
+
+
+async def _idle_keepalive_loop(worker: DiscoveryWorker) -> None:
+    """Emit a ``phase="idle"`` keepalive heartbeat every ~90 s.
+
+    The cadence loops only heartbeat once per completed pass; the daily
+    loop then sleeps ~24 h, so a healthy-but-sleeping discovery worker
+    would otherwise write no heartbeat for up to a day and ``/status``
+    would false-flag it 逾時/stale after 5 min.  This perpetual background
+    task closes that gap by re-stamping liveness every
+    :data:`_IDLE_KEEPALIVE_INTERVAL` via the SAME fail-soft
+    :func:`_emit_discovery_heartbeat` the real passes use.
+
+    Fail-soft + cancellation contract (mirrors the cadence loops):
+
+    * ``_emit_discovery_heartbeat`` is itself STRICTLY fail-soft (a missing
+      shared package / write failure is logged and swallowed), so this loop
+      can never abort the worker via a heartbeat problem.
+    * It is a true never-exit ``while True`` so a one-off blip just waits
+      the interval and re-emits; only :class:`asyncio.CancelledError`
+      (graceful shutdown) breaks out, and it is re-raised so the
+      supervising ``gather`` tears the task down cleanly.
+
+    The keepalive may race a real per-pass heartbeat: that is harmless —
+    the ``settings`` row is last-write-wins and either write carries
+    fresh-enough liveness, so the worst case is one heartbeat overwriting
+    another a few seconds apart.  Pass counters are intentionally drained
+    by whichever heartbeat fires; an idle keepalive simply reports the
+    (typically empty) since-last-heartbeat tally.
+    """
+    while True:
+        # Fail-soft helper: cannot raise except CancelledError, which we
+        # must propagate so a graceful shutdown is never swallowed.
+        await _emit_discovery_heartbeat(worker, phase="idle")
+        await asyncio.sleep(_IDLE_KEEPALIVE_INTERVAL.total_seconds())
 
 
 async def _run_once(worker: DiscoveryWorker) -> None:
@@ -182,14 +238,27 @@ async def _scheduled_loop(worker: DiscoveryWorker) -> None:
     weekly_task = asyncio.create_task(
         _loop(worker.run_weekly, _WEEKLY_INTERVAL, "weekly"), name="discovery-weekly"
     )
+    # Idle keepalive (false-stale fix): an independent ~90 s heartbeat task
+    # so a worker sleeping ~24 h between daily passes keeps reporting
+    # liveness and is NOT false-flagged 逾時/stale by ``/status``.  It is a
+    # fail-soft never-exit loop (see :func:`_idle_keepalive_loop`); a
+    # heartbeat problem can never abort it or the cadence, and it cannot
+    # trip ``gather``'s "first exception cancels the rest" because it only
+    # ever raises CancelledError (graceful shutdown).
+    keepalive_task = asyncio.create_task(
+        _idle_keepalive_loop(worker), name="discovery-idle-keepalive"
+    )
 
     try:
-        await asyncio.gather(daily_task, hourly_task, weekly_task)
+        await asyncio.gather(
+            daily_task, hourly_task, weekly_task, keepalive_task
+        )
     except asyncio.CancelledError:
         logger.info("scheduled loop cancelled, shutting down")
         daily_task.cancel()
         hourly_task.cancel()
         weekly_task.cancel()
+        keepalive_task.cancel()
         raise
 
 

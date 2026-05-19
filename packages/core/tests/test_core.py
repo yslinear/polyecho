@@ -1565,3 +1565,147 @@ async def test_task2_once_degenerate_still_exit_two() -> None:
 
     assert core.stats.detected == 0
     assert core.degenerate_once_pass() is not None  # ⇒ --once exits 2
+
+
+# --- Idle keepalive heartbeat (false-stale fix) ---------------------------
+#
+# After ``run_once`` the fixture engine parks forever; the OLD ``_park`` was
+# a bare ``await asyncio.Event().wait()`` that emitted NO further heartbeat,
+# so a healthy parked engine was false-flagged 逾時/stale by ``/status`` ~5
+# min after its single startup pass.  ``_park`` now re-stamps a
+# ``phase="idle"`` heartbeat every ~90 s via the SAME fail-soft
+# ``_write_heartbeat`` seam.  Driven DETERMINISTICALLY (Event-gated fake
+# ``asyncio.sleep`` — no wall-clock, no network), then cancelled.
+
+
+@pytest.mark.asyncio
+async def test_idle_keepalive_parked_engine_emits_idle_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked engine emits a SUBSEQUENT ``phase="idle"`` heartbeat on the
+    keepalive cadence — so ``/status`` would NOT flag it stale while idle.
+
+    Driven DETERMINISTICALLY (mirrors ``test_task2_probe_drives_…``): the
+    keepalive interval is shrunk to ~1 ms and every beat sets an Event so
+    the test advances cycle-by-cycle with no wall-clock flakiness.  The
+    keepalive uses ``_write_heartbeat``, whose legacy in-proc hook receives
+    every beat; we record the phases there.
+    """
+    import polyecho.core.trader as trader_mod
+
+    beats: list[dict[str, Any]] = []
+    tick = asyncio.Event()
+
+    async def _hb(info: dict[str, Any]) -> None:
+        beats.append(info)
+        tick.set()
+
+    async def _probes() -> dict[str, Any]:
+        return {"ok": True}
+
+    # Shrink the ~90 s cadence so the loop ticks fast in-test (the real
+    # 90 s value is asserted separately below); monkeypatch auto-reverts.
+    monkeypatch.setattr(trader_mod, "IDLE_KEEPALIVE_INTERVAL_SECONDS", 0.001)
+
+    with _fake_shared_health(run_all_probes=_probes):
+        core = TraderCore(follows=[_follow()], heartbeat_writer=_hb)
+        task = asyncio.create_task(core._park())
+        try:
+            for expected in (1, 2, 3):
+                await asyncio.wait_for(tick.wait(), timeout=5.0)
+                tick.clear()
+                assert len(beats) >= expected
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    idle_beats = [b for b in beats if b.get("phase") == "idle"]
+    # A subsequent heartbeat WAS emitted while parked, and it is idle.
+    assert len(idle_beats) >= 3
+    assert core.last_heartbeat is not None
+    assert core.last_heartbeat["phase"] == "idle"
+    # The SHIPPED cadence is ~90 s — comfortably under any sane stale
+    # window (the false-stale threshold the fix targets is 300 s).
+    from polyecho.core.trader import (
+        IDLE_KEEPALIVE_INTERVAL_SECONDS as SHIPPED,
+    )
+
+    assert 0 < SHIPPED <= 90.0
+    assert SHIPPED < 300.0
+
+
+@pytest.mark.asyncio
+async def test_idle_keepalive_failsoft_backend_does_not_abort_park(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising shared ``write_heartbeat`` AND a raising legacy hook must
+    NOT abort the parked keepalive loop — it keeps ticking and is still
+    cleanly cancellable (fail-soft preserved on the idle path)."""
+    import polyecho.core.trader as trader_mod
+
+    ticks = {"n": 0}
+    gate = asyncio.Event()
+
+    async def _probes() -> dict[str, Any]:
+        return {"ok": True}
+
+    async def _boom_canonical(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("shared health down")
+
+    async def _boom_hook(_info: dict[str, Any]) -> None:
+        # Both heartbeat legs raise; the hook is the LAST leg so reaching
+        # here proves the canonical raise was already swallowed too.
+        ticks["n"] += 1
+        gate.set()
+        raise RuntimeError("settings table unreachable")
+
+    monkeypatch.setattr(trader_mod, "IDLE_KEEPALIVE_INTERVAL_SECONDS", 0.001)
+
+    with _fake_shared_health(
+        run_all_probes=_probes, write_heartbeat=_boom_canonical
+    ):
+        core = TraderCore(follows=[_follow()], heartbeat_writer=_boom_hook)
+        task = asyncio.create_task(core._park())
+        try:
+            # Several iterations despite EVERY heartbeat leg raising.
+            for _ in range(3):
+                await asyncio.wait_for(gate.wait(), timeout=5.0)
+                gate.clear()
+            assert not task.done()  # loop alive, never crashed out
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    # Fail-soft swallowed every raise; the loop kept the engine parked.
+    assert ticks["n"] >= 3
+
+
+@pytest.mark.asyncio
+async def test_idle_keepalive_cancels_cleanly_on_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cooperative shutdown cancels the parked keepalive promptly — the
+    graceful ``CancelledError`` propagates (never swallowed by fail-soft),
+    so a supervising TaskGroup tears it down cleanly."""
+    import polyecho.core.trader as trader_mod
+
+    started = asyncio.Event()
+
+    async def _probes() -> dict[str, Any]:
+        return {"ok": True}
+
+    async def _hb(_info: dict[str, Any]) -> None:
+        started.set()
+
+    monkeypatch.setattr(trader_mod, "IDLE_KEEPALIVE_INTERVAL_SECONDS", 0.001)
+
+    with _fake_shared_health(run_all_probes=_probes):
+        core = TraderCore(follows=[_follow()], heartbeat_writer=_hb)
+        task = asyncio.create_task(core._park())
+        await asyncio.wait_for(started.wait(), timeout=5.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert task.cancelled()

@@ -14,6 +14,9 @@ Fixture wallet archetypes tested (see shared/datasource/fixtures/README.md):
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import sys
+import types
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2571,3 +2574,182 @@ class TestR10C1C2HistoryRaceAndLockRelease:
                 assert held == 0, (
                     f"emit happened while a row lock was held: {timeline}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Idle keepalive heartbeat — false-stale fix
+#
+# The daily cadence loop heartbeats once per pass then sleeps ~24 h, so a
+# healthy-but-sleeping discovery worker would write no heartbeat for a day
+# and ``/status`` would false-flag it 逾時/stale after 5 min.  A dedicated
+# ~90 s ``phase="idle"`` keepalive task closes that gap via the SAME
+# fail-soft ``_emit_discovery_heartbeat`` the real passes use.
+#
+# Deterministic + network-free: no wall-clock sleeps — ``asyncio.sleep`` is
+# monkeypatched to an Event-gated fake so the loop is driven iteration by
+# iteration, then cancelled.
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoveryIdleKeepalive:
+    """``_idle_keepalive_loop`` keeps a sleeping discovery worker fresh."""
+
+    @staticmethod
+    def _stub_worker() -> Any:
+        """A DB-free worker double exposing only what the keepalive needs.
+
+        ``_emit_discovery_heartbeat`` reads ``drain_pass_counters`` /
+        ``datasource_name``; everything else is irrelevant to the idle path.
+        """
+        worker = MagicMock()
+        worker.drain_pass_counters = MagicMock(return_value={})
+        worker.datasource_name = "FixtureDataSource"
+        return worker
+
+    def test_idle_keepalive_emits_idle_heartbeat_so_not_stale(self) -> None:
+        """A parked/scheduled worker emits a SUBSEQUENT ``phase="idle"``
+        heartbeat on the keepalive cadence — so ``/status`` would NOT see
+        it as stale between two ~24 h daily passes.
+
+        Deterministic (mirrors the core ``test_task2`` pattern): the ~90 s
+        cadence is shrunk to ~1 ms and every captured beat sets an Event so
+        the loop is advanced cycle-by-cycle with no wall-clock flakiness.
+        """
+        from datetime import timedelta
+
+        from polyecho.discovery import __main__ as m
+
+        worker = self._stub_worker()
+        captured: list[str] = []
+        tick = asyncio.Event()
+
+        async def _capture_hb(_w: Any, *, phase: str) -> None:
+            captured.append(phase)
+            tick.set()
+
+        async def _run() -> None:
+            # Shrink the real ~90 s cadence so the loop ticks fast in-test;
+            # the SHIPPED value is asserted separately below.
+            with patch.object(
+                m, "_emit_discovery_heartbeat", _capture_hb
+            ), patch.object(
+                m, "_IDLE_KEEPALIVE_INTERVAL", timedelta(seconds=0.001)
+            ):
+                task = asyncio.create_task(m._idle_keepalive_loop(worker))
+                try:
+                    for expected in (1, 2, 3):
+                        await asyncio.wait_for(tick.wait(), timeout=5.0)
+                        tick.clear()
+                        assert len(captured) >= expected
+                finally:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+
+        asyncio.get_event_loop().run_until_complete(_run())
+
+        # A subsequent heartbeat WAS emitted, and every one is phase="idle".
+        assert len(captured) >= 3
+        assert all(p == "idle" for p in captured)
+        # The SHIPPED cadence (~90 s) is well under the 300 s stale window
+        # (``HEARTBEAT_STALE_SECONDS``) — proving a sleeping worker keeps
+        # reporting in time WITHOUT loosening that threshold.
+        shipped = m._IDLE_KEEPALIVE_INTERVAL.total_seconds()
+        assert 0 < shipped <= 90.0
+        assert shipped < 300.0
+
+    def test_idle_keepalive_failsoft_backend_does_not_abort_worker(
+        self,
+    ) -> None:
+        """A raising heartbeat backend must NOT abort the keepalive loop.
+
+        Drives the REAL ``_emit_discovery_heartbeat`` (and thus the real
+        ``emit_heartbeat_safe`` seam) with a shared ``write_heartbeat`` that
+        always raises — the loop must keep ticking, never propagate the
+        error, and still stop cleanly on cancellation.
+        """
+        from datetime import timedelta
+
+        from polyecho.discovery import __main__ as m
+
+        worker = self._stub_worker()
+        ticks = {"n": 0}
+        gate = asyncio.Event()
+
+        def _boom_write_heartbeat(*_a: Any, **_k: Any) -> None:
+            raise RuntimeError("settings table unreachable")
+
+        fake_health = types.ModuleType("polyecho.shared.health")
+        fake_health.write_heartbeat = _boom_write_heartbeat  # type: ignore[attr-defined]
+
+        # Count each REAL fail-soft heartbeat attempt by spying the worker's
+        # drained counters (called once per ``_emit_discovery_heartbeat``).
+        def _drain() -> dict[str, int]:
+            ticks["n"] += 1
+            gate.set()
+            return {}
+
+        worker.drain_pass_counters = MagicMock(side_effect=_drain)
+
+        async def _run() -> None:
+            saved = sys.modules.get("polyecho.shared.health")
+            sys.modules["polyecho.shared.health"] = fake_health
+            try:
+                with patch.object(
+                    m, "_IDLE_KEEPALIVE_INTERVAL", timedelta(seconds=0.001)
+                ):
+                    task = asyncio.create_task(
+                        m._idle_keepalive_loop(worker)
+                    )
+                    try:
+                        # Several iterations despite EVERY heartbeat raising.
+                        for _ in range(3):
+                            await asyncio.wait_for(
+                                gate.wait(), timeout=5.0
+                            )
+                            gate.clear()
+                        # Loop is alive (not crashed) and cancellable.
+                        assert not task.done()
+                    finally:
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+            finally:
+                if saved is not None:
+                    sys.modules["polyecho.shared.health"] = saved
+                else:
+                    sys.modules.pop("polyecho.shared.health", None)
+
+        asyncio.get_event_loop().run_until_complete(_run())
+
+        # The fail-soft seam swallowed every raise; the loop kept ticking
+        # and ended only via cooperative cancellation.
+        assert ticks["n"] >= 3
+
+    def test_idle_keepalive_cancels_cleanly_on_shutdown(self) -> None:
+        """Cooperative shutdown cancels the keepalive promptly (graceful
+        ``CancelledError`` is propagated, never swallowed)."""
+        from datetime import timedelta
+
+        from polyecho.discovery import __main__ as m
+
+        worker = self._stub_worker()
+        started = asyncio.Event()
+
+        async def _hb(_w: Any, *, phase: str) -> None:
+            started.set()
+
+        async def _run() -> None:
+            with patch.object(
+                m, "_emit_discovery_heartbeat", _hb
+            ), patch.object(
+                m, "_IDLE_KEEPALIVE_INTERVAL", timedelta(seconds=0.001)
+            ):
+                task = asyncio.create_task(m._idle_keepalive_loop(worker))
+                await asyncio.wait_for(started.wait(), timeout=5.0)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert task.cancelled()
+
+        asyncio.get_event_loop().run_until_complete(_run())
