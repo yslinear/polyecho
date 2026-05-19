@@ -201,16 +201,27 @@ def compute_frequency_stats(
     median_gap_minutes = float(statistics.median(gaps_min)) if gaps_min else 0.0
 
     if len(gaps_s) >= 2:
-        # Clipped coefficient of variation of inter-trade gaps (NOT the
-        # Goh-Barabási B index — see compute_frequency_stats docstring,
-        # I7).  ddof=1 = sample std.  Range forced to [0, 1] so the
-        # downstream replicability ``1 − burstiness`` penalty stays a
-        # well-defined factor in [0, 1].
+        # SATURATING-normalised coefficient of variation of the
+        # inter-trade gaps: ``cv = std/mean`` (ddof=1 sample std), then
+        # ``burstiness = cv / (1 + cv)`` ∈ [0, 1).
+        #
+        # WHY NOT ``clip(cv, 0, 1)`` (the previous impl): real
+        # inter-trade-gap distributions are heavy-tailed, so ``cv`` is
+        # ≥ 1 for essentially every real leader.  A hard clip then pinned
+        # ``burstiness`` at EXACTLY 1.0, and the single downstream
+        # consumer ``scoring.replicability_score`` uses
+        # ``burstiness_factor = clip(1 − burstiness, 0, 1)`` inside a
+        # PRODUCT of four factors — so a 1.0 zeroed replicability (and
+        # the multiplicative ``total_score``) for ~every candidate,
+        # collapsing the whole ranking to zeros.  ``cv/(1+cv)`` is
+        # monotonic in cv, stays in [0, 1) (never exactly 1 for finite
+        # cv → the penalty never hard-zeros), and preserves the [0, 1]
+        # domain the downstream ``clip(1 − burstiness, 0, 1)`` needs.
         arr = np.array(gaps_s, dtype=float)
         mean_g = float(np.mean(arr))
         std_g = float(np.std(arr, ddof=1))
         cv = (std_g / mean_g) if mean_g > 0 else 0.0
-        burstiness = float(np.clip(cv, 0.0, 1.0))
+        burstiness = float(cv / (1.0 + cv))
     else:
         burstiness = 0.0
 

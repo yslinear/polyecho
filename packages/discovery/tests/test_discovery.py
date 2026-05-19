@@ -393,6 +393,80 @@ class TestFinalScore:
     def test_full_scores_near_maximum(self) -> None:
         assert final_score(100.0, 100.0) == pytest.approx(100.0)
 
+
+class TestScoringCollapseRegression:
+    """Recurrence guard for the all-zeros collapse (burstiness clip bug).
+
+    Pre-fix ``frequency.compute_frequency_stats`` mapped the
+    inter-trade-gap CV with ``clip(cv, 0, 1)``.  Real gap distributions
+    are heavy-tailed so ``cv >= 1`` for essentially every leader,
+    pinning ``burstiness`` at EXACTLY 1.0; ``replicability_score`` then
+    computed ``burstiness_factor = clip(1 - 1.0, 0, 1) = 0`` inside a
+    four-factor PRODUCT, zeroing replicability AND the multiplicative
+    ``final_score`` for ~every candidate (dashboard showed all 0).
+
+    The existing scoring unit tests hand-fed ``burstiness=0.2`` and
+    never exercised the real frequency→scoring path, so the collapse
+    was invisible to them.  These bind the two layers and assert a
+    realistic leader yields STRICTLY non-zero scores: they FAIL on the
+    old ``clip(cv,0,1)`` impl, pass on the saturating ``cv/(1+cv)``.
+    """
+
+    @staticmethod
+    def _realistic_irregular_activity() -> list[ActivityRecord]:
+        # Real-world-ish leader: irregular (heavy-tailed) inter-trade
+        # gaps whose CV is > 1 — exactly the regime the old clip pinned
+        # to burstiness == 1.0.
+        base = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+        gaps_min = [45, 90, 30, 240, 60, 150, 35, 600]  # CV > 1
+        records: list[ActivityRecord] = []
+        t = base
+        for i in range(48):
+            records.append(_make_record(ts=t, condition_id=f"0xc{i % 7}"))
+            t = t + timedelta(minutes=gaps_min[i % len(gaps_min)])
+        return records
+
+    def test_burstiness_never_pins_at_one_for_heavy_tailed_gaps(
+        self,
+    ) -> None:
+        stats = compute_frequency_stats(
+            self._realistic_irregular_activity(), window_days=30
+        )
+        # The invariant the clip bug violated: a finite-CV leader must
+        # NOT saturate burstiness to exactly 1.0 (which would hard-zero
+        # the whole multiplicative replicability score).
+        assert 0.0 < stats.burstiness < 1.0
+
+    def test_realistic_leader_has_nonzero_replicability_and_total(
+        self,
+    ) -> None:
+        fs = compute_frequency_stats(
+            self._realistic_irregular_activity(), window_days=30
+        ).to_dict()
+
+        rep = replicability_score(fs, follower_capital_usd=1000.0)
+        assert rep > 0.0, (
+            "replicability collapsed to 0 — the burstiness clip "
+            "regression is back"
+        )
+
+        prof = profit_score(
+            {
+                "pnl_usd": 80_000.0,
+                "win_rate": 0.62,
+                "sharpe": 1.5,
+                "max_drawdown": 0.3,
+                "consistency": 0.6,
+                "specialization": 0.5,
+            }
+        )
+        fin = final_score(prof, rep)
+        assert prof > 0.0
+        assert fin > 0.0, (
+            "final_score collapsed to 0 for a realistic profitable, "
+            "copyable leader — discovery ranking is all-zeros again"
+        )
+
     def test_proportional(self) -> None:
         assert final_score(80.0, 50.0) == pytest.approx(40.0)
 
@@ -2195,14 +2269,22 @@ class TestI4LargePositionNoTruncation:
 
 
 class TestI7BurstinessDefinitionConsistent:
-    """I7 — burstiness is a clipped CV in [0, 1]; its docstring no longer
-    falsely cites Goh-Barabási, and the downstream replicability penalty
-    ``1 − burstiness`` stays a well-defined factor in [0, 1].
+    """I7 / Z1 — burstiness is a SATURATING-normalised CV ``cv/(1+cv)``
+    in [0, 1): its docstring no longer falsely cites Goh-Barabási, and —
+    critically — it NEVER pins at exactly 1.0 for finite CV, so the
+    downstream multiplicative replicability penalty ``1 − burstiness``
+    can no longer hard-zero every leader's score (the prior
+    ``clip(cv,0,1)`` did exactly that — see
+    TestScoringCollapseRegression).
     """
 
-    def test_burstiness_range_is_zero_to_one(self) -> None:
-        # Extremely clustered → CV high → clipped at 1.0 (never > 1, never
-        # negative — a raw Goh-Barabási B would allow [-1, 1]).
+    def test_burstiness_high_but_strictly_below_one_when_clustered(
+        self,
+    ) -> None:
+        # Extremely clustered (8 trades 1 s apart + one 20-day gap) →
+        # very high CV.  The OLD ``clip(cv,0,1)`` pinned this at EXACTLY
+        # 1.0 (→ replicability factor 0 → all scores 0).  The saturating
+        # ``cv/(1+cv)`` must instead stay high yet STRICTLY < 1.0.
         base = datetime(2026, 1, 1, tzinfo=UTC)
         recs: list[ActivityRecord] = []
         for i in range(8):  # tight cluster
@@ -2211,8 +2293,8 @@ class TestI7BurstinessDefinitionConsistent:
         recs.append(_make_record(ts=base + timedelta(days=20),
                                   condition_id="b"))  # one huge gap
         stats = compute_frequency_stats(recs, window_days=30)
-        assert 0.0 <= stats.burstiness <= 1.0
-        assert stats.burstiness == pytest.approx(1.0, abs=1e-6)
+        assert 0.0 <= stats.burstiness < 1.0          # never the clip 1.0
+        assert stats.burstiness > 0.5                 # still high (bursty)
 
     def test_downstream_factor_well_defined(self) -> None:
         # For any burstiness in [0, 1], 1 - burstiness ∈ [0, 1] so the
