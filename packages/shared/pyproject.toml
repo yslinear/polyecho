@@ -10,7 +10,7 @@ dependencies = [
   # (verified). py-builder-relayer-client is deliberately NOT declared:
   # gasless deploy is delegated to the off-chain relayer (no client lib).
   "py-clob-client-v2==1.0.1",
-  "sqlalchemy[asyncio]>=2.0",
+  "sqlalchemy[asyncio]>=2.0.49",
   "asyncpg>=0.30",
   "pydantic>=2",
   "pydantic-settings>=2",
