@@ -686,6 +686,7 @@ async def test_run_supervised_runs_engine_once_then_parks(
         "redeem": 0,
         "daily": 0,
         "integ": 0,
+        "park": 0,
     }
 
     class _Core:
@@ -700,6 +701,14 @@ async def test_run_supervised_runs_engine_once_then_parks(
             # from run_supervised so the dashboard /status panel stayed
             # permanently empty.  Bounded fake of the never-exit loop.
             calls["integ"] += 1
+            await asyncio.sleep(0)
+
+        async def _park(self) -> None:
+            # ``run_supervised`` also drives the W2 idle-keepalive
+            # ``core._park()`` sibling alongside the probe loop; the
+            # double must expose it or the supervised gather AttributeErrors.
+            # Bounded fake of the never-exit park loop.
+            calls["park"] += 1
             await asyncio.sleep(0)
 
     async def _startup() -> None:
@@ -733,6 +742,8 @@ async def test_run_supervised_runs_engine_once_then_parks(
     # The §7.1 integration connectivity probe loop is now ALSO driven by
     # the deployed entrypoint (previously omitted ⇒ /status empty).
     assert calls["integ"] == 1
+    # The W2 idle-keepalive park loop is ALSO driven by run_supervised.
+    assert calls["park"] == 1
 
 
 def test_once_path_never_calls_run_supervised(
@@ -770,7 +781,10 @@ def test_once_path_never_calls_run_supervised(
 
     monkeypatch.setattr(main_mod, "TraderCore", _Core)
     monkeypatch.setattr(main_mod, "run_supervised", _supervised)
-    monkeypatch.setattr(main_mod, "_demo_follows", lambda: [])
+    # NOTE: ``_demo_follows`` was removed (no fake-data generator). The
+    # entrypoint now always builds ``follows=[]`` and passes it to
+    # ``TraderCore``; the ``_Core`` double ignores the kwarg, so the
+    # exit-code / no-supervised contract under ``--once`` is unchanged.
 
     rc = asyncio.get_event_loop().run_until_complete(
         main_mod.main(["--once"])

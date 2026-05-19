@@ -610,10 +610,18 @@ async def run_supervised(
     # ``integration_status`` row (the dashboard /status connectivity panel
     # stays empty).  Same ``gather(return_exceptions=True)`` rationale:
     # one loop faulting must never stop the siblings.
+    # ``core._park()`` is the W2 idle keepalive: it re-stamps a
+    # ``phase="idle"`` trader_heartbeat every ~90s.  ``TraderCore.run``
+    # attaches it via its own TaskGroup, but ``__main__`` deploys THIS
+    # entrypoint, which calls ``run_once`` ONCE then parks here — so
+    # without this line trader_heartbeat freezes at the single startup
+    # pass and the dashboard false-flags Trader as 逾時/stale ~5 min
+    # later (exact same deployed-entrypoint gap as the §7.1 probe above).
     await asyncio.gather(  # pragma: no cover - supervised loop
         _redeem_loop(worker, interval_seconds=redeem_interval_seconds),
         _daily_reconcile_loop(interval_seconds=reconcile_interval_seconds),
         core._integration_probe_loop(),
+        core._park(),
         return_exceptions=True,
     )
 
