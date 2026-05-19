@@ -50,6 +50,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from polyecho.discovery._markets import fetch_hot_markets_gamma
 from polyecho.discovery._perf import (
     DISCOVERY_CYCLE_TARGET_SECONDS,
     perf_timer,
@@ -62,7 +63,11 @@ from polyecho.discovery.frequency import (
 )
 from polyecho.discovery.riskflags import detect_risk_flags
 from polyecho.discovery.scoring import final_score, profit_score, replicability_score
-from polyecho.shared.datasource import ActivityRecord, DataSource
+from polyecho.shared.datasource import (
+    ActivityRecord,
+    DataSource,
+    FixtureDataSource,
+)
 from polyecho.shared.db import session_scope
 from polyecho.shared.events import (
     EventType,
@@ -223,9 +228,14 @@ _LARGE_POSITION_DATA_API_OFFSET_CAP = 10_000
 # wallet loop out with ``asyncio.gather`` but cap the in-flight count at
 # ``_DISCOVERY_CONCURRENCY`` via a single module-level semaphore so we
 # never open an unbounded number of sockets against the Polymarket
-# data-api (politeness + memory bound).  8 is a deliberately conservative
-# default (the live source already paginates internally per call).
-_DISCOVERY_CONCURRENCY = 8
+# data-api (politeness + memory bound).  Raised 8 → 12: cold-start
+# profiling showed a 200-entry board took 4 daily sweeps to fully detail
+# at budget 50; per-wallet cost is ≈ 2 activity pages + 1 positions read,
+# so 120 wallets × 3 reads @ concurrency 12 still completes well inside
+# the §7.1 30-min full-recompute budget while ~halving wall-clock vs 8.
+# The live source still paginates internally per call, so 12 in-flight
+# wallets is a bounded, polite socket ceiling (not 12×N).
+_DISCOVERY_CONCURRENCY = 12
 
 # L2 — daily full-scoring staleness gate.  A wallet whose ``last_active_at``
 # is unchanged AND whose ``last_seen_ts`` cursor is newer than
@@ -241,7 +251,13 @@ _DISCOVERY_STALENESS_DAYS = 1
 # are new / crossed a rank·pnl delta / are staler than
 # ``_DISCOVERY_STALE_DETAIL_DAYS`` — capped at ``_DISCOVERY_DETAIL_BUDGET``
 # per daily sweep so a single sweep can never blow the §7.1 time budget.
-_DISCOVERY_DETAIL_BUDGET = 50
+# Raised 50 → 120: at 50 a cold-start 200-entry leaderboard needed 4
+# daily sweeps before every entry had been fully detailed once.  Per
+# wallet ≈ 2 activity pages + 1 positions read; 120 × 3 reads at
+# concurrency 12 (see ``_DISCOVERY_CONCURRENCY``) stays comfortably
+# inside the §7.1 30-min full-recompute budget, cutting cold-start
+# convergence to ≤ 2 sweeps without risking the time ceiling.
+_DISCOVERY_DETAIL_BUDGET = 120
 
 # A thin row is promoted to a full re-score when its leaderboard rank
 # improved by ≥ this many places OR its leaderboard pnl moved by ≥ this
@@ -1049,11 +1065,32 @@ class DiscoveryWorker:
         # pass.  Reset (drained) once per heartbeat by
         # :meth:`drain_pass_counters` so each heartbeat reports only the
         # work done since the previous one.
+        #
+        # Per-SOURCE counters (``hot_market_holders`` / ``leaderboard`` /
+        # ``large_new_positions`` / ``smart_money_seed``) are incremented
+        # once per wallet ``_process_wallet`` handles, keyed by its
+        # ``source``.  They surface in the F0 heartbeat ``counters``
+        # sub-dict (free-form; the web /status reader only consumes known
+        # keys, so adding keys is additive-safe) so a *dead source*
+        # (e.g. live hot-markets 404) shows ``hot_market_holders: 0``
+        # instead of the whole worker merely looking healthy off the
+        # other sources.
         self._pass_counters: dict[str, int] = {
             "scanned": 0,
             "scored": 0,
             "emitted": 0,
+            "hot_market_holders": 0,
+            "leaderboard": 0,
+            "large_new_positions": 0,
+            "smart_money_seed": 0,
         }
+        # The exact reset baseline drained per heartbeat — kept in one
+        # place so the source keys can never drift out of sync with the
+        # ctor (a missing key would make a dead source *vanish* from the
+        # heartbeat instead of reporting 0).
+        self._pass_counter_zero: dict[str, int] = dict.fromkeys(
+            self._pass_counters, 0
+        )
 
     @property
     def datasource_name(self) -> str:
@@ -1072,7 +1109,11 @@ class DiscoveryWorker:
         this safe to call between passes.
         """
         snapshot = dict(self._pass_counters)
-        self._pass_counters = {"scanned": 0, "scored": 0, "emitted": 0}
+        # Reset to the full zero baseline (incl. the per-source keys) so
+        # every heartbeat reports the same key set — a source that did
+        # NOTHING this pass still reports ``<source>: 0`` rather than
+        # disappearing from the heartbeat.
+        self._pass_counters = dict(self._pass_counter_zero)
         return snapshot
 
     # ------------------------------------------------------------------
@@ -1125,6 +1166,13 @@ class DiscoveryWorker:
         # fetch failure (early return below) is still counted as scanned
         # but not scored.
         self._pass_counters["scanned"] += 1
+        # Per-SOURCE attempt counter (same gate as ``scanned``): a wallet
+        # the pipeline *attempts* from ``source`` is counted here even if
+        # its fetch fails, so a dead source reports a non-zero scan only
+        # when it actually fed wallets in.  ``.get`` default keeps an
+        # unrecognised future source from KeyError-ing the pipeline.
+        if source in self._pass_counters:
+            self._pass_counters[source] += 1
 
         try:
             # L1: the 3 independent reads have no data dependency on each
@@ -1274,10 +1322,23 @@ class DiscoveryWorker:
         logger.info("discover_leaderboard: fetched %d entries", len(entries))
 
         now = datetime.now(tz=UTC)
-        # Stable order: by wallet address (the same discipline the rest
-        # of the worker uses — ``sorted(new_wallets)``) so Phase-1 writes
-        # and Phase-2 selection are reproducible under FixtureDataSource.
-        ordered = sorted(entries, key=lambda e: e.wallet)
+        # Stable order driving BOTH the Phase-1 thin upsert and the
+        # Phase-2 detail-budget slice.  Key = ``(not verified, wallet)``:
+        # verified accounts first, then ascending wallet hex as the
+        # tie-breaker.  This is still a TOTAL, stable, network-free key
+        # (``verified`` is already parsed on ``LeaderboardEntry`` and was
+        # otherwise unused) so two fixture sweeps remain byte-identical /
+        # order-independent — but when the §7.1 detail budget saturates,
+        # the surviving subset is the *verified* leaders rather than
+        # whoever happened to have the lowest wallet hex.  ``getattr``
+        # default: the frozen DTO always carries ``verified``; treating a
+        # missing value as "unverified" keeps the key conservative and
+        # robust to minimal entry stubs (a missing flag must never crash
+        # the daily sweep — same fail-safe spirit as the rest of L3).
+        ordered = sorted(
+            entries,
+            key=lambda e: (not getattr(e, "verified", False), e.wallet),
+        )
 
         # ── Phase 1 — thin upsert for every entry (no network/wallet call).
         detail_candidates: list[Any] = []
@@ -1357,24 +1418,62 @@ class DiscoveryWorker:
     async def discover_hot_market_holders(self) -> None:
         """Fetch top-10 holders for each 24h-volume > $100K market (PRD §5.2).
 
-        Uses ``get_markets_by_volume`` then ``get_market_top_holders`` per market.
+        Datasource split (P0 — real bug fix)
+        ------------------------------------
+        * **Fixture path** (``isinstance(self._ds, FixtureDataSource)``):
+          unchanged — ``self._ds.get_markets_by_volume(...)`` →
+          ``condition_id`` list.  Byte-identical to the prior behaviour
+          so every existing fixture test still passes verbatim.
+        * **Live path**: the FROZEN ``LiveDataSource.get_markets_by_volume``
+          targets the data-api ``GET /markets`` which is a hard ``404``
+          (that endpoint does not exist on the data-api).  ``live.py`` is
+          frozen, so we source the volume-ranked markets caller-side via
+          :func:`fetch_hot_markets_gamma` (gamma-api) and feed the
+          resulting condition ids into the SAME, verified-correct
+          ``get_market_top_holders`` loop below.
+
+        ``fetch_hot_markets_gamma`` is itself fail-soft (returns ``[]`` +
+        one ``discovery_hot_markets_gamma_unavailable`` warning on any
+        error), so a gamma-api outage degrades this source to an empty
+        pass immediately instead of burning the frozen ``_get`` 3×
+        retry/backoff — the dead source then surfaces as
+        ``hot_market_holders: 0`` in the heartbeat.
         """
         logger.info("discover_hot_market_holders: start")
-        markets = await self._ds.get_markets_by_volume(
-            min_volume_24h=100_000.0, limit=200
+        condition_ids: list[str] = []
+        if isinstance(self._ds, FixtureDataSource):
+            markets = await self._ds.get_markets_by_volume(
+                min_volume_24h=100_000.0, limit=200
+            )
+            condition_ids = [m.condition_id for m in markets]
+        else:
+            # Live path: caller-side gamma-api source (data-api
+            # /markets is a hard 404; live.py is frozen).  Fail-soft —
+            # an empty list here is a degraded-but-safe pass, NOT a
+            # crash; warn once and skip rather than retry/backoff.
+            hot = await fetch_hot_markets_gamma(min_vol=100_000.0, limit=200)
+            if not hot:
+                logger.warning(
+                    "discovery_hot_markets_unavailable",
+                    extra={
+                        "reason": "gamma_markets_empty_or_unreachable",
+                    },
+                )
+            condition_ids = [cid for cid, _row in hot]
+        logger.info(
+            "discover_hot_market_holders: %d hot markets", len(condition_ids)
         )
-        logger.info("discover_hot_market_holders: %d hot markets", len(markets))
 
         seen: set[str] = set()
-        for market in markets:
+        for condition_id in condition_ids:
             try:
                 holders = await self._ds.get_market_top_holders(
-                    market.condition_id, limit=10
+                    condition_id, limit=10
                 )
             except Exception:
                 logger.exception(
                     "failed to fetch holders for market",
-                    extra={"condition_id": market.condition_id},
+                    extra={"condition_id": condition_id},
                 )
                 continue
 

@@ -3060,3 +3060,596 @@ class TestFixturePersistenceGate:
             m.set_persistence_enabled(True)
 
         assert seen.get("enabled") is True
+
+
+# ---------------------------------------------------------------------------
+# §N1 — P0: _markets.fetch_hot_markets_gamma (live hot-market source)
+#
+# The frozen LiveDataSource.get_markets_by_volume hits the data-api
+# /markets endpoint which is a hard 404; the volume-ranked listing lives
+# on the gamma-api (BARE JSON list, different params).  These tests pin
+# the new discovery-owned gamma source: descending early-stop,
+# offset pagination, and the fail-soft (never-raise) contract.
+# ---------------------------------------------------------------------------
+
+
+class _FakeGammaResponse:
+    """Minimal httpx.Response stand-in for the gamma /markets endpoint."""
+
+    def __init__(self, payload: Any, status: int = 200) -> None:
+        self._payload = payload
+        self._status = status
+
+    def raise_for_status(self) -> None:
+        if self._status >= 400:
+            import httpx
+
+            raise httpx.HTTPStatusError(
+                f"{self._status}",
+                request=httpx.Request("GET", "https://gamma/markets"),
+                response=httpx.Response(self._status),
+            )
+
+    def json(self) -> Any:
+        return self._payload
+
+
+class _FakeGammaClient:
+    """Async-context httpx.AsyncClient stand-in.
+
+    ``pages`` is a list of payloads returned in offset order; each
+    ``get`` call records its params and pops the next page.
+    """
+
+    def __init__(self, pages: list[Any]) -> None:
+        self._pages = list(pages)
+        self.calls: list[dict[str, Any]] = []
+
+    async def __aenter__(self) -> _FakeGammaClient:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def get(self, path: str, params: dict[str, Any]) -> Any:
+        self.calls.append({"path": path, "params": dict(params)})
+        if not self._pages:
+            return _FakeGammaResponse([])
+        return _FakeGammaResponse(self._pages.pop(0))
+
+
+def _gamma_row(condition_id: str, vol: float) -> dict[str, Any]:
+    return {"conditionId": condition_id, "volume24hr": vol, "x": "ignored"}
+
+
+class TestFetchHotMarketsGamma:
+    """P0 — discovery-owned gamma-api hot-market source."""
+
+    def test_descending_early_stop(self) -> None:
+        """First sub-threshold row stops the scan (list is volume-desc)."""
+        from polyecho.discovery import _markets
+
+        # 5 rows desc; threshold 100k → only the first two qualify, the
+        # third (90k) must trigger an immediate early-return (rows 4/5
+        # are never inspected even though present).
+        page = [
+            _gamma_row("0xa", 500_000.0),
+            _gamma_row("0xb", 120_000.0),
+            _gamma_row("0xc", 90_000.0),
+            _gamma_row("0xd", 80_000.0),
+            _gamma_row("0xe", 1_000_000.0),  # out-of-order trap; unreached
+        ]
+        fake = _FakeGammaClient([page])
+
+        async def _run() -> list[tuple[str, dict[str, Any]]]:
+            with patch.object(
+                _markets, "make_async_client_resolved",
+                AsyncMock(return_value=fake),
+            ):
+                return await _markets.fetch_hot_markets_gamma(
+                    min_vol=100_000.0, limit=200
+                )
+
+        out = asyncio.get_event_loop().run_until_complete(_run())
+        assert [cid for cid, _ in out] == ["0xa", "0xb"]
+        # Stopped after page 1 — no second page request.
+        assert len(fake.calls) == 1
+        # Volume-desc params forwarded as the blueprint specifies.
+        p = fake.calls[0]["params"]
+        assert p["order"] == "volume24hr"
+        assert p["ascending"] == "false"
+        assert p["active"] == "true"
+        assert p["closed"] == "false"
+        assert p["offset"] == 0
+
+    def test_pagination_advances_offset_until_short_page(self) -> None:
+        """Full pages advance ``offset``; a short page ends pagination."""
+        from polyecho.discovery import _markets
+
+        full = [_gamma_row(f"0x{i:02x}", 200_000.0) for i in range(100)]
+        tail = [_gamma_row("0xff", 150_000.0)]  # short page → stop
+        fake = _FakeGammaClient([full, tail])
+
+        async def _run() -> list[tuple[str, dict[str, Any]]]:
+            with patch.object(
+                _markets, "make_async_client_resolved",
+                AsyncMock(return_value=fake),
+            ):
+                return await _markets.fetch_hot_markets_gamma(
+                    min_vol=100_000.0, limit=500
+                )
+
+        out = asyncio.get_event_loop().run_until_complete(_run())
+        assert len(out) == 101
+        assert len(fake.calls) == 2
+        assert fake.calls[0]["params"]["offset"] == 0
+        assert fake.calls[1]["params"]["offset"] == 100
+
+    def test_limit_truncates_results(self) -> None:
+        from polyecho.discovery import _markets
+
+        page = [_gamma_row(f"0x{i:02x}", 300_000.0) for i in range(50)]
+        fake = _FakeGammaClient([page])
+
+        async def _run() -> list[tuple[str, dict[str, Any]]]:
+            with patch.object(
+                _markets, "make_async_client_resolved",
+                AsyncMock(return_value=fake),
+            ):
+                return await _markets.fetch_hot_markets_gamma(
+                    min_vol=0.0, limit=10
+                )
+
+        out = asyncio.get_event_loop().run_until_complete(_run())
+        assert len(out) == 10
+
+    def test_fail_soft_on_http_error_returns_empty(self) -> None:
+        """A transport/HTTP error degrades to [] — never raises."""
+        from polyecho.discovery import _markets
+
+        class _BoomClient(_FakeGammaClient):
+            async def get(self, path: str, params: dict[str, Any]) -> Any:
+                import httpx
+
+                raise httpx.ConnectError("gamma unreachable")
+
+        fake = _BoomClient([])
+
+        async def _run() -> list[tuple[str, dict[str, Any]]]:
+            with patch.object(
+                _markets, "make_async_client_resolved",
+                AsyncMock(return_value=fake),
+            ):
+                return await _markets.fetch_hot_markets_gamma(
+                    min_vol=100_000.0, limit=200
+                )
+
+        out = asyncio.get_event_loop().run_until_complete(_run())
+        assert out == []
+
+    def test_fail_soft_on_non_list_payload(self) -> None:
+        """data-api-style {"data": [...]} envelope (not a bare list) is
+        treated as exhausted, not a crash."""
+        from polyecho.discovery import _markets
+
+        fake = _FakeGammaClient([{"data": [_gamma_row("0xa", 9e9)]}])
+
+        async def _run() -> list[tuple[str, dict[str, Any]]]:
+            with patch.object(
+                _markets, "make_async_client_resolved",
+                AsyncMock(return_value=fake),
+            ):
+                return await _markets.fetch_hot_markets_gamma(
+                    min_vol=100_000.0, limit=200
+                )
+
+        out = asyncio.get_event_loop().run_until_complete(_run())
+        assert out == []
+
+    def test_non_positive_limit_returns_empty_without_network(self) -> None:
+        from polyecho.discovery import _markets
+
+        called = {"n": 0}
+
+        async def _factory(**_kw: Any) -> Any:
+            called["n"] += 1
+            return _FakeGammaClient([])
+
+        async def _run() -> list[tuple[str, dict[str, Any]]]:
+            with patch.object(
+                _markets, "make_async_client_resolved", _factory
+            ):
+                return await _markets.fetch_hot_markets_gamma(
+                    min_vol=0.0, limit=0
+                )
+
+        out = asyncio.get_event_loop().run_until_complete(_run())
+        assert out == []
+        assert called["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# §N2 — P0: discover_hot_market_holders datasource split
+#
+# Fixture path MUST stay byte-identical (calls get_markets_by_volume on
+# the FixtureDataSource); the live path MUST source via the gamma helper
+# and degrade fail-soft to an empty pass + one
+# ``discovery_hot_markets_unavailable`` warning.
+# ---------------------------------------------------------------------------
+
+
+class _HotMarketFixtureSpyDS(FixtureDataSource):
+    """Real FixtureDataSource that records the get_markets_by_volume call
+    so we can prove the fixture path is unchanged (still uses it)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gmbv_calls: list[dict[str, Any]] = []
+
+    async def get_markets_by_volume(  # type: ignore[override]
+        self, *, min_volume_24h: float = 100_000.0, limit: int = 200
+    ) -> list[Any]:
+        self.gmbv_calls.append(
+            {"min_volume_24h": min_volume_24h, "limit": limit}
+        )
+        return await super().get_markets_by_volume(
+            min_volume_24h=min_volume_24h, limit=limit
+        )
+
+
+class TestDiscoverHotMarketHoldersDatasourceSplit:
+    def test_fixture_path_unchanged_uses_get_markets_by_volume(self) -> None:
+        """Fixture mode keeps calling the frozen FixtureDataSource method
+        verbatim — gamma is NOT invoked on the fixture path."""
+        from polyecho.discovery import worker as wmod
+
+        ds = _HotMarketFixtureSpyDS()
+        processed: list[tuple[str, str]] = []
+        gamma_called = {"n": 0}
+
+        async def _fake_gamma(**_kw: Any) -> list[Any]:
+            gamma_called["n"] += 1
+            return []
+
+        async def _run() -> None:
+            worker = DiscoveryWorker(ds, follower_capital_usd=1000.0)
+
+            async def _fake_process(w: str, s: str, **kw: Any) -> None:
+                processed.append((w, s))
+
+            with patch.object(
+                wmod, "fetch_hot_markets_gamma", _fake_gamma
+            ), patch.object(worker, "_process_wallet", _fake_process):
+                await worker.discover_hot_market_holders()
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        # Fixture path used the frozen method with the unchanged args …
+        assert ds.gmbv_calls == [
+            {"min_volume_24h": 100_000.0, "limit": 200}
+        ]
+        # … and the live gamma source was NOT touched.
+        assert gamma_called["n"] == 0
+        # All surfaced wallets are tagged with the hot_market_holders src.
+        assert processed
+        assert all(s == "hot_market_holders" for _w, s in processed)
+
+    def test_live_path_uses_gamma_then_top_holders(self) -> None:
+        """Non-fixture datasource → markets come from the gamma helper,
+        and their condition ids feed get_market_top_holders."""
+        from polyecho.discovery import worker as wmod
+
+        seen_cids: list[str] = []
+
+        class _LiveLikeDS:
+            async def get_markets_by_volume(self, **_kw: Any) -> list[Any]:
+                raise AssertionError(
+                    "live path must NOT call the frozen (404) method"
+                )
+
+            async def get_market_top_holders(
+                self, condition_id: str, *, limit: int = 10
+            ) -> list[PositionRecord]:
+                seen_cids.append(condition_id)
+                return [
+                    _make_position(
+                        wallet=f"0xholder_{condition_id[-1]}",
+                    )
+                ]
+
+        async def _fake_gamma(
+            *, min_vol: float, limit: int
+        ) -> list[tuple[str, dict[str, Any]]]:
+            assert min_vol == 100_000.0
+            return [("0xcond_a", {}), ("0xcond_b", {})]
+
+        processed: list[tuple[str, str]] = []
+
+        async def _run() -> None:
+            worker = DiscoveryWorker(
+                _LiveLikeDS(),  # type: ignore[arg-type]
+                follower_capital_usd=1000.0,
+            )
+
+            async def _fake_process(w: str, s: str, **kw: Any) -> None:
+                processed.append((w, s))
+
+            with patch.object(
+                wmod, "fetch_hot_markets_gamma", _fake_gamma
+            ), patch.object(worker, "_process_wallet", _fake_process):
+                await worker.discover_hot_market_holders()
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert seen_cids == ["0xcond_a", "0xcond_b"]
+        assert sorted(w for w, _ in processed) == [
+            "0xholder_a",
+            "0xholder_b",
+        ]
+
+    def test_live_path_gamma_empty_degrades_failsoft_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Permanent gamma failure → empty pass + ONE clear
+        ``discovery_hot_markets_unavailable`` warning, no retry storm,
+        get_market_top_holders never called."""
+        from polyecho.discovery import worker as wmod
+
+        class _LiveLikeDS:
+            async def get_market_top_holders(
+                self, condition_id: str, *, limit: int = 10
+            ) -> list[PositionRecord]:
+                raise AssertionError(
+                    "must not be reached when no markets resolved"
+                )
+
+        async def _empty_gamma(
+            *, min_vol: float, limit: int
+        ) -> list[tuple[str, dict[str, Any]]]:
+            return []
+
+        processed: list[tuple[str, str]] = []
+
+        async def _run() -> None:
+            worker = DiscoveryWorker(
+                _LiveLikeDS(),  # type: ignore[arg-type]
+                follower_capital_usd=1000.0,
+            )
+
+            async def _fake_process(w: str, s: str, **kw: Any) -> None:
+                processed.append((w, s))
+
+            with patch.object(
+                wmod, "fetch_hot_markets_gamma", _empty_gamma
+            ), patch.object(worker, "_process_wallet", _fake_process):
+                with caplog.at_level("WARNING"):
+                    await worker.discover_hot_market_holders()
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert processed == []
+        assert "discovery_hot_markets_unavailable" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# §N3 — P1: PnL sigmoid scale fidelity fix (regression pins)
+#
+# The scale was raised 10K → 250K (``_PNL_SIGMOID_SCALE_USD``) because at
+# 10K the dominant 25%-weight PnL sub-metric saturated to ~100 for any
+# pnl ≳ $50K across the real top-200.  These tests pin representative
+# points so the scale cannot silently regress.
+# ---------------------------------------------------------------------------
+
+
+class TestPnlSigmoidScaleFidelity:
+    @staticmethod
+    def _pnl_only(pnl: float) -> dict[str, Any]:
+        # Isolate the PnL term: all other sub-metrics zeroed so the score
+        # is exactly ``100 * sigmoid(pnl/scale) * 0.25``.
+        return {
+            "pnl_usd": pnl,
+            "win_rate": 0.0,
+            "sharpe": 0.0,
+            "max_drawdown": 1.0,
+            "consistency": 0.0,
+            "specialization": 0.0,
+        }
+
+    def test_scale_constant_is_250k(self) -> None:
+        from polyecho.discovery.scoring import _PNL_SIGMOID_SCALE_USD
+
+        assert _PNL_SIGMOID_SCALE_USD == 250_000.0
+
+    def test_representative_points_pinned(self) -> None:
+        # pnl_norm = 100*sigmoid(pnl/250k); profit_score weight = 0.25.
+        # $50K → 13.7458, $250K → 18.2765, $1M → 24.5503  (4dp, the
+        # documented discrimination band the 10K scale had flattened).
+        assert profit_score(self._pnl_only(50_000.0)) == pytest.approx(
+            13.7458, abs=1e-3
+        )
+        assert profit_score(self._pnl_only(250_000.0)) == pytest.approx(
+            18.2765, abs=1e-3
+        )
+        assert profit_score(self._pnl_only(1_000_000.0)) == pytest.approx(
+            24.5503, abs=1e-3
+        )
+
+    def test_discriminates_across_real_top200_band(self) -> None:
+        """The whole point of the fix: $250K and $1M must NOT collapse to
+        the same score (they did at the old 10K scale, both ~25.0)."""
+        s_50k = profit_score(self._pnl_only(50_000.0))
+        s_250k = profit_score(self._pnl_only(250_000.0))
+        s_1m = profit_score(self._pnl_only(1_000_000.0))
+        s_35m = profit_score(self._pnl_only(3_500_000.0))
+        # Strictly increasing with a meaningful (> 1 pt) spread between
+        # the mid-distribution points the old scale had pinned at ~25.
+        assert s_50k < s_250k < s_1m < s_35m
+        assert s_1m - s_250k > 1.0
+        assert s_250k - s_50k > 1.0
+
+    def test_zero_pnl_still_midpoint(self) -> None:
+        # Shape preserved: sigmoid(0)=0.5 → 12.5 with 0.25 weight.
+        assert profit_score(self._pnl_only(0.0)) == pytest.approx(
+            12.5, abs=1e-6
+        )
+
+    def test_extremes_still_saturate(self) -> None:
+        # Numerical-stability contract is unchanged by the rescale.
+        assert profit_score(self._pnl_only(1e12)) == pytest.approx(
+            25.0, abs=1e-3
+        )
+        assert profit_score(self._pnl_only(-1e12)) == pytest.approx(
+            0.0, abs=1e-6
+        )
+
+
+# ---------------------------------------------------------------------------
+# §N4 — P2: verified-first detail-budget ordering
+#
+# When the Phase-2 detail budget saturates, the surviving subset must be
+# the *verified* leaders (then ascending wallet hex), not whoever has the
+# lowest wallet hex.  Still a total + stable + deterministic key.
+# ---------------------------------------------------------------------------
+
+
+class TestVerifiedFirstBudgetOrdering:
+    def test_verified_entries_win_the_detail_budget(self) -> None:
+        from polyecho.discovery import worker as wmod
+        from polyecho.shared.datasource import LeaderboardEntry
+
+        # 3 entries: an UNVERIFIED low-hex wallet (would win a pure-hex
+        # sort) and two VERIFIED higher-hex wallets.  With budget 2 the
+        # verified pair must be selected; the low-hex unverified loses.
+        entries = [
+            LeaderboardEntry(
+                rank=1, wallet="0x0000000000000000000000000000000000000001",
+                username="lowhex_unverified", pnl=1.0, volume=1.0,
+                verified=False,
+            ),
+            LeaderboardEntry(
+                rank=2, wallet="0x00000000000000000000000000000000000000ff",
+                username="hi_verified_b", pnl=1.0, volume=1.0,
+                verified=True,
+            ),
+            LeaderboardEntry(
+                rank=3, wallet="0x00000000000000000000000000000000000000aa",
+                username="hi_verified_a", pnl=1.0, volume=1.0,
+                verified=True,
+            ),
+        ]
+
+        class _LBStub:
+            async def get_leaderboard(self, **_kw: Any) -> list[Any]:
+                return list(entries)
+
+        full_called: list[str] = []
+
+        async def _run() -> None:
+            worker = DiscoveryWorker(
+                _LBStub(),  # type: ignore[arg-type]
+                follower_capital_usd=1000.0,
+            )
+
+            # Thin upsert: pretend every entry is NEW (forces all into
+            # _needs_full_detail so only the budget slice decides).
+            async def _thin(*_a: Any, **_k: Any) -> tuple[Any, ...]:
+                return (None, None, None, {})
+
+            async def _fake_full(w: str, s: str, **_k: Any) -> None:
+                full_called.append(w)
+
+            with patch.object(
+                wmod, "_upsert_thin", _thin
+            ), patch.object(
+                wmod, "_DISCOVERY_DETAIL_BUDGET", 2
+            ), patch.object(
+                worker, "_process_wallet", _fake_full
+            ):
+                await worker.discover_leaderboard()
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        # The two VERIFIED wallets are the budgeted subset (verified
+        # first); the low-hex UNVERIFIED wallet is dropped by the budget.
+        assert sorted(full_called) == [
+            "0x00000000000000000000000000000000000000aa",
+            "0x00000000000000000000000000000000000000ff",
+        ]
+        assert (
+            "0x0000000000000000000000000000000000000001"
+            not in full_called
+        )
+
+
+# ---------------------------------------------------------------------------
+# §N5 — P2: per-source heartbeat counters
+#
+# The F0 heartbeat ``counters`` sub-dict must surface a per-source scan
+# count so a dead source (e.g. live hot-markets 404) shows
+# ``hot_market_holders: 0`` instead of the worker merely looking healthy
+# off the other sources.
+# ---------------------------------------------------------------------------
+
+
+class TestPerSourceHeartbeatCounters:
+    def test_counters_seeded_with_all_source_keys(self) -> None:
+        worker = DiscoveryWorker(
+            FixtureDataSource(), follower_capital_usd=1000.0
+        )
+        for key in (
+            "hot_market_holders",
+            "leaderboard",
+            "large_new_positions",
+            "smart_money_seed",
+        ):
+            assert worker._pass_counters[key] == 0
+
+    def test_process_wallet_increments_its_source_counter(self) -> None:
+        # ``scanned`` and the per-source counter are bumped at the TOP of
+        # ``_process_wallet``, before the (gathered) datasource fetch.
+        # Make the fetch fail so the method early-returns right after the
+        # counter bump — deterministic, no DB/persistence involved.
+        class _FetchFailsDS:
+            async def get_user_activity(self, *a: Any, **k: Any) -> Any:
+                raise RuntimeError("fetch deliberately failed for test")
+
+            async def get_positions(self, *a: Any, **k: Any) -> Any:
+                raise RuntimeError("fetch deliberately failed for test")
+
+        worker = DiscoveryWorker(
+            _FetchFailsDS(),  # type: ignore[arg-type]
+            follower_capital_usd=1000.0,
+        )
+
+        async def _run() -> None:
+            await worker._process_wallet(W_SWING, "hot_market_holders")
+            await worker._process_wallet(W_SCALPER, "leaderboard")
+            await worker._process_wallet(W_SWING, "hot_market_holders")
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert worker._pass_counters["hot_market_holders"] == 2
+        assert worker._pass_counters["leaderboard"] == 1
+        assert worker._pass_counters["large_new_positions"] == 0
+        assert worker._pass_counters["smart_money_seed"] == 0
+        # ``scanned`` still counts every attempt regardless of source.
+        assert worker._pass_counters["scanned"] == 3
+
+    def test_drain_resets_all_keys_including_sources(self) -> None:
+        """A drained heartbeat must keep reporting every source key (a
+        dead source = ``<source>: 0``, never a vanished key)."""
+        worker = DiscoveryWorker(
+            FixtureDataSource(), follower_capital_usd=1000.0
+        )
+        worker._pass_counters["hot_market_holders"] = 7
+        worker._pass_counters["scanned"] = 9
+
+        snap = worker.drain_pass_counters()
+        assert snap["hot_market_holders"] == 7
+        assert snap["scanned"] == 9
+        # Reset baseline still carries ALL source keys at 0.
+        for key in (
+            "scanned",
+            "scored",
+            "emitted",
+            "hot_market_holders",
+            "leaderboard",
+            "large_new_positions",
+            "smart_money_seed",
+        ):
+            assert worker._pass_counters[key] == 0

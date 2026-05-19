@@ -20,8 +20,11 @@ replicability_score factors (PRD §5.2):
     Frequency match × capital match × burstiness penalty × time-overlap
 
 Normalisation decisions (documented per sub-metric):
-    pnl_usd       → sigmoid-like: score100 = 100/(1+exp(-pnl/10000))
-                    A $10K PnL ≈ 50 pts; $50K ≈ 99 pts; negative → <50.
+    pnl_usd       → sigmoid-like: score100 = 100/(1+exp(-pnl/250000))
+                    $250K ≈ 73 pts; $1M ≈ 98 pts; $0 = 50; negative → <50.
+                    (Scale raised 10K → 250K — see ``_PNL_SIGMOID_SCALE_USD``;
+                    10K saturated the dominant sub-metric across the real
+                    leaderboard.)
     win_rate      → linear: score100 = win_rate * 100  (0.65 → 65 pts)
     sharpe        → clamp: score100 = clamp(sharpe*25, 0, 100)
                     Sharpe 2.0 → 50 pts; 4.0 → 100 pts.
@@ -41,6 +44,31 @@ from typing import Any
 # Assumed monitoring window: 08:00–23:00 Taipei = 00:00–15:00 UTC
 # ---------------------------------------------------------------------------
 _FOLLOWER_ACTIVE_HOURS_UTC: frozenset[int] = frozenset(range(0, 15))  # 00–14 UTC
+
+# ---------------------------------------------------------------------------
+# PnL sigmoid scale (USD)
+# ---------------------------------------------------------------------------
+# The profit_score PnL sub-metric is ``100 * sigmoid(pnl_usd / SCALE)``.
+# The original SCALE was $10K, which makes ``sigmoid(pnl/10k) ≈ 1.0`` for
+# *any* pnl ≳ $50K: with the real Polymarket leaderboard pnl distribution
+# (top traders reach ≈ $3.5M), the dominant 25 %-weight PnL component
+# collapsed to a near-constant 100 across the entire ranked top-200 —
+# i.e. it stopped discriminating exactly where ranking matters most.
+#
+# Raising SCALE to $250K restores discrimination across the real
+# distribution while keeping the identical sigmoid shape:
+#     $0   → 50.0 pts   (unchanged: sigmoid(0) = 0.5)
+#     $50K → ~55.0 pts
+#     $250K→ ~73.1 pts
+#     $1M  → ~98.2 pts
+#     $3.5M→ ~100  pts   (saturates only at the genuine extreme)
+# so the top-200 spread out monotonically instead of all pinning at 100.
+#
+# This is a FIDELITY fix, not a weights change: PRD §5.2 fixes the
+# *weights* (PnL 25 %, …), it does NOT pin this internal normaliser
+# constant — the constant only controls how raw USD maps onto [0, 100]
+# before the §5.2 weighting is applied.
+_PNL_SIGMOID_SCALE_USD: float = 250_000.0
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -71,7 +99,7 @@ def profit_score(stats: dict[str, Any]) -> float:
     drawdown, consistency, and market specialization.
 
     Sub-metric normalisation (see module docstring for rationale):
-    - pnl_usd      → sigmoid: 100 / (1 + exp(-pnl / 10_000))
+    - pnl_usd      → sigmoid: 100 / (1 + exp(-pnl / _PNL_SIGMOID_SCALE_USD))
     - win_rate     → linear 0–1 → 0–100
     - sharpe       → clamp(sharpe × 25, 0, 100) [Sharpe 4 → 100]
     - max_drawdown → (1 - drawdown) × 100, drawdown in [0, 1]
@@ -98,11 +126,14 @@ def profit_score(stats: dict[str, Any]) -> float:
     specialization: float = float(stats.get("specialization", 0.0))  # 0–1
 
     # ── normalise each sub-metric to [0, 100] ─────────────────────────────────
-    # PnL: sigmoid centred at 0 with scale $10K.
-    # $0 → 50 pts; $10K → ~73 pts; $50K → ~99 pts; −$10K → ~27 pts.
+    # PnL: sigmoid centred at 0, scale ``_PNL_SIGMOID_SCALE_USD`` ($250K).
+    # $0 → 50 pts; $250K → ~73 pts; $1M → ~98 pts; −$250K → ~27 pts.
+    # (Scale raised from $10K — see ``_PNL_SIGMOID_SCALE_USD``: $10K
+    # saturated this dominant 25 %-weight component to ~100 for any
+    # pnl ≳ $50K across the real top-200 distribution.)
     # Numerically stable: huge negative PnL saturates to 0 instead of
     # raising OverflowError (see :func:`_sigmoid`).
-    pnl_norm = 100.0 * _sigmoid(pnl_usd / 10_000.0)
+    pnl_norm = 100.0 * _sigmoid(pnl_usd / _PNL_SIGMOID_SCALE_USD)
 
     # Win-rate: linear. 0.5 → 50 pts; 0.65 → 65 pts; 1.0 → 100 pts.
     win_norm = _clamp(win_rate * 100.0, 0.0, 100.0)
