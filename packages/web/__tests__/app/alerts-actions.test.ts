@@ -8,12 +8,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  *    private key (only `settings` is queried; nothing returns the secret).
  *  - subscribePush UPSERTs on the UNIQUE endpoint (insert ->
  *    onConflictDoUpdate) and rejects incomplete subscriptions.
- *  - createPendingAction inserts awaiting_confirm with a ~300s TTL.
- *  - createPendingAction does NOT write confirm_passphrase_hash (NULL).
- *  - confirmPendingAction: fail-closed when settings.danger_passphrase_hash
- *    is unset; SERVER-SIDE 5s min-age gate vs created_at (not the client
- *    countdown); verifies a Python-format pbkdf2$... hash (positive +
- *    wrong-pass), rejects without consuming the row, expired rejected.
+ *  - confirmDangerousAction (INLINE single-step): rejects an unknown type;
+ *    rejects a non-verbatim type-to-confirm phrase WITHOUT touching the
+ *    DB; fail-closed when settings.danger_passphrase_hash is unset; with a
+ *    correct Python-format pbkdf2$... hash + the verbatim phrase + the
+ *    right passphrase it INSERTS one row DIRECTLY as status `confirmed`
+ *    (NO confirm_passphrase_hash, params carry an _inline_confirmed_at
+ *    marker) and ALSO emits the frozen pending_dangerous_action event;
+ *    a WRONG passphrase / sub-floor hash writes NOTHING.
  *
  * Drizzle is fully mocked; crypto is real (clamped to the 100000 floor).
  */
@@ -54,9 +56,9 @@ const update = vi.fn(() => ({ set: updateSet }));
 // select(...).from(...).where(...).limit(...) | .orderBy(...)
 //
 // `selectResult` is the default single result. `selectQueue`, when
-// non-empty, is consumed one entry per `.limit()` call — used by
-// confirmPendingAction which does TWO selects (pending row, THEN the
-// settings.danger_passphrase_hash row).
+// non-empty, is consumed one entry per `.limit()` call (kept for any
+// multi-select callers). confirmDangerousAction does exactly ONE select
+// (the settings.danger_passphrase_hash row) before its conditional insert.
 let selectResult: unknown[] = [];
 let selectQueue: unknown[][] | null = null;
 const nextSelect = () => {
@@ -86,9 +88,9 @@ import {
   getVapidPublicKey,
   subscribePush,
   unsubscribePush,
-  createPendingAction,
-  confirmPendingAction,
+  confirmDangerousAction,
 } from "@/app/alerts/actions";
+import { CONFIRM_PHRASE } from "@/app/alerts/dangerous-shared";
 
 beforeEach(() => {
   insert.mockClear();
@@ -164,35 +166,100 @@ describe("unsubscribePush", () => {
   });
 });
 
-describe("createPendingAction", () => {
-  it("inserts awaiting_confirm with a ~300s expiry", async () => {
-    const before = Date.now();
-    const res = await createPendingAction("manual_sell", { target: "m1" });
-    expect(res.ok).toBe(true);
-    expect(res.id).toBe("pa-1");
-    const row = insertValues.mock.calls[0][0] as Record<string, unknown>;
-    expect(row.action_type).toBe("manual_sell");
-    expect(row.status).toBe("awaiting_confirm");
-    const exp = (row.expires_at as Date).getTime();
-    expect(exp).toBeGreaterThanOrEqual(before + 299_000);
-    expect(exp).toBeLessThanOrEqual(Date.now() + 301_000);
-    // P0-1: NO passphrase material is written — confirm_passphrase_hash
-    // must NOT be in the insert values (stays NULL, it is unused).
-    expect("confirm_passphrase_hash" in row).toBe(false);
+describe("confirmDangerousAction (INLINE single-step)", () => {
+  it("rejects an unknown action type without touching the DB", async () => {
+    const res = await confirmDangerousAction({
+      actionType: "nope" as unknown as "manual_sell",
+      params: {},
+      confirmText: CONFIRM_PHRASE,
+      passphrase: "x",
+    });
+    expect(res.ok).toBe(false);
+    expect(select).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
   });
 
-  it("rejects an unknown action type", async () => {
-    const res = await createPendingAction(
-      "nope" as unknown as "manual_sell",
-      {}
-    );
+  it("rejects a non-verbatim type-to-confirm phrase without touching the DB", async () => {
+    const res = await confirmDangerousAction({
+      actionType: "manual_sell",
+      params: { target: "m1" },
+      confirmText: "確認", // not the full verbatim phrase
+      passphrase: "secret",
+    });
+    expect(res.ok).toBe(false);
+    // The phrase gate is BEFORE any DB read: no select, no insert.
+    expect(select).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty passphrase even with the verbatim phrase", async () => {
+    const res = await confirmDangerousAction({
+      actionType: "manual_sell",
+      params: { target: "m1" },
+      confirmText: CONFIRM_PHRASE,
+      passphrase: "",
+    });
     expect(res.ok).toBe(false);
     expect(insert).not.toHaveBeenCalled();
   });
 
+  it("FAILS CLOSED when settings.danger_passphrase_hash is unset", async () => {
+    selectResult = []; // settings.danger_passphrase_hash lookup -> none
+    const res = await confirmDangerousAction({
+      actionType: "manual_sell",
+      params: { target: "m1" },
+      confirmText: CONFIRM_PHRASE,
+      passphrase: "anything",
+    });
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain("set-danger-passphrase");
+    // Never auto-provision, NEVER write a row.
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("verifies a Python-format pbkdf2 hash and inserts a CONFIRMED row", async () => {
+    const { hashPassphrase } = await import("@/lib/passphrase");
+    const stored = await hashPassphrase("correct horse"); // canonical format
+    selectResult = [{ value: stored }]; // operator-provisioned hash
+    const before = Date.now();
+    const res = await confirmDangerousAction({
+      actionType: "manual_sell",
+      params: { target: "m1", size: "100" },
+      confirmText: CONFIRM_PHRASE,
+      passphrase: "correct horse",
+    });
+    expect(res.ok).toBe(true);
+    expect(res.id).toBe("pa-1");
+
+    // First insert is the pending_actions row, written DIRECTLY as
+    // status `confirmed` (no transient awaiting_confirm row).
+    const row = insertValues.mock.calls[0][0] as Record<string, unknown>;
+    expect(row.action_type).toBe("manual_sell");
+    expect(row.status).toBe("confirmed");
+    // NO passphrase material is ever written.
+    expect("confirm_passphrase_hash" in row).toBe(false);
+    // params carry the original params PLUS an _inline_confirmed_at audit
+    // marker (an ISO timestamp ~now); core/pending ignores unknown keys.
+    const rowParams = row.params as Record<string, unknown>;
+    expect(rowParams.target).toBe("m1");
+    expect(rowParams.size).toBe("100");
+    const stampMs = new Date(
+      rowParams._inline_confirmed_at as string
+    ).getTime();
+    expect(stampMs).toBeGreaterThanOrEqual(before - 1000);
+    expect(stampMs).toBeLessThanOrEqual(Date.now() + 1000);
+    // No UPDATE path at all in the inline flow (it inserts directly).
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it("ALSO emits the frozen pending_dangerous_action events row + NOTIFY", async () => {
-    const res = await createPendingAction("emergency_liquidate", {
-      target: "m9",
+    const { hashPassphrase } = await import("@/lib/passphrase");
+    selectResult = [{ value: await hashPassphrase("pw") }];
+    const res = await confirmDangerousAction({
+      actionType: "emergency_liquidate",
+      params: { target: "m9" },
+      confirmText: CONFIRM_PHRASE,
+      passphrase: "pw",
     });
     expect(res.ok).toBe(true);
 
@@ -211,6 +278,7 @@ describe("createPendingAction", () => {
       push: Record<string, unknown>;
     };
     // Frozen jsonb shape: { data: <payload>, push: <PushPayload.to_json()> }.
+    // params_summary is the ORIGINAL params (no audit marker leaked here).
     expect(payload.data).toEqual({
       pending_action_id: "pa-1",
       action_type: "emergency_liquidate",
@@ -236,112 +304,39 @@ describe("createPendingAction", () => {
   });
 
   it("is best-effort: events insert failure still returns success", async () => {
+    const { hashPassphrase } = await import("@/lib/passphrase");
+    selectResult = [{ value: await hashPassphrase("pw") }];
     returning.mockImplementationOnce(() =>
       Promise.resolve([{ id: "pa-1" }])
-    ); // pending insert OK
+    ); // pending insert OK (confirmed)
     returning.mockImplementationOnce(() =>
       Promise.reject(new Error("events insert boom"))
     ); // events insert throws
-    const res = await createPendingAction("manual_sell", { target: "m1" });
-    // Pending action creation MUST still succeed (mirrors Python best-effort).
+    const res = await confirmDangerousAction({
+      actionType: "manual_sell",
+      params: { target: "m1" },
+      confirmText: CONFIRM_PHRASE,
+      passphrase: "pw",
+    });
+    // The confirmed action MUST still succeed (mirrors Python best-effort).
     expect(res.ok).toBe(true);
     expect(res.id).toBe("pa-1");
     // NOTIFY never reached because the events insert threw.
     expect(execute).not.toHaveBeenCalled();
   });
-});
 
-describe("confirmPendingAction", () => {
-  const future = () => new Date(Date.now() + 60_000);
-  // created_at old enough to clear the 5s server-side min-age gate.
-  const aged = () => new Date(Date.now() - 10_000);
-  const noStatusFlip = () =>
-    updateSet.mock.calls.filter(
-      (c) => (c[0] as Record<string, unknown>).status === "confirmed"
-    );
-
-  it("FAILS CLOSED when settings.danger_passphrase_hash is unset", async () => {
-    selectQueue = [
-      // (1) pending row — aged, awaiting, not expired.
-      [
-        {
-          id: "pa-1",
-          status: "awaiting_confirm",
-          expires_at: future(),
-          created_at: aged(),
-        },
-      ],
-      // (2) settings.danger_passphrase_hash lookup -> NOT provisioned.
-      [],
-    ];
-    const res = await confirmPendingAction("pa-1", "anything");
-    expect(res.ok).toBe(false);
-    expect(res.message).toContain("set-danger-passphrase");
-    // Never auto-provision, never flip status.
-    expect(noStatusFlip()).toHaveLength(0);
-  });
-
-  it("rejects within 5s of creation (SERVER-SIDE, not client countdown)", async () => {
-    selectQueue = [
-      [
-        {
-          id: "pa-1",
-          status: "awaiting_confirm",
-          expires_at: future(),
-          created_at: new Date(Date.now() - 1_000), // only 1s old
-        },
-      ],
-      // Hash IS provisioned — proving the rejection is the age gate, not
-      // fail-closed. The settings select should not even be the decider.
-      [{ value: "pbkdf2$100000$AAAA$AAAA" }],
-    ];
-    const res = await confirmPendingAction("pa-1", "whatever");
-    expect(res.ok).toBe(false);
-    expect(res.message).toMatch(/秒/);
-    expect(noStatusFlip()).toHaveLength(0);
-  });
-
-  it("verifies a Python-format pbkdf2 hash and flips to confirmed", async () => {
+  it("rejects the WRONG passphrase and writes NOTHING", async () => {
     const { hashPassphrase } = await import("@/lib/passphrase");
-    const stored = await hashPassphrase("correct horse"); // canonical format
-    selectQueue = [
-      [
-        {
-          id: "pa-1",
-          status: "awaiting_confirm",
-          expires_at: future(),
-          created_at: aged(),
-        },
-      ],
-      // settings row — bare-string jsonb shape (operator-provisioned).
-      [{ value: stored }],
-    ];
-    const res = await confirmPendingAction("pa-1", "correct horse");
-    expect(res.ok).toBe(true);
-    // Exactly ONE update: status -> confirmed. NO hash is ever written.
-    expect(update).toHaveBeenCalledTimes(1);
-    const set0 = updateSet.mock.calls[0][0] as Record<string, unknown>;
-    expect(set0.status).toBe("confirmed");
-    expect("confirm_passphrase_hash" in set0).toBe(false);
-  });
-
-  it("rejects the WRONG passphrase WITHOUT consuming the row", async () => {
-    const { hashPassphrase } = await import("@/lib/passphrase");
-    const stored = await hashPassphrase("right");
-    selectQueue = [
-      [
-        {
-          id: "pa-1",
-          status: "awaiting_confirm",
-          expires_at: future(),
-          created_at: aged(),
-        },
-      ],
-      [{ value: stored }],
-    ];
-    const res = await confirmPendingAction("pa-1", "wrong");
+    selectResult = [{ value: await hashPassphrase("right") }];
+    const res = await confirmDangerousAction({
+      actionType: "manual_sell",
+      params: { target: "m1" },
+      confirmText: CONFIRM_PHRASE,
+      passphrase: "wrong",
+    });
     expect(res.ok).toBe(false);
-    expect(noStatusFlip()).toHaveLength(0);
+    // No row is created on a bad passphrase — the gate is BEFORE the write.
+    expect(insert).not.toHaveBeenCalled();
   });
 
   it("rejects a stored hash whose iterations are below the 100000 floor", async () => {
@@ -357,53 +352,15 @@ describe("confirmPendingAction", () => {
     const tampered = `pbkdf2$99999$${salt.toString(
       "base64"
     )}$${dk.toString("base64")}`;
-    selectQueue = [
-      [
-        {
-          id: "pa-1",
-          status: "awaiting_confirm",
-          expires_at: future(),
-          created_at: aged(),
-        },
-      ],
-      [{ value: tampered }],
-    ];
+    selectResult = [{ value: tampered }];
     // Even the correct passphrase must NOT confirm a sub-floor hash.
-    const res = await confirmPendingAction("pa-1", "pw");
+    const res = await confirmDangerousAction({
+      actionType: "manual_sell",
+      params: { target: "m1" },
+      confirmText: CONFIRM_PHRASE,
+      passphrase: "pw",
+    });
     expect(res.ok).toBe(false);
-    expect(noStatusFlip()).toHaveLength(0);
-  });
-
-  it("rejects an expired row", async () => {
-    selectResult = [
-      {
-        id: "pa-1",
-        status: "awaiting_confirm",
-        expires_at: new Date(Date.now() - 1000),
-        created_at: aged(),
-      },
-    ];
-    const res = await confirmPendingAction("pa-1", "x");
-    expect(res.ok).toBe(false);
-    expect(res.message).toMatch(/逾時/);
-  });
-
-  it("rejects a row that is not awaiting_confirm", async () => {
-    selectResult = [
-      {
-        id: "pa-1",
-        status: "confirmed",
-        expires_at: future(),
-        created_at: aged(),
-      },
-    ];
-    const res = await confirmPendingAction("pa-1", "x");
-    expect(res.ok).toBe(false);
-  });
-
-  it("rejects when the row does not exist", async () => {
-    selectResult = [];
-    const res = await confirmPendingAction("missing", "x");
-    expect(res.ok).toBe(false);
+    expect(insert).not.toHaveBeenCalled();
   });
 });

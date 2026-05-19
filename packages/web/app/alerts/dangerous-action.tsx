@@ -1,20 +1,27 @@
 "use client";
 
 /**
- * DangerousAction — create + two-step confirm for §5.7 危险-tier ops.
+ * DangerousAction — INLINE single-step confirm for §5.7 危险-tier ops.
  *
- * Flow (PRD §5.7):
- *   1. Operator picks MANUAL_SELL / EMERGENCY_LIQUIDATE and fills params
- *      -> createPendingAction (status awaiting_confirm, 300s TTL).
- *   2. A pending row appears in the panel with a hard 5-second countdown
- *      GATE; only after it elapses does the passphrase input enable.
- *   3. Passphrase -> confirmPendingAction (web hashes + verifies; flips
- *      status to confirmed). Wrong passphrase keeps the row (TTL expires it).
+ * The operator decided the elaborate "create a pending request, then
+ * confirm it separately" UI is unnecessary. A dangerous op now requires an
+ * INLINE repeated confirmation in ONE place, then executes directly:
  *
- * The countdown + passphrase live on the pending-row card in
- * <PendingActionsPanel> (passed in by the /alerts Server Component). This
- * component is only the CREATE form — deliberately not a modal (PRD bans
- * modal-first); it's an inline disclosure under a clearly labelled section.
+ *   1. Operator picks MANUAL_SELL / EMERGENCY_LIQUIDATE and fills params.
+ *   2. In the SAME inline form they must (a) type the verbatim confirm
+ *      phrase {@link CONFIRM_PHRASE} AND (b) enter the operator danger
+ *      passphrase. These two independent inputs are the anti-misclick +
+ *      authentication factors (they replace the old separate pending row
+ *      + 5-second countdown gate, which only existed to guard the
+ *      two-step UI).
+ *   3. Submitting calls `confirmDangerousAction` — ONE authenticated
+ *      Server Action that verifies the passphrase (constant-time, against
+ *      the operator-provisioned `settings.danger_passphrase_hash`,
+ *      fail-closed) and ONLY THEN writes a `confirmed` pending_actions row
+ *      trader-core executes. A wrong passphrase writes NOTHING.
+ *
+ * Deliberately NOT a modal (DESIGN.md bans modal-first) — it is an inline
+ * disclosure under a clearly labelled, dashed-border danger section.
  */
 
 import * as React from "react";
@@ -32,21 +39,28 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { t } from "@/lib/i18n";
-import {
-  createPendingAction,
-  type PendingActionType,
-} from "./actions";
+import { confirmDangerousAction } from "./actions";
+import { CONFIRM_PHRASE, type PendingActionType } from "./dangerous-shared";
 
-export function CreateDangerousAction() {
+export function DangerousActionInline() {
   const router = useRouter();
   const [open, setOpen] = React.useState(false);
   const [actionType, setActionType] =
     React.useState<PendingActionType>("manual_sell");
   const [target, setTarget] = React.useState("");
   const [size, setSize] = React.useState("");
+  const [confirmText, setConfirmText] = React.useState("");
+  const [passphrase, setPassphrase] = React.useState("");
   const [pending, setPending] = React.useState(false);
 
-  async function onCreate(e: React.FormEvent<HTMLFormElement>) {
+  function reset() {
+    setTarget("");
+    setSize("");
+    setConfirmText("");
+    setPassphrase("");
+  }
+
+  async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const targetValue = target.trim();
     if (!targetValue) {
@@ -62,20 +76,40 @@ export function CreateDangerousAction() {
       }
       params.size = s;
     }
+    if (confirmText.trim() !== CONFIRM_PHRASE) {
+      toast.error(
+        t("alertsSettings.alerts.danger.errConfirmPhrase", {
+          phrase: CONFIRM_PHRASE,
+        })
+      );
+      return;
+    }
+    if (passphrase.length < 1) {
+      toast.error(t("alertsSettings.alerts.danger.errNoPassphrase"));
+      return;
+    }
     setPending(true);
     try {
-      const res = await createPendingAction(actionType, params);
+      const res = await confirmDangerousAction({
+        actionType,
+        params,
+        confirmText,
+        passphrase,
+      });
       if (res.ok) {
         toast.success(res.message);
-        setTarget("");
-        setSize("");
+        reset();
         setOpen(false);
         router.refresh();
       } else {
         toast.error(res.message);
+        // A wrong passphrase wrote nothing — clear only the secrets so the
+        // operator can re-enter without rebuilding the whole request.
+        setConfirmText("");
+        setPassphrase("");
       }
     } catch {
-      toast.error(t("alertsSettings.alerts.danger.errCreateFailed"));
+      toast.error(t("alertsSettings.alerts.danger.errConfirmFailed"));
     } finally {
       setPending(false);
     }
@@ -100,8 +134,8 @@ export function CreateDangerousAction() {
 
   return (
     <form
-      onSubmit={onCreate}
-      className="space-y-4 rounded-lg border border-dashed p-4"
+      onSubmit={onSubmit}
+      className="space-y-4 rounded-lg border border-dashed border-loss/50 p-4"
       aria-label={t("alertsSettings.alerts.danger.formAria")}
     >
       <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
@@ -177,137 +211,79 @@ export function CreateDangerousAction() {
         ) : null}
       </div>
 
+      {/* Inline repeated confirmation: type-to-confirm + danger passphrase.
+          Both are required by the Server Action; this is the whole gate. */}
+      <div className="space-y-4 rounded-md border border-loss/30 bg-loss/5 p-3">
+        <p className="text-xs font-medium text-loss">
+          {t("alertsSettings.alerts.danger.confirmSectionTitle")}
+        </p>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <label
+              htmlFor="da-confirm"
+              className="text-sm font-medium leading-none"
+            >
+              {t("alertsSettings.alerts.danger.confirmPhraseLabel", {
+                phrase: CONFIRM_PHRASE,
+              })}
+            </label>
+            <Input
+              id="da-confirm"
+              value={confirmText}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={CONFIRM_PHRASE}
+              className="h-9 font-mono text-sm"
+              onChange={(e) => setConfirmText(e.target.value)}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label
+              htmlFor="da-pass"
+              className="text-sm font-medium leading-none"
+            >
+              {t("alertsSettings.alerts.danger.passphraseLabel")}
+            </label>
+            <Input
+              id="da-pass"
+              type="password"
+              value={passphrase}
+              autoComplete="off"
+              placeholder={t(
+                "alertsSettings.alerts.danger.passphrasePlaceholder"
+              )}
+              className="h-9 font-mono text-sm"
+              onChange={(e) => setPassphrase(e.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+
       <div className="flex items-center gap-3">
-        <Button type="submit" size="sm" disabled={pending}>
+        <Button
+          type="submit"
+          size="sm"
+          variant="destructive"
+          disabled={pending}
+          aria-label={t("alertsSettings.alerts.danger.confirmAria")}
+        >
           {pending
-            ? t("alertsSettings.alerts.danger.creating")
-            : t("alertsSettings.alerts.danger.createSubmit")}
+            ? t("alertsSettings.alerts.danger.confirming")
+            : t("alertsSettings.alerts.danger.confirmSubmit")}
         </Button>
         <Button
           type="button"
           variant="ghost"
           size="sm"
           disabled={pending}
-          onClick={() => setOpen(false)}
+          onClick={() => {
+            reset();
+            setOpen(false);
+          }}
         >
           {t("alertsSettings.alerts.danger.cancel")}
         </Button>
       </div>
-    </form>
-  );
-}
-
-/**
- * ConfirmPendingRow — the 5s countdown gate + passphrase confirm for ONE
- * awaiting_confirm row. Rendered by the server-side PendingActionsPanel.
- *
- * `gateSeconds` defaults to 5 (PRD §5.7 mandates the 5-second gate); it is
- * injectable purely so the countdown is deterministically testable without
- * fake-timer gymnastics — production callers never pass it.
- */
-export function ConfirmPendingRow({
-  id,
-  expiresAtIso,
-  gateSeconds = 5,
-}: {
-  id: string;
-  /** ISO string of pending_actions.expires_at */
-  expiresAtIso: string | null;
-  /** Countdown length in seconds. Default 5 (PRD §5.7). */
-  gateSeconds?: number;
-}) {
-  const router = useRouter();
-  const [secondsLeft, setSecondsLeft] = React.useState(gateSeconds);
-  const [passphrase, setPassphrase] = React.useState("");
-  const [pending, setPending] = React.useState(false);
-
-  // Hard countdown gate before the passphrase input is usable.
-  React.useEffect(() => {
-    if (secondsLeft <= 0) return;
-    const t = setTimeout(() => setSecondsLeft((s) => s - 1), 1000);
-    return () => clearTimeout(t);
-  }, [secondsLeft]);
-
-  const expired =
-    expiresAtIso != null &&
-    new Date(expiresAtIso).getTime() <= Date.now();
-  const gateOpen = secondsLeft <= 0 && !expired;
-
-  async function onConfirm(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (!gateOpen) return;
-    if (passphrase.length < 1) {
-      toast.error(t("alertsSettings.alerts.danger.errNoPassphrase"));
-      return;
-    }
-    setPending(true);
-    try {
-      const { confirmPendingAction } = await import("./actions");
-      const res = await confirmPendingAction(id, passphrase);
-      if (res.ok) {
-        toast.success(res.message);
-        setPassphrase("");
-        router.refresh();
-      } else {
-        toast.error(res.message);
-        setPassphrase("");
-      }
-    } catch {
-      toast.error(t("alertsSettings.alerts.danger.errConfirmFailed"));
-    } finally {
-      setPending(false);
-    }
-  }
-
-  if (expired) {
-    return (
-      <p className="text-xs text-muted-foreground">
-        {t("alertsSettings.alerts.danger.expired")}
-      </p>
-    );
-  }
-
-  return (
-    <form onSubmit={onConfirm} className="flex flex-wrap items-end gap-3">
-      <div className="space-y-1.5">
-        <label
-          htmlFor={`pp-${id}`}
-          className="text-xs font-medium leading-none text-muted-foreground"
-        >
-          {t("alertsSettings.alerts.danger.passphraseLabel")}
-        </label>
-        <Input
-          id={`pp-${id}`}
-          type="password"
-          value={passphrase}
-          autoComplete="off"
-          disabled={!gateOpen || pending}
-          placeholder={
-            gateOpen
-              ? t("alertsSettings.alerts.danger.passphrasePlaceholder")
-              : t("alertsSettings.alerts.danger.passphraseWaiting", {
-                  seconds: secondsLeft,
-                })
-          }
-          className="h-9 w-48 font-mono text-sm"
-          onChange={(e) => setPassphrase(e.target.value)}
-        />
-      </div>
-      <Button
-        type="submit"
-        size="sm"
-        variant="destructive"
-        disabled={!gateOpen || pending}
-        aria-label={t("alertsSettings.alerts.danger.confirmAria")}
-      >
-        {pending
-          ? t("alertsSettings.alerts.danger.confirming")
-          : gateOpen
-            ? t("alertsSettings.alerts.danger.confirmSubmit")
-            : t("alertsSettings.alerts.danger.countdown", {
-                seconds: secondsLeft,
-              })}
-      </Button>
     </form>
   );
 }

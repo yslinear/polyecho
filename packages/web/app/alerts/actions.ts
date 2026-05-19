@@ -7,23 +7,35 @@
  *  - subscribePush / unsubscribePush  -> SAFE writes (a device opt-in row).
  *  - getVapidPublicKey                -> read-only; PUBLIC key only, NEVER
  *    touches the VAPID private key (that lives in p5-core's env, not the DB).
- *  - createPendingAction              -> DANGEROUS request (status
- *    `awaiting_confirm`, 300s TTL). Creating the row does NOT execute it
- *    and writes NO passphrase material (`confirm_passphrase_hash` stays
- *    NULL — it is unused now).
- *  - confirmPendingAction             -> DANGEROUS confirm. SERVER-SIDE 5s
- *    min-age gate (NOT the client countdown) THEN passphrase verified
- *    against the operator-provisioned `settings.danger_passphrase_hash`.
- *    Web OWNS verification: it reproduces the FROZEN canonical
- *    `pbkdf2$<iters>$<b64salt>$<b64hash>` PBKDF2-HMAC-SHA256 format
- *    byte-for-byte and only on success flips status -> `confirmed`. If the
- *    settings hash is absent it FAILS CLOSED (never auto-provisions).
- *    *** p5-core only EXECUTES `confirmed` rows and does NOT re-verify the
- *    passphrase. *** The Python `shared.pending_actions` helpers are for
- *    CLI/Python-initiated flows only.
+ *  - confirmDangerousAction           -> DANGEROUS, INLINE single-step
+ *    confirm. The operator decided the elaborate "create a pending request
+ *    then confirm it separately" UI is unnecessary; a dangerous op now
+ *    requires an INLINE repeated confirmation — an explicit type-to-confirm
+ *    phrase AND the operator danger passphrase — in ONE authenticated
+ *    Server Action. It does NOT weaken the real gate: the passphrase is
+ *    still verified (constant-time) against the operator-provisioned
+ *    `settings.danger_passphrase_hash`, fail-closed if unset (NEVER
+ *    auto-provisioned). Only after BOTH the type-to-confirm match AND the
+ *    passphrase verify pass does it insert ONE `pending_actions` row
+ *    written DIRECTLY as status `confirmed` (audited, with params + an
+ *    `inline_confirmed_at` marker), then best-effort emits the push event.
+ *
+ *    *** Safety equivalence: p5-core's `PendingActionExecutor` only ever
+ *    consumes rows whose `status == 'confirmed'` and NEVER re-verifies the
+ *    passphrase. The OLD two-step path produced a `confirmed` row only
+ *    after a passphrase verify; this inline path produces a `confirmed`
+ *    row only after the SAME passphrase verify (just atomically, no
+ *    separate `awaiting_confirm` row). The executor's contract is
+ *    therefore UNCHANGED — every row it sees is still passphrase-proven.
+ *    Its defense-in-depth gates (expired-TTL / danger-passphrase-
+ *    provisioned) still apply. ***
+ *
+ *    The Python `shared.pending_actions` create/confirm helpers remain the
+ *    CLI / Python-initiated two-step contract (unchanged & still tested);
+ *    only the WEB mechanism is now inline.
  *
  * The web NEVER emits events or sends pushes (core/push own that). These
- * actions only write the opt-in / request / confirm rows trader-core reads.
+ * actions only write the opt-in / confirmed rows trader-core reads.
  *
  * Drizzle import/style mirrors app/settings/actions.ts (bare upsert, no
  * redirect; islands toast + router.refresh()).
@@ -44,6 +56,12 @@ import {
   coerceStringSetting,
 } from "@/lib/settings-keys";
 import { verifyPassphrase } from "@/lib/passphrase";
+import {
+  CONFIRM_PHRASE,
+  type PendingActionType,
+  type ConfirmDangerousActionInput,
+  type ConfirmDangerousActionResult,
+} from "./dangerous-shared";
 
 /**
  * Frozen Phase-5 Wave-1 contract mirror (packages/shared
@@ -218,100 +236,80 @@ export async function unsubscribePush(
   return { ok: true, message: "已關閉此裝置的推播通知。" };
 }
 
-// --- Dangerous-action two-step confirm (PRD §5.7 危险 tier) ---------------
-
-export type PendingActionType = "manual_sell" | "emergency_liquidate";
-
-/** Default TTL — a pending row auto-expires 300s after creation. */
-const PENDING_TTL_SECONDS = 300;
-
-/**
- * SERVER-SIDE minimum age before a pending row may be confirmed. Mirrors
- * the frozen Python gate constant `MIN_CONFIRM_AGE_SECONDS = 5`. Enforced
- * here against the DB `created_at` — we do NOT trust the client countdown.
- */
-const MIN_CONFIRM_AGE_SECONDS = 5;
+// --- Dangerous-action INLINE confirm (PRD §5.7 危险 tier) ----------------
+// PendingActionType / CONFIRM_PHRASE / ConfirmDangerousAction{Input,Result}
+// live in ./dangerous-shared and are imported above: a "use server" module
+// may export ONLY async functions, and the client island needs the
+// constant + types too.
 
 /**
- * rev-web R16 IMP: FIXED uniform "already resolved" message. Returned for
- * ANY non-`awaiting_confirm` status (confirmed / rejected / expired / …) so
- * the response cannot be used as a per-status oracle to enumerate UUIDs.
- * Mirrors the Python `ALREADY_RESOLVED` uniform behaviour.
+ * JSON marker written into the confirmed row's `params` recording WHEN the
+ * inline confirm happened (audit trail). It is NOT a status and NOT a
+ * passphrase — `core/pending.py` ignores unknown params keys; its own
+ * idempotency marker is the separate `_core_processed_at`.
  */
-const ALREADY_RESOLVED_MESSAGE =
-  "此操作目前無法處理（可能已確認、已取消或已逾時）。";
+const INLINE_CONFIRMED_AT_KEY = "_inline_confirmed_at" as const;
 
 /**
- * rev-web R16 HIGH: shared danger-gate for the operator two-factor flow.
+ * confirmDangerousAction — the INLINE single-step danger-op confirm.
  *
- * Both `confirmPendingAction` AND `rejectPendingAction` MUST run the SAME
- * operator-passphrase-proven gate before mutating an `awaiting_confirm` row.
- * Previously `rejectPendingAction` had NO gate, so anyone reaching the
- * unauthenticated localhost Server Action with a valid UUID could cancel a
- * legitimate operator confirmation WITHOUT the danger passphrase — defeating
- * the 2-factor danger flow. The gates, in order (all FAIL CLOSED):
+ * Replaces the old `createPendingAction` + `confirmPendingAction` two-step.
+ * One authenticated Server Action that performs the dangerous op directly
+ * (by writing a `confirmed` row trader-core then executes). The gates, in
+ * order (all FAIL CLOSED, nothing is written until ALL pass):
  *
- *  (a) row must exist, be `awaiting_confirm`, and not past `expires_at`;
- *  (b) SERVER-SIDE min-age (`now - created_at >= 5s`) against the DB
- *      `created_at` (we do NOT trust any client countdown);
- *  (c) `settings.danger_passphrase_hash` must be provisioned (else reject —
- *      NEVER auto-provision);
- *  (d) constant-time verify the submitted passphrase against that FROZEN
- *      canonical stored string.
+ *  (a) `actionType` is one of the two known danger ops;
+ *  (b) the verbatim type-to-confirm phrase exactly equals
+ *      {@link CONFIRM_PHRASE} (deliberate anti-misclick second input —
+ *      replaces the old 5s countdown, which only guarded the two-step UI);
+ *  (c) `settings.danger_passphrase_hash` MUST be provisioned (else reject
+ *      with a clear "set it via the CLI" message — NEVER auto-provision);
+ *  (d) constant-time verify the submitted passphrase against that stored
+ *      FROZEN canonical `pbkdf2$<iters>$<b64salt>$<b64hash>` string
+ *      (rejects sub-100000-iter / tampered values). The web NEVER writes
+ *      the hash;
+ *  (e) only on success INSERT one `pending_actions` row written DIRECTLY
+ *      as status `confirmed` (no transient `awaiting_confirm` row), with
+ *      `confirm_passphrase_hash` left NULL and an `_inline_confirmed_at`
+ *      audit marker in params; then best-effort emit the push event.
  *
- * Returns `{ ok: true }` only when ALL gates pass; the caller then performs
- * its specific status transition (`confirmed` / `rejected`). The legitimate
- * operator path is unchanged (it already supplied the passphrase).
+ * Safety equivalence vs the removed two-step path: trader-core's
+ * `PendingActionExecutor` only ever consumes `status == 'confirmed'` rows
+ * and NEVER re-verifies the passphrase. The two-step path only reached
+ * `confirmed` after a passphrase verify; this inline path only reaches
+ * `confirmed` after the SAME constant-time passphrase verify — so every
+ * row the executor sees is still passphrase-proven. The executor's
+ * defense-in-depth (expired-TTL / danger-passphrase-provisioned) is
+ * unchanged. The danger gate is preserved, only the MECHANISM is inline.
  */
-async function dangerGate(
-  id: string,
-  passphrase: string
-): Promise<ConfirmPendingResult> {
-  const pid = (id ?? "").trim();
-  const pass = passphrase ?? "";
-  if (!pid) return { ok: false, message: "缺少操作識別碼。" };
-  if (pass.length < 1) return { ok: false, message: "請輸入確認通行碼。" };
+export async function confirmDangerousAction(
+  input: ConfirmDangerousActionInput
+): Promise<ConfirmDangerousActionResult> {
+  const actionType = input?.actionType;
+  const params = input?.params ?? {};
+  const confirmText = input?.confirmText ?? "";
+  const passphrase = input?.passphrase ?? "";
 
-  // (a) load the row.
-  const [row] = await db
-    .select({
-      id: pendingActions.id,
-      status: pendingActions.status,
-      expires_at: pendingActions.expires_at,
-      created_at: pendingActions.created_at,
-    })
-    .from(pendingActions)
-    .where(eq(pendingActions.id, pid))
-    .limit(1);
-
-  if (!row) return { ok: false, message: "找不到此操作，可能已逾時清除。" };
-  if (row.status !== "awaiting_confirm") {
-    // R16 IMP: uniform message — no per-status oracle.
-    return { ok: false, message: ALREADY_RESOLVED_MESSAGE };
-  }
-  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
-    return { ok: false, message: "此操作已逾時，請重新建立。" };
+  // (a) known danger op only.
+  if (actionType !== "manual_sell" && actionType !== "emergency_liquidate") {
+    return { ok: false, message: "未知的操作類型。" };
   }
 
-  // (b) SERVER-SIDE minimum-age gate — authoritative against created_at, NOT
-  // the client countdown. A missing/unparseable created_at fails closed.
-  const createdMs = row.created_at
-    ? new Date(row.created_at).getTime()
-    : Number.NaN;
-  if (!Number.isFinite(createdMs)) {
-    return { ok: false, message: "此操作建立時間異常，請重新建立。" };
-  }
-  const ageMs = Date.now() - createdMs;
-  if (ageMs < MIN_CONFIRM_AGE_SECONDS * 1000) {
-    const waitS = Math.ceil((MIN_CONFIRM_AGE_SECONDS * 1000 - ageMs) / 1000);
+  // (b) verbatim type-to-confirm — the anti-misclick second input.
+  if (confirmText.trim() !== CONFIRM_PHRASE) {
     return {
       ok: false,
-      message: `為避免誤觸，請於建立後至少 ${MIN_CONFIRM_AGE_SECONDS} 秒再操作（尚需 ${waitS} 秒）。`,
+      message: `請完整輸入「${CONFIRM_PHRASE}」以確認此危險操作。`,
     };
   }
 
-  // (c) read the operator-provisioned danger passphrase hash. FAIL CLOSED if
-  // it has not been provisioned — never auto-provision / derive it here.
+  // Passphrase presence (the real second factor).
+  if (passphrase.length < 1) {
+    return { ok: false, message: "請輸入危險操作通行碼。" };
+  }
+
+  // (c) read the operator-provisioned danger passphrase hash. FAIL CLOSED
+  // if it has not been provisioned — never auto-provision / derive it.
   const [hashRow] = await db
     .select({ value: settings.value })
     .from(settings)
@@ -327,50 +325,32 @@ async function dangerGate(
   }
 
   // (d) constant-time verify against the FROZEN canonical stored string.
-  const valid = await verifyPassphrase(pass, storedHash);
+  // Nothing has been written yet; a wrong passphrase writes NOTHING.
+  const valid = await verifyPassphrase(passphrase, storedHash);
   if (!valid) {
-    // Do NOT consume the row — let the TTL expire it.
-    return { ok: false, message: "通行碼錯誤。請重試（操作仍待確認）。" };
+    return { ok: false, message: "通行碼錯誤，未執行任何操作。請重試。" };
   }
 
-  return { ok: true, message: "" };
-}
-
-export interface CreatePendingResult {
-  ok: boolean;
-  message: string;
-  id?: string;
-}
-
-/**
- * createPendingAction — insert an `awaiting_confirm` row with a 300s TTL.
- * Creating the row does NOT execute anything; confirmation is required.
- * It writes NO passphrase material: `confirm_passphrase_hash` is left out
- * of the insert so it stays NULL (it is unused — the danger passphrase is
- * the operator-provisioned `settings.danger_passphrase_hash`).
- */
-export async function createPendingAction(
-  actionType: PendingActionType,
-  params: Record<string, unknown>
-): Promise<CreatePendingResult> {
-  if (actionType !== "manual_sell" && actionType !== "emergency_liquidate") {
-    return { ok: false, message: "未知的操作類型。" };
-  }
-  const expires_at = new Date(Date.now() + PENDING_TTL_SECONDS * 1000);
+  // (e) success — INSERT the row DIRECTLY as `confirmed` (trader-core
+  // consumes confirmed rows; it never re-verifies the passphrase). We
+  // NEVER write passphrase material (`confirm_passphrase_hash` stays NULL).
+  // An `_inline_confirmed_at` audit marker records when it was confirmed.
+  const auditParams: Record<string, unknown> = {
+    ...params,
+    [INLINE_CONFIRMED_AT_KEY]: new Date().toISOString(),
+  };
   const [row] = await db
     .insert(pendingActions)
     .values({
       action_type: actionType,
-      params,
-      status: "awaiting_confirm",
-      expires_at,
+      params: auditParams,
+      status: "confirmed",
     })
     .returning({ id: pendingActions.id });
 
-  // PRD §5.8 待確認的危險操作: emit the frozen `pending_dangerous_action`
-  // push event so the web-push-sender notifies the operator. Best-effort —
-  // a failure here must NOT fail the pending-action creation (it never
-  // throws), mirroring the Python `emit_event` best-effort intent.
+  // PRD §5.8: best-effort `pending_dangerous_action` push event so the
+  // operator gets a record. A failure here MUST NOT fail the confirmed
+  // action (it never throws), mirroring the Python `emit_event` intent.
   if (row?.id) {
     await emitPendingDangerousActionEvent({
       pendingActionId: row.id,
@@ -381,91 +361,17 @@ export async function createPendingAction(
 
   return {
     ok: true,
-    message: "已建立待確認的危險操作，請於 5 分鐘內完成二次確認。",
+    message: "已確認並送出此危險操作，trader-core 將執行（不再二次驗證）。",
     id: row?.id,
   };
 }
 
-export interface ConfirmPendingResult {
-  ok: boolean;
-  message: string;
-}
-
 /**
- * confirmPendingAction — gate then verify, constant-time, then flip the row
- * to `confirmed`. The gates, in order (all FAIL CLOSED):
- *
- *  (a) row must exist, be `awaiting_confirm`, and not past `expires_at`;
- *  (b) SERVER-SIDE min-age: reject if `now - created_at < 5s` (we do NOT
- *      trust the client countdown — the DB `created_at` is authoritative);
- *  (c) read `settings.danger_passphrase_hash`. If absent -> reject with a
- *      clear "set it via the CLI" message. NEVER auto-provision;
- *  (d) verify the submitted passphrase against that stored FROZEN canonical
- *      `pbkdf2$<iters>$<b64salt>$<b64hash>` string (constant-time; rejects
- *      sub-100000-iter / tampered strings). The web NEVER writes the hash;
- *  (e) only on success flip status -> `confirmed`. Wrong passphrase -> the
- *      row is NOT consumed (TTL handles expiry). p5-core executes
- *      `confirmed` rows without re-verifying.
+ * Best-effort sweep: mark any long-overdue `awaiting_confirm` rows expired
+ * (idempotent). The inline web flow never creates `awaiting_confirm` rows,
+ * but the Python CLI two-step contract still can, so this stays useful as
+ * a janitor and is harmless when there are none.
  */
-export async function confirmPendingAction(
-  id: string,
-  passphrase: string
-): Promise<ConfirmPendingResult> {
-  // Gates (a)-(d) — shared with rejectPendingAction (R16 HIGH).
-  const gate = await dangerGate(id, passphrase);
-  if (!gate.ok) return gate;
-
-  const pid = id.trim();
-  // (e) success — flip to confirmed. We NEVER write the passphrase hash.
-  await db
-    .update(pendingActions)
-    .set({ status: "confirmed" })
-    .where(
-      and(
-        eq(pendingActions.id, pid),
-        eq(pendingActions.status, "awaiting_confirm")
-      )
-    );
-
-  return {
-    ok: true,
-    message: "已確認。trader-core 將執行此操作（不再二次驗證通行碼）。",
-  };
-}
-
-/**
- * rejectPendingAction — operator cancels a pending danger operation.
- *
- * rev-web R16 HIGH: this is NO LONGER an ungated "safe write". Cancelling a
- * legitimate operator confirmation is itself a danger-flow action (it
- * defeats a confirmed/awaiting 2-factor operation), so it now requires the
- * SAME operator danger-passphrase proof as confirm — verified against the
- * pre-provisioned `settings.danger_passphrase_hash`, fail-closed if unset,
- * with the server-side 5s min-age gate. Behaviour for the legitimate
- * operator (who has the passphrase) is unchanged: they can still cancel.
- */
-export async function rejectPendingAction(
-  id: string,
-  passphrase: string
-): Promise<ConfirmPendingResult> {
-  // Gates (a)-(d) — identical to confirmPendingAction (R16 HIGH).
-  const gate = await dangerGate(id, passphrase);
-  if (!gate.ok) return gate;
-
-  const pid = id.trim();
-  await db
-    .update(pendingActions)
-    .set({ status: "rejected" })
-    .where(
-      and(
-        eq(pendingActions.id, pid),
-        eq(pendingActions.status, "awaiting_confirm")
-      )
-    );
-  return { ok: true, message: "已取消此待確認操作。" };
-}
-
-/** Best-effort sweep: mark long-overdue awaiting rows expired (idempotent). */
 export async function expireStalePendingActions(): Promise<void> {
   await db
     .update(pendingActions)

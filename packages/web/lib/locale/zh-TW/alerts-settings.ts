@@ -13,11 +13,8 @@ export const alertsSettings = {
       help: "在此裝置開啟 Web Push，重要事件即時送達。每個裝置各自訂閱。",
     },
     pending: {
-      heading: "待確認的危險操作",
-      help: "手動賣出 / 緊急清倉需 5 秒倒數與通行碼二次確認（PRD §5.7）。trader-core 只執行已確認的請求。",
-      empty: "目前沒有待確認的操作。",
-      meta: "建立於 {{created}} · 剩餘 {{remaining}}",
-      noParams: "（無參數）",
+      heading: "危險操作",
+      help: "手動賣出 / 緊急清倉需在此就地完成二次確認：輸入確認字句並通過危險操作通行碼，方可送出（PRD §5.7）。trader-core 只執行已確認的操作。",
     },
     recent: {
       heading: "最近事件",
@@ -38,15 +35,14 @@ export const alertsSettings = {
       delivered: "已送達",
       notPushed: "未推播",
     },
-    /** <CreateDangerousAction> + <ConfirmPendingRow> §5.7 危險-tier ops. */
+    /** <DangerousActionInline> §5.7 危險-tier inline single-step confirm. */
     danger: {
       errNoTarget: "請輸入目標（市場 / 部位 / 帳戶識別）。",
       errNoSize: "手動賣出需要指定數量。",
-      errCreateFailed: "建立待確認操作失敗，請檢查資料庫連線。",
-      openButton: "建立危險操作請求",
-      formAria: "建立危險操作請求",
+      openButton: "執行危險操作",
+      formAria: "執行危險操作",
       formIntro:
-        "這是危險操作（PRD §5.7）。建立後需經 5 秒倒數與通行碼二次確認，trader-core 只執行已確認的請求。",
+        "這是危險操作（PRD §5.7）。請於下方就地完成二次確認：輸入確認字句並通過危險操作通行碼。通過後即直接送出，trader-core 只執行已確認的操作。",
       typeLabel: "操作類型",
       typeManualSell: "手動賣出",
       typeEmergencyLiquidate: "緊急清倉",
@@ -54,21 +50,20 @@ export const alertsSettings = {
       targetPlaceholder: "市場 / 部位 / 帳戶 ID",
       sizeLabel: "賣出數量",
       sizePlaceholder: "例如 100",
-      creating: "建立中…",
-      createSubmit: "建立待確認請求",
       cancel: "取消",
-      errNoPassphrase: "請輸入確認通行碼。",
+      /** Inline repeated-confirmation section. */
+      confirmSectionTitle: "二次確認（不可復原）",
+      /** {{phrase}} = the verbatim confirm phrase (literal, not translated). */
+      confirmPhraseLabel: "請完整輸入「{{phrase}}」",
+      /** {{phrase}} = the verbatim confirm phrase (literal, not translated). */
+      errConfirmPhrase: "請完整輸入「{{phrase}}」以確認此危險操作。",
+      errNoPassphrase: "請輸入危險操作通行碼。",
       errConfirmFailed: "確認失敗，請檢查資料庫連線。",
-      expired: "此操作已逾時，請重新建立。",
-      passphraseLabel: "確認通行碼",
+      passphraseLabel: "危險操作通行碼",
       passphrasePlaceholder: "輸入通行碼",
-      /** {{seconds}} = remaining gate seconds (number, not translated). */
-      passphraseWaiting: "請等待 {{seconds}} 秒…",
-      confirmAria: "確認執行此危險操作",
-      confirming: "確認中…",
-      confirmSubmit: "確認執行",
-      /** {{seconds}} = remaining gate seconds (number, not translated). */
-      countdown: "倒數 {{seconds}} 秒",
+      confirmAria: "確認並執行此危險操作",
+      confirming: "送出中…",
+      confirmSubmit: "確認並執行",
     },
   },
   settings: {

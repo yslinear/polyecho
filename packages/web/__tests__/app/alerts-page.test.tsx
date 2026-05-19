@@ -5,20 +5,20 @@ import userEvent from "@testing-library/user-event";
 /**
  * /alerts 警示中心 — page render + severity filter + empty state.
  *
- * The page is a Server Component reading events + pending_actions + the
- * vapid_public_key row through a mocked Drizzle chain. next/navigation +
- * sonner + the alerts actions are mocked so nothing touches the network.
+ * The page is a Server Component reading events + the vapid_public_key row
+ * through a mocked Drizzle chain. §5.7 dangerous ops are now an INLINE
+ * single-step confirm (no separate awaiting-confirm pending list is read
+ * or rendered here), so the page only queries events + the vapid row.
+ * next/navigation + sonner + the alerts actions are mocked so nothing
+ * touches the network.
  */
 
 let eventsResult: unknown[] = [];
-let pendingResult: unknown[] = [];
 let vapidResult: unknown[] = [];
 
-// events: .orderBy().limit() (terminal); pending: .where().orderBy();
-// vapid settings row: .where().limit().
-const orderByPending = vi.fn(() => Promise.resolve(pendingResult));
+// events: .orderBy().limit() (terminal); vapid settings row: .where().limit().
 const limit = vi.fn(() => Promise.resolve(vapidResult));
-const where = vi.fn(() => ({ orderBy: orderByPending, limit }));
+const where = vi.fn(() => ({ limit }));
 const from = vi.fn(() => {
   // events: select().from(events).orderBy().limit()
   return {
@@ -40,8 +40,8 @@ vi.mock("@/app/alerts/actions", () => ({
   getVapidPublicKey: vi.fn(async () => "BPUBKEY"),
   subscribePush: vi.fn(),
   unsubscribePush: vi.fn(),
-  createPendingAction: vi.fn(),
-  confirmPendingAction: vi.fn(),
+  confirmDangerousAction: vi.fn(),
+  CONFIRM_PHRASE: "確認執行",
 }));
 
 import AlertsPage from "@/app/alerts/page";
@@ -57,20 +57,23 @@ const NOT_PUSHED = t("alertsSettings.alerts.list.notPushed");
 
 beforeEach(() => {
   eventsResult = [];
-  pendingResult = [];
   vapidResult = [{ value: "BPUBKEY" }];
   select.mockClear();
 });
 
 describe("/alerts page (Server Component)", () => {
-  it("renders the calm empty state when there are no events", async () => {
+  it("renders the calm empty state + the inline danger control", async () => {
     render(await AlertsPage());
     expect(
       screen.getByText(t("alertsSettings.alerts.title"))
     ).toBeInTheDocument();
     expect(screen.getByText(EMPTY_ALL)).toBeInTheDocument();
+    // §5.7 inline danger-op control is present (collapsed open button) —
+    // there is NO separate "awaiting confirmation" pending list anymore.
     expect(
-      screen.getByText(t("alertsSettings.alerts.pending.empty"))
+      screen.getByRole("button", {
+        name: t("alertsSettings.alerts.danger.openButton"),
+      })
     ).toBeInTheDocument();
   });
 
@@ -130,18 +133,21 @@ describe("/alerts page (Server Component)", () => {
     expect(screen.queryByText("跟單成交")).not.toBeInTheDocument();
   });
 
-  it("shows an awaiting pending action with its label and params", async () => {
-    pendingResult = [
+  it("still surfaces a pending_dangerous_action EVENT in the events list", async () => {
+    // The inline confirm path emits a pending_dangerous_action event; the
+    // events list (lib/alerts label map) still humanises it even though
+    // there is no longer a separate pending-row panel.
+    eventsResult = [
       {
-        id: "pa-1",
-        action_type: "emergency_liquidate",
-        params: { target: "acct-1" },
-        expires_at: new Date(Date.now() + 120_000),
+        id: 7,
+        event_type: "pending_dangerous_action",
+        severity: "warning",
+        payload: { data: { action_type: "emergency_liquidate" } },
+        pushed_at: null,
         created_at: new Date("2026-05-18T10:00:00Z"),
       },
     ];
     render(await AlertsPage());
-    expect(screen.getByText("緊急清倉")).toBeInTheDocument();
-    expect(screen.getByText(/target: acct-1/)).toBeInTheDocument();
+    expect(screen.getByText("待確認的危險操作")).toBeInTheDocument();
   });
 });
