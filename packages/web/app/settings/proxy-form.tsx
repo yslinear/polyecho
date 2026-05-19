@@ -15,6 +15,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { t } from "@/lib/i18n";
 import { setPolymarketProxy } from "./actions";
 
 interface ProxyFormProps {
@@ -27,13 +28,14 @@ interface ProxyFormProps {
 function validate(value: string): string | null {
   const v = value.trim();
   if (v === "") return null; // empty === direct, allowed
-  if (/^socks\d?:\/\//i.test(v)) return "SOCKS not supported; use http(s)";
+  if (/^socks\d?:\/\//i.test(v))
+    return t("alertsSettings.settings.proxy.errSocks");
   if (!/^https?:\/\//i.test(v))
-    return "Proxy URL must start with http:// or https://";
+    return t("alertsSettings.settings.proxy.errScheme");
   try {
     if (!new URL(v).hostname) throw new Error("no host");
   } catch {
-    return "Enter a valid http(s) URL, e.g. http://127.0.0.1:8080";
+    return t("alertsSettings.settings.proxy.errInvalidUrl");
   }
   return null;
 }
@@ -66,7 +68,7 @@ export function ProxyForm({ current, lastUpdated }: ProxyFormProps) {
           toast.error(res.message);
         }
       } catch {
-        toast.error("Could not save the proxy. Check the database connection.");
+        toast.error(t("alertsSettings.settings.proxy.errSaveFailed"));
       }
     });
   }
@@ -78,7 +80,7 @@ export function ProxyForm({ current, lastUpdated }: ProxyFormProps) {
           htmlFor="polymarket_proxy_url"
           className="text-sm font-medium leading-none"
         >
-          Proxy URL
+          {t("alertsSettings.settings.proxy.urlLabel")}
         </label>
         <Input
           id="polymarket_proxy_url"
@@ -86,7 +88,7 @@ export function ProxyForm({ current, lastUpdated }: ProxyFormProps) {
           inputMode="url"
           autoComplete="off"
           spellCheck={false}
-          placeholder="http://127.0.0.1:8080  (blank = direct)"
+          placeholder={t("alertsSettings.settings.proxy.urlPlaceholder")}
           value={value}
           aria-invalid={touched && error ? true : undefined}
           aria-describedby="proxy-help proxy-error"
@@ -106,22 +108,25 @@ export function ProxyForm({ current, lastUpdated }: ProxyFormProps) {
           </p>
         ) : (
           <p id="proxy-help" className="max-w-prose text-xs text-muted-foreground">
-            Needed where Polymarket is geo-blocked, PRD §8.1. http(s) only.
-            Takes effect on the next Polymarket call, no restart.
+            {t("alertsSettings.settings.proxy.formHelp")}
           </p>
         )}
       </div>
 
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={pending || !dirty}>
-          {pending ? "Saving…" : "Save proxy"}
+          {pending
+            ? t("alertsSettings.settings.proxy.saving")
+            : t("alertsSettings.settings.proxy.save")}
         </Button>
         <span className="text-xs text-muted-foreground tabular-nums">
           {value.trim() === ""
-            ? "Currently: direct connection"
+            ? t("alertsSettings.settings.proxy.currentDirect")
             : lastUpdated
-              ? `Last saved ${lastUpdated.slice(0, 16).replace("T", " ")} UTC`
-              : "Not yet saved"}
+              ? t("alertsSettings.settings.proxy.lastSaved", {
+                  at: lastUpdated.slice(0, 16).replace("T", " "),
+                })
+              : t("alertsSettings.settings.proxy.notSaved")}
         </span>
       </div>
     </form>

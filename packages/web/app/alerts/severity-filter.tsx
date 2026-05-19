@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { formatDateTime } from "@/lib/format";
+import { t } from "@/lib/i18n";
 import {
   eventTypeLabel,
   severityMeta,
@@ -40,7 +41,7 @@ export interface AlertEventRow {
 type Filter = "all" | Severity;
 
 const FILTERS: { value: Filter; label: string }[] = [
-  { value: "all", label: "全部" },
+  { value: "all", label: t("alertsSettings.alerts.list.filterAll") },
   { value: "critical", label: "CRITICAL" },
   { value: "warning", label: "WARNING" },
   { value: "info", label: "INFO" },
@@ -62,7 +63,7 @@ export function AlertsList({ rows }: { rows: AlertEventRow[] }) {
       <div
         className="flex flex-wrap items-center gap-2"
         role="group"
-        aria-label="依嚴重度篩選警示"
+        aria-label={t("alertsSettings.alerts.list.filterGroupAria")}
       >
         {FILTERS.map((f) => (
           <Button
@@ -83,8 +84,8 @@ export function AlertsList({ rows }: { rows: AlertEventRow[] }) {
         <div className="rounded-lg border border-dashed py-16 text-center">
           <p className="text-sm text-muted-foreground">
             {rows.length === 0
-              ? "目前沒有任何警示。系統發生重要事件時會出現在這裡。"
-              : "此嚴重度沒有符合的警示。"}
+              ? t("alertsSettings.alerts.list.emptyAll")
+              : t("alertsSettings.alerts.list.emptyFiltered")}
           </p>
         </div>
       ) : (
@@ -92,11 +93,21 @@ export function AlertsList({ rows }: { rows: AlertEventRow[] }) {
           <Table>
             <TableHeader className="sticky top-0 z-10 bg-muted">
               <TableRow className="hover:bg-transparent">
-                <TableHead className="w-28">嚴重度</TableHead>
-                <TableHead>事件</TableHead>
-                <TableHead>摘要</TableHead>
-                <TableHead className="w-24 text-right">推播</TableHead>
-                <TableHead className="w-44 text-right">時間</TableHead>
+                <TableHead className="w-28">
+                  {t("alertsSettings.alerts.list.colSeverity")}
+                </TableHead>
+                <TableHead>
+                  {t("alertsSettings.alerts.list.colEvent")}
+                </TableHead>
+                <TableHead>
+                  {t("alertsSettings.alerts.list.colSummary")}
+                </TableHead>
+                <TableHead className="w-24 text-right">
+                  {t("alertsSettings.alerts.list.colPush")}
+                </TableHead>
+                <TableHead className="w-44 text-right">
+                  {t("alertsSettings.alerts.list.colTime")}
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -114,13 +125,17 @@ export function AlertsList({ rows }: { rows: AlertEventRow[] }) {
                       {eventTypeLabel(r.event_type)}
                     </TableCell>
                     <TableCell className="max-w-prose text-sm text-muted-foreground">
-                      {summary || "未紀錄"}
+                      {summary || t("alertsSettings.alerts.list.noSummary")}
                     </TableCell>
                     <TableCell className="text-right text-xs">
                       {r.pushed_at ? (
-                        <span className="text-gain">已送達</span>
+                        <span className="text-gain">
+                          {t("alertsSettings.alerts.list.delivered")}
+                        </span>
                       ) : (
-                        <span className="text-muted-foreground">未推播</span>
+                        <span className="text-muted-foreground">
+                          {t("alertsSettings.alerts.list.notPushed")}
+                        </span>
                       )}
                     </TableCell>
                     <TableCell className="whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground">

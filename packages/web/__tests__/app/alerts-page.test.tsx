@@ -45,6 +45,15 @@ vi.mock("@/app/alerts/actions", () => ({
 }));
 
 import AlertsPage from "@/app/alerts/page";
+import { t } from "@/lib/i18n";
+
+// Island (severity-filter) locators derive from the i18n dictionary so the
+// test asserts the filter BEHAVIOUR / delivered-state, not hardcoded copy,
+// and stays correct if a zh-TW string changes. (event_type / pending-action
+// labels come from lib/alerts.ts and are asserted as that frozen contract.)
+const EMPTY_ALL = t("alertsSettings.alerts.list.emptyAll");
+const DELIVERED = t("alertsSettings.alerts.list.delivered");
+const NOT_PUSHED = t("alertsSettings.alerts.list.notPushed");
 
 beforeEach(() => {
   eventsResult = [];
@@ -56,11 +65,13 @@ beforeEach(() => {
 describe("/alerts page (Server Component)", () => {
   it("renders the calm empty state when there are no events", async () => {
     render(await AlertsPage());
-    expect(screen.getByText("警示中心")).toBeInTheDocument();
     expect(
-      screen.getByText(/目前沒有任何警示/)
+      screen.getByText(t("alertsSettings.alerts.title"))
     ).toBeInTheDocument();
-    expect(screen.getByText(/目前沒有待確認的操作/)).toBeInTheDocument();
+    expect(screen.getByText(EMPTY_ALL)).toBeInTheDocument();
+    expect(
+      screen.getByText(t("alertsSettings.alerts.pending.empty"))
+    ).toBeInTheDocument();
   });
 
   it("lists events newest-first with humanised type + delivered state", async () => {
@@ -85,8 +96,8 @@ describe("/alerts page (Server Component)", () => {
     render(await AlertsPage());
     expect(screen.getByText("停損觸發")).toBeInTheDocument();
     expect(screen.getByText("跟單成交")).toBeInTheDocument();
-    expect(screen.getByText("已送達")).toBeInTheDocument();
-    expect(screen.getByText("未推播")).toBeInTheDocument();
+    expect(screen.getByText(DELIVERED)).toBeInTheDocument();
+    expect(screen.getByText(NOT_PUSHED)).toBeInTheDocument();
   });
 
   it("filters by severity client-side", async () => {

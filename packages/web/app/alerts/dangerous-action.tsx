@@ -31,6 +31,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { t } from "@/lib/i18n";
 import {
   createPendingAction,
   type PendingActionType,
@@ -47,16 +48,16 @@ export function CreateDangerousAction() {
 
   async function onCreate(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    const t = target.trim();
-    if (!t) {
-      toast.error("請輸入目標（市場 / 部位 / 帳戶識別）。");
+    const targetValue = target.trim();
+    if (!targetValue) {
+      toast.error(t("alertsSettings.alerts.danger.errNoTarget"));
       return;
     }
-    const params: Record<string, unknown> = { target: t };
+    const params: Record<string, unknown> = { target: targetValue };
     if (actionType === "manual_sell") {
       const s = size.trim();
       if (!s) {
-        toast.error("手動賣出需要指定數量。");
+        toast.error(t("alertsSettings.alerts.danger.errNoSize"));
         return;
       }
       params.size = s;
@@ -74,7 +75,7 @@ export function CreateDangerousAction() {
         toast.error(res.message);
       }
     } catch {
-      toast.error("建立待確認操作失敗，請檢查資料庫連線。");
+      toast.error(t("alertsSettings.alerts.danger.errCreateFailed"));
     } finally {
       setPending(false);
     }
@@ -92,7 +93,7 @@ export function CreateDangerousAction() {
           className="mr-1.5 h-3.5 w-3.5 text-loss"
           aria-hidden="true"
         />
-        建立危險操作請求
+        {t("alertsSettings.alerts.danger.openButton")}
       </Button>
     );
   }
@@ -101,17 +102,14 @@ export function CreateDangerousAction() {
     <form
       onSubmit={onCreate}
       className="space-y-4 rounded-lg border border-dashed p-4"
-      aria-label="建立危險操作請求"
+      aria-label={t("alertsSettings.alerts.danger.formAria")}
     >
       <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
         <AlertTriangle
           className="mt-0.5 h-3.5 w-3.5 shrink-0 text-loss"
           aria-hidden="true"
         />
-        <span>
-          這是危險操作（PRD §5.7）。建立後需經 5 秒倒數與通行碼二次確認，
-          trader-core 只執行已確認的請求。
-        </span>
+        <span>{t("alertsSettings.alerts.danger.formIntro")}</span>
       </p>
 
       <div className="grid gap-4 sm:grid-cols-2">
@@ -120,7 +118,7 @@ export function CreateDangerousAction() {
             htmlFor="da-type"
             className="text-sm font-medium leading-none"
           >
-            操作類型
+            {t("alertsSettings.alerts.danger.typeLabel")}
           </label>
           <Select
             value={actionType}
@@ -130,8 +128,12 @@ export function CreateDangerousAction() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="manual_sell">手動賣出</SelectItem>
-              <SelectItem value="emergency_liquidate">緊急清倉</SelectItem>
+              <SelectItem value="manual_sell">
+                {t("alertsSettings.alerts.danger.typeManualSell")}
+              </SelectItem>
+              <SelectItem value="emergency_liquidate">
+                {t("alertsSettings.alerts.danger.typeEmergencyLiquidate")}
+              </SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -141,14 +143,14 @@ export function CreateDangerousAction() {
             htmlFor="da-target"
             className="text-sm font-medium leading-none"
           >
-            目標
+            {t("alertsSettings.alerts.danger.targetLabel")}
           </label>
           <Input
             id="da-target"
             value={target}
             spellCheck={false}
             autoComplete="off"
-            placeholder="市場 / 部位 / 帳戶 ID"
+            placeholder={t("alertsSettings.alerts.danger.targetPlaceholder")}
             className="font-mono text-sm"
             onChange={(e) => setTarget(e.target.value)}
           />
@@ -160,14 +162,14 @@ export function CreateDangerousAction() {
               htmlFor="da-size"
               className="text-sm font-medium leading-none"
             >
-              賣出數量
+              {t("alertsSettings.alerts.danger.sizeLabel")}
             </label>
             <Input
               id="da-size"
               inputMode="decimal"
               value={size}
               autoComplete="off"
-              placeholder="例如 100"
+              placeholder={t("alertsSettings.alerts.danger.sizePlaceholder")}
               className="font-mono text-sm tabular-nums"
               onChange={(e) => setSize(e.target.value)}
             />
@@ -177,7 +179,9 @@ export function CreateDangerousAction() {
 
       <div className="flex items-center gap-3">
         <Button type="submit" size="sm" disabled={pending}>
-          {pending ? "建立中…" : "建立待確認請求"}
+          {pending
+            ? t("alertsSettings.alerts.danger.creating")
+            : t("alertsSettings.alerts.danger.createSubmit")}
         </Button>
         <Button
           type="button"
@@ -186,7 +190,7 @@ export function CreateDangerousAction() {
           disabled={pending}
           onClick={() => setOpen(false)}
         >
-          取消
+          {t("alertsSettings.alerts.danger.cancel")}
         </Button>
       </div>
     </form>
@@ -233,7 +237,7 @@ export function ConfirmPendingRow({
     e.preventDefault();
     if (!gateOpen) return;
     if (passphrase.length < 1) {
-      toast.error("請輸入確認通行碼。");
+      toast.error(t("alertsSettings.alerts.danger.errNoPassphrase"));
       return;
     }
     setPending(true);
@@ -249,7 +253,7 @@ export function ConfirmPendingRow({
         setPassphrase("");
       }
     } catch {
-      toast.error("確認失敗，請檢查資料庫連線。");
+      toast.error(t("alertsSettings.alerts.danger.errConfirmFailed"));
     } finally {
       setPending(false);
     }
@@ -257,7 +261,9 @@ export function ConfirmPendingRow({
 
   if (expired) {
     return (
-      <p className="text-xs text-muted-foreground">此操作已逾時，請重新建立。</p>
+      <p className="text-xs text-muted-foreground">
+        {t("alertsSettings.alerts.danger.expired")}
+      </p>
     );
   }
 
@@ -268,7 +274,7 @@ export function ConfirmPendingRow({
           htmlFor={`pp-${id}`}
           className="text-xs font-medium leading-none text-muted-foreground"
         >
-          確認通行碼
+          {t("alertsSettings.alerts.danger.passphraseLabel")}
         </label>
         <Input
           id={`pp-${id}`}
@@ -277,7 +283,11 @@ export function ConfirmPendingRow({
           autoComplete="off"
           disabled={!gateOpen || pending}
           placeholder={
-            gateOpen ? "輸入通行碼" : `請等待 ${secondsLeft} 秒…`
+            gateOpen
+              ? t("alertsSettings.alerts.danger.passphrasePlaceholder")
+              : t("alertsSettings.alerts.danger.passphraseWaiting", {
+                  seconds: secondsLeft,
+                })
           }
           className="h-9 w-48 font-mono text-sm"
           onChange={(e) => setPassphrase(e.target.value)}
@@ -288,13 +298,15 @@ export function ConfirmPendingRow({
         size="sm"
         variant="destructive"
         disabled={!gateOpen || pending}
-        aria-label="確認執行此危險操作"
+        aria-label={t("alertsSettings.alerts.danger.confirmAria")}
       >
         {pending
-          ? "確認中…"
+          ? t("alertsSettings.alerts.danger.confirming")
           : gateOpen
-            ? "確認執行"
-            : `倒數 ${secondsLeft} 秒`}
+            ? t("alertsSettings.alerts.danger.confirmSubmit")
+            : t("alertsSettings.alerts.danger.countdown", {
+                seconds: secondsLeft,
+              })}
       </Button>
     </form>
   );

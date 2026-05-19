@@ -15,6 +15,7 @@ import { toast } from "sonner";
 import { Plane, Activity } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { t } from "@/lib/i18n";
 import { setRiskMode } from "./actions";
 import type { RiskMode } from "@/lib/settings-keys";
 
@@ -36,7 +37,7 @@ export function RiskModeForm({ current }: { current: RiskMode }) {
         toast.error(res.message);
       }
     } catch {
-      toast.error("無法更新風險模式，請檢查資料庫連線。");
+      toast.error(t("alertsSettings.settings.riskMode.errUpdateFailed"));
     } finally {
       setPending(false);
     }
@@ -46,7 +47,7 @@ export function RiskModeForm({ current }: { current: RiskMode }) {
     <div
       className="flex flex-wrap items-center gap-2"
       role="group"
-      aria-label="風險模式"
+      aria-label={t("alertsSettings.settings.riskMode.groupAria")}
     >
       <Button
         type="button"
@@ -58,7 +59,7 @@ export function RiskModeForm({ current }: { current: RiskMode }) {
         onClick={() => apply("normal")}
       >
         <Activity className="h-3.5 w-3.5" aria-hidden="true" />
-        正常模式
+        {t("alertsSettings.settings.riskMode.normal")}
       </Button>
       <Button
         type="button"
@@ -70,14 +71,19 @@ export function RiskModeForm({ current }: { current: RiskMode }) {
         onClick={() => apply("conservative")}
       >
         <Plane className="h-3.5 w-3.5" aria-hidden="true" />
-        保守 / 旅行模式
+        {t("alertsSettings.settings.riskMode.conservative")}
       </Button>
       <span
         className="text-xs text-muted-foreground"
         aria-live="polite"
         role="status"
       >
-        目前：{mode === "conservative" ? "保守 / 旅行模式" : "正常模式"}
+        {t("alertsSettings.settings.riskMode.current", {
+          mode:
+            mode === "conservative"
+              ? t("alertsSettings.settings.riskMode.conservative")
+              : t("alertsSettings.settings.riskMode.normal"),
+        })}
       </span>
     </div>
   );

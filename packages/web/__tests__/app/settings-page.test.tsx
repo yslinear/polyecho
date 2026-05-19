@@ -47,6 +47,15 @@ vi.mock("sonner", () => ({
 
 import SettingsPage from "@/app/settings/page";
 import { ProxyForm } from "@/app/settings/proxy-form";
+import { t } from "@/lib/i18n";
+
+// Locators derive from the i18n dictionary, not hardcoded copy: the test
+// asserts the ProxyForm STRUCTURE / validation behaviour and stays correct
+// if a zh-TW string changes, while still proving the i18n seam renders.
+const PROXY_URL_LABEL = t("alertsSettings.settings.proxy.urlLabel");
+const PROXY_SAVE = t("alertsSettings.settings.proxy.save");
+const PROXY_ERR_SOCKS = t("alertsSettings.settings.proxy.errSocks");
+const PROXY_DIRECT = t("alertsSettings.settings.proxy.currentDirect");
 
 describe("/settings page (Server Component)", () => {
   beforeEach(() => {
@@ -83,9 +92,9 @@ describe("/settings page (Server Component)", () => {
   it("renders an empty input and 'direct connection' when no row exists", async () => {
     rowsResult = [];
     render(await SettingsPage());
-    const input = screen.getByLabelText("Proxy URL") as HTMLInputElement;
+    const input = screen.getByLabelText(PROXY_URL_LABEL) as HTMLInputElement;
     expect(input.value).toBe("");
-    expect(screen.getByText(/direct connection/i)).toBeInTheDocument();
+    expect(screen.getByText(PROXY_DIRECT)).toBeInTheDocument();
   });
 
   it("reflects the stored risk_mode (conservative) in the toggle", async () => {
@@ -94,7 +103,7 @@ describe("/settings page (Server Component)", () => {
     ];
     render(await SettingsPage());
     expect(screen.getByRole("status")).toHaveTextContent(
-      "保守 / 旅行模式"
+      t("alertsSettings.settings.riskMode.conservative")
     );
   });
 });
@@ -109,12 +118,12 @@ describe("ProxyForm (client island)", () => {
 
   it("shows an inline error and does not call the action for socks5://", async () => {
     render(<ProxyForm current="" lastUpdated={null} />);
-    const input = screen.getByLabelText("Proxy URL");
+    const input = screen.getByLabelText(PROXY_URL_LABEL);
     await userEvent.type(input, "socks5://127.0.0.1:1080");
-    await userEvent.click(screen.getByRole("button", { name: /save proxy/i }));
-    expect(
-      screen.getByText("SOCKS not supported; use http(s)")
-    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: PROXY_SAVE })
+    );
+    expect(screen.getByText(PROXY_ERR_SOCKS)).toBeInTheDocument();
     expect(setPolymarketProxy).not.toHaveBeenCalled();
   });
 
@@ -126,10 +135,12 @@ describe("ProxyForm (client island)", () => {
     });
     render(<ProxyForm current="" lastUpdated={null} />);
     await userEvent.type(
-      screen.getByLabelText("Proxy URL"),
+      screen.getByLabelText(PROXY_URL_LABEL),
       "http://10.0.0.1:8080"
     );
-    await userEvent.click(screen.getByRole("button", { name: /save proxy/i }));
+    await userEvent.click(
+      screen.getByRole("button", { name: PROXY_SAVE })
+    );
     expect(setPolymarketProxy).toHaveBeenCalledWith("http://10.0.0.1:8080");
     expect(toastSuccess).toHaveBeenCalled();
     expect(refresh).toHaveBeenCalled();
@@ -137,6 +148,8 @@ describe("ProxyForm (client island)", () => {
 
   it("disables the primary action until the value changes", () => {
     render(<ProxyForm current="http://a.b:1" lastUpdated={null} />);
-    expect(screen.getByRole("button", { name: /save proxy/i })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: PROXY_SAVE })
+    ).toBeDisabled();
   });
 });
