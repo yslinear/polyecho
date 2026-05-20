@@ -154,15 +154,14 @@ export const discovery = {
      *  L26-33) rendered both as the column Badge and the Strategy facet
      *  option labels. The underlying filter/sort VALUE stays the raw enum
      *  — only the DISPLAY is localised. An UNMAPPED value degrades to the
-     *  raw enum verbatim (matches lib/i18n.ts "degrade, don't crash").
-     *  The canonical English domain term stays in parentheses. */
+     *  raw enum verbatim (matches lib/i18n.ts "degrade, don't crash"). */
     strategy: {
-      Scalper: "短炒（Scalper）",
-      "Day Trader": "當沖（Day Trader）",
-      Swing: "波段（Swing）",
-      Position: "部位（Position）",
-      "Hold-to-Resolve": "持有至結算（Hold-to-Resolve）",
-      Unknown: "未分類（Unknown）",
+      Scalper: "短炒",
+      "Day Trader": "當沖",
+      Swing: "波段",
+      Position: "部位",
+      "Hold-to-Resolve": "持有至結算",
+      Unknown: "未分類",
     },
     /** risk_flags codes (packages/discovery riskflags.py
      *  detect_risk_flags) rendered as the per-row risk Badges. Underlying
