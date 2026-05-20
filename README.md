@@ -139,7 +139,7 @@ docker compose -f infra/docker-compose.yml run --rm cli <command> [args]
 docker compose -f infra/docker-compose.yml run --rm cli doctor
 ```
 
-### `account` —— 交易帳戶與金鑰管理(CLI-only)
+### `account` —— 交易帳戶與金鑰管理(預設 CLI;見〈安全模型〉之操作者授權偏離)
 
 ```bash
 # 設定用來加密所存金鑰的通關密語(通關密語絕不儲存)。
@@ -148,7 +148,8 @@ docker compose -f infra/docker-compose.yml run --rm cli account set-danger-passp
 # 從金鑰偵測／推導出帳戶位址。
 docker compose -f infra/docker-compose.yml run --rm cli account detect
 
-# 匯入私鑰(靜態加密;僅限 CLI,絕不經由 web)。
+# 匯入私鑰(靜態加密;預設路徑為 CLI;操作者已授權的 web `/accounts`
+# 路徑為記錄在案的偏離,見下方〈安全模型〉)。
 docker compose -f infra/docker-compose.yml run --rm cli account import
 
 # 列出已設定的帳戶。
@@ -285,7 +286,7 @@ docker compose -f infra/docker-compose.yml run --rm cli backtest list
 docker compose -f infra/docker-compose.yml run --rm cli backtest show <id>
 ```
 
-**匯入交易金鑰(僅限 CLI,靜態加密)**
+**匯入交易金鑰(預設 CLI 路徑,靜態加密;操作者已授權的 web 路徑為記錄在案的偏離)**
 
 ```bash
 docker compose -f infra/docker-compose.yml run --rm cli account set-danger-passphrase
@@ -350,8 +351,10 @@ entrypoint 從未執行該探測),以及一個會將 Polymarket proxy URL
 
 ## 安全模型(不可妥協)
 
-- `trader-core` 持有私鑰,且**不**開放任何網路連接埠;私鑰**絕不**進入
-  任何 web 程序,金鑰匯入**僅限 CLI**。
+- `trader-core` 持有私鑰並負責解密,且**不**開放任何網路連接埠;簽署路徑仍唯一存在於 trader-core。
+- **預設模型**:私鑰匯入經 CLI (`polyecho account import <eoa>`,在 trader-core 主機上執行)。
+- **操作者已授權的偏離(已記錄)**:操作者已明確且知情地授權 web `/accounts` 的私鑰匯入 Server Action。緩解措施:danger-passphrase fail-closed 閘門(constant-time 驗證,絕不自動配置)、AES-256-GCM blob 與凍結的 Python `crypto.py` v1 byte-IDENTICAL(由 `test_keycrypto_crosslang.py` 跨語言閘門強制),金鑰/通行碼**絕不**記入日誌或回顯。
+- **殘餘曝險**:在前述操作者授權下,無驗證的儀表板(發布於 `0.0.0.0:3006`,LAN/Tailscale)會將原始私鑰收入 Next.js web 程序 —— 操作者已知情接受。具體實作見 commit `da93e82`(web 金鑰匯入)+ `c6191ca`(誠實的 accounts page copy);綁定式稽核軌跡見記憶體檔 `web-key-import-security-override`。
 - 所有控制都透過 DB `settings` 變更流動,而非以 RPC 呼叫金鑰持有者。
 - 真實交易由單一咽喉點(`assert_live_allowed`)把關;預設為
   dry-run／fixture —— 除非明確解鎖,否則不會移動任何真實資金。
