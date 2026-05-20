@@ -63,6 +63,7 @@ import {
 import { verifyPassphrase } from "@/lib/passphrase";
 import { encryptPrivateKey } from "@/lib/key-crypto";
 import { EVM_ADDRESS_RE, PRIVATE_KEY_RE } from "@/lib/format";
+import { magicProxyAddress } from "@/lib/magic-proxy";
 
 /** Mirrors `polyecho.shared.accounts.SIGNATURE_TYPE_NAMES` (0..3). */
 const SIGNATURE_TYPE_NAMES: Record<number, string> = {
@@ -240,5 +241,40 @@ export async function importAccount(
   } catch {
     // DB errors must not leak the (already-encrypted) blob or inputs.
     return { ok: false, message: "寫入帳戶失敗，請稍後重試。" };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// P2: CREATE2 cross-check helper (warn-only; never blocks).
+// ---------------------------------------------------------------------------
+export interface MagicProxyCheck {
+  /** True when the EOA was a valid 0x+40-hex shape (else `derived` is null). */
+  ok: boolean;
+  /** Lowercased CREATE2 Magic-proxy derivation, or null on invalid input. */
+  derived: string | null;
+}
+
+/**
+ * deriveMagicProxyForCheck — pure, side-effect-free server-side derivation
+ * used by the import form's sig-type-1 CREATE2 cross-check.
+ *
+ * This is intentionally a Server Action (rather than a client-side helper)
+ * because the web bundle has no keccak256 / viem / ethers dependency; the
+ * derivation lives in `lib/magic-proxy.ts` (a TS byte-mirror of the FROZEN
+ * Python `magic_proxy_address`). The result is RENDERED ONLY — never
+ * persisted, never used to override the operator-typed funder. A mismatch
+ * is a WARNING in the form, not a block.
+ */
+export async function deriveMagicProxyForCheck(
+  eoa: string
+): Promise<MagicProxyCheck> {
+  const trimmed = (eoa ?? "").trim();
+  if (!EVM_ADDRESS_RE.test(trimmed)) {
+    return { ok: false, derived: null };
+  }
+  try {
+    return { ok: true, derived: magicProxyAddress(trimmed.toLowerCase()) };
+  } catch {
+    return { ok: false, derived: null };
   }
 }

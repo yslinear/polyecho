@@ -428,6 +428,64 @@ class TestAccountImport:
         assert result.exit_code != 0
         assert "leaked-secret" not in result.output
 
+    def test_import_warns_on_create2_mismatch(self) -> None:
+        """P2: sig-1 (POLY_PROXY) + explicit --funder that DOES NOT match
+        the CREATE2-derived Magic proxy must surface a yellow warning Panel
+        but STILL persist (warn-only; operator may have legitimate reasons,
+        e.g. customised proxy). The persisted funder is the OPERATOR'S
+        value, not the derived one — honouring the explicit override."""
+        from polyecho.shared.polymarket.wallet import magic_proxy_address
+
+        derived = magic_proxy_address(_EOA)
+        # An obviously-different funder so the cross-check must trip.
+        bogus_funder = "0x" + "BB" * 20
+        assert bogus_funder.lower() != derived.lower()
+
+        scope = _make_session_scope(scalar_result=None)
+        with patch("polyecho.shared.db.session_scope", scope):
+            result = runner.invoke(
+                app,
+                [
+                    "account", "import", _EOA,
+                    "-t", "1",
+                    "--funder", bogus_funder,
+                ],
+                input=f"{_PASSPHRASE}\n{_PASSPHRASE}\n{_PRIVATE_KEY}\n",
+            )
+
+        assert result.exit_code == 0, result.output
+        # Warning surfaced.
+        assert "CREATE2" in result.output
+        assert "不符" in result.output or "推導" in result.output
+        # Still persisted (warn-only — operator override honoured).
+        assert "created" in result.output
+        session = scope._captured["session"]
+        session.add.assert_called_once()
+        added = session.add.call_args[0][0]
+        # The OPERATOR's funder is what landed, not the derived one.
+        assert added.funder_address == bogus_funder.lower()
+        assert added.signature_type == 1
+        # Secrets never leaked.
+        assert _PRIVATE_KEY not in result.output
+        assert _PASSPHRASE not in result.output
+
+    def test_import_no_warning_when_funder_matches_create2(self) -> None:
+        """P2 (negative): sig-1 with --funder equal to the CREATE2 derivation
+        must NOT surface the mismatch warning. Confirms the warn is precise."""
+        from polyecho.shared.polymarket.wallet import magic_proxy_address
+
+        derived = magic_proxy_address(_EOA)
+        scope = _make_session_scope(scalar_result=None)
+        with patch("polyecho.shared.db.session_scope", scope):
+            result = runner.invoke(
+                app,
+                ["account", "import", _EOA, "-t", "1", "--funder", derived],
+                input=f"{_PASSPHRASE}\n{_PASSPHRASE}\n{_PRIVATE_KEY}\n",
+            )
+        assert result.exit_code == 0, result.output
+        assert "CREATE2 cross-check warning" not in result.output
+        assert "created" in result.output
+
     def test_empty_passphrase_aborts_before_db(self) -> None:
         """A blank passphrase aborts non-zero before any DB access (and the
         private-key prompt is never even reached)."""

@@ -163,6 +163,14 @@ export const tables = {
       balanceNa: "N/A",
       balanceIdleFailed: "鏈上 USDC 餘額讀取失敗",
       balancePartialFailed: "部分餘額讀取失敗（仍可送出）",
+      /** P2 — sig-type-1 CREATE2 cross-check (warn-only; never blocks). */
+      create2Probing: "比對 CREATE2 推導中…",
+      create2Match: "✓ 與 CREATE2 推導相符",
+      create2MismatchHeading:
+        "⚠ 你填入的 funder 與 CREATE2 推導不符",
+      create2MismatchHint:
+        "可能是有意的（例如自訂代理 / 已遷移帳戶）；若你不確定，請對照 polymarket.com/settings 顯示的 funder。本頁不阻擋送出。",
+      create2DerivedLabel: "CREATE2 推導",
     },
   },
   leaders: {

@@ -28,8 +28,11 @@ import { t } from "@/lib/i18n";
  */
 
 const importAccount = vi.fn();
+const deriveMagicProxyForCheck = vi.fn();
 vi.mock("@/app/accounts/actions", () => ({
   importAccount: (...a: unknown[]) => importAccount(...a),
+  deriveMagicProxyForCheck: (...a: unknown[]) =>
+    deriveMagicProxyForCheck(...a),
 }));
 
 const probeTotalBalance = vi.fn();
@@ -93,6 +96,10 @@ describe("ImportAccountForm (reordered + read-only balance probe)", () => {
       idleUsdc: 100,
       totalUsd: 4421,
       message: "",
+    });
+    deriveMagicProxyForCheck.mockReset().mockResolvedValue({
+      ok: true,
+      derived: "0xfaffc82a2d2c9b2d8a52fd2b66585b58572ec427",
     });
     toastSuccess.mockReset();
     toastError.mockReset();
@@ -278,5 +285,133 @@ describe("ImportAccountForm (reordered + read-only balance probe)", () => {
     });
     expect(screen.getByLabelText(L_ENC)).not.toBeDisabled();
     expect(screen.getByLabelText(L_DANGER)).not.toBeDisabled();
+  });
+
+  /**
+   * P2 — CREATE2 cross-check (sig-type 1 only). Warn-only; the form NEVER
+   * blocks submit on the result. Server-side `deriveMagicProxyForCheck` is
+   * mocked so the test asserts the FORM behaviour, not the keccak math
+   * (that is covered by the magic-proxy ↔ Python parity vector).
+   */
+  it("test_create2_mismatch_warning_shown — sig-type 1 + non-matching funder shows yellow note", async () => {
+    // Operator typed an explicit funder that does NOT match the CREATE2
+    // derivation. Form must surface the mismatch heading + the derived
+    // address (so the operator can compare on polymarket.com/settings).
+    deriveMagicProxyForCheck.mockResolvedValue({
+      ok: true,
+      derived: "0x" + "11".repeat(20), // ≠ FUNDER
+    });
+
+    const user = await openForm();
+    await user.type(screen.getByLabelText(L_EOA), EOA);
+    await user.type(screen.getByLabelText(L_FUNDER), FUNDER);
+    // Pick sig-type 1 (POLY_PROXY) — the only type that triggers the check.
+    await user.click(screen.getByLabelText(L_SIG));
+    await user.click(
+      screen.getByRole("option", {
+        name: t("tables.accounts.import.sigType1"),
+      })
+    );
+
+    await waitFor(() =>
+      expect(deriveMagicProxyForCheck).toHaveBeenCalledWith(EOA)
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          t("tables.accounts.import.create2MismatchHeading")
+        )
+      ).toBeInTheDocument()
+    );
+    // The derived value is shown so the operator can cross-check it.
+    expect(
+      screen.getByText(/0x1{40}/i)
+    ).toBeInTheDocument();
+    // Hint copy present.
+    expect(
+      screen.getByText(t("tables.accounts.import.create2MismatchHint"))
+    ).toBeInTheDocument();
+  });
+
+  it("CREATE2 cross-check shows a match note when funder == derived", async () => {
+    const derived = "0xfaffc82a2d2c9b2d8a52fd2b66585b58572ec427";
+    deriveMagicProxyForCheck.mockResolvedValue({ ok: true, derived });
+
+    const user = await openForm();
+    await user.type(screen.getByLabelText(L_EOA), EOA);
+    await user.type(screen.getByLabelText(L_FUNDER), derived);
+    await user.click(screen.getByLabelText(L_SIG));
+    await user.click(
+      screen.getByRole("option", {
+        name: t("tables.accounts.import.sigType1"),
+      })
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(t("tables.accounts.import.create2Match"))
+      ).toBeInTheDocument()
+    );
+    // Mismatch heading is NOT shown when the values match.
+    expect(
+      screen.queryByText(
+        t("tables.accounts.import.create2MismatchHeading")
+      )
+    ).not.toBeInTheDocument();
+  });
+
+  it("CREATE2 cross-check is NOT triggered for sig-type 0 (no warning, no derive call)", async () => {
+    const user = await openForm();
+    await user.type(screen.getByLabelText(L_EOA), EOA);
+    await user.type(screen.getByLabelText(L_FUNDER), FUNDER);
+    // sig-type stays 0 (default) — the check must be inert.
+
+    // Wait long enough for any erroneous trigger; assert no call.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(deriveMagicProxyForCheck).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText(
+        t("tables.accounts.import.create2MismatchHeading")
+      )
+    ).not.toBeInTheDocument();
+  });
+
+  it("CREATE2 mismatch does NOT block submit (warn-only)", async () => {
+    deriveMagicProxyForCheck.mockResolvedValue({
+      ok: true,
+      derived: "0x" + "11".repeat(20),
+    });
+
+    const user = await openForm();
+    await user.type(screen.getByLabelText(L_EOA), EOA);
+    await user.type(screen.getByLabelText(L_FUNDER), FUNDER);
+    await user.click(screen.getByLabelText(L_SIG));
+    await user.click(
+      screen.getByRole("option", {
+        name: t("tables.accounts.import.sigType1"),
+      })
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          t("tables.accounts.import.create2MismatchHeading")
+        )
+      ).toBeInTheDocument()
+    );
+
+    // Fill secrets and submit — mismatch must NOT prevent the call.
+    await user.type(screen.getByLabelText(L_PK), PK);
+    await user.type(screen.getByLabelText(L_ENC), "enc-pass");
+    await user.type(screen.getByLabelText(L_DANGER), "danger-pass");
+    await user.click(screen.getByRole("button", { name: BTN_SUBMIT }));
+
+    await waitFor(() => expect(importAccount).toHaveBeenCalledTimes(1));
+    expect(importAccount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eoaAddress: EOA,
+        funder: FUNDER,
+        signatureType: 1,
+      })
+    );
   });
 });

@@ -50,7 +50,7 @@ import {
 } from "@/components/ui/select";
 import { t } from "@/lib/i18n";
 import { EVM_ADDRESS_RE, PRIVATE_KEY_RE, formatUsd } from "@/lib/format";
-import { importAccount } from "./actions";
+import { importAccount, deriveMagicProxyForCheck } from "./actions";
 import { probeTotalBalance } from "./balance";
 
 /** Debounce (ms) so the probe fires once per SETTLED address, not per key. */
@@ -191,6 +191,105 @@ function BalanceLine({
         value={state.totalUsd}
       />
       <p className="text-xs text-muted-foreground">{note}</p>
+    </div>
+  );
+}
+
+/**
+ * CreateTwoCheck — P2 inline advisory note for sig-type 1 (POLY_PROXY).
+ *
+ * When the operator picks sig-type 1 AND types an explicit funder, we
+ * compare it to the CREATE2 Magic-proxy derived from the EOA. A mismatch
+ * shows a yellow warning; a match shows a quiet green confirmation. This
+ * is purely informational — the form NEVER blocks on the result, and the
+ * persisted funder is whatever the operator typed (the CLI does the same).
+ *
+ * Implemented as a Server Action call (`deriveMagicProxyForCheck`)
+ * because the web bundle has no client-side keccak256 dependency; the
+ * derivation lives in `lib/magic-proxy.ts` (TS byte-mirror of the FROZEN
+ * Python `magic_proxy_address`, constants mirrored from
+ * `polyecho.shared.constants`).
+ */
+function CreateTwoCheck({
+  eoa,
+  funder,
+  enabled,
+}: {
+  eoa: string;
+  funder: string;
+  enabled: boolean;
+}) {
+  const [derived, setDerived] = React.useState<string | null>(null);
+  const [probing, setProbing] = React.useState(false);
+
+  React.useEffect(() => {
+    const eoaTrim = eoa.trim();
+    const funderTrim = funder.trim();
+    if (
+      !enabled ||
+      !EVM_ADDRESS_RE.test(eoaTrim) ||
+      !EVM_ADDRESS_RE.test(funderTrim)
+    ) {
+      setDerived(null);
+      setProbing(false);
+      return;
+    }
+    let cancelled = false;
+    setProbing(true);
+    deriveMagicProxyForCheck(eoaTrim)
+      .then((res) => {
+        if (cancelled) return;
+        setDerived(res.ok ? res.derived : null);
+      })
+      .catch(() => {
+        if (!cancelled) setDerived(null);
+      })
+      .finally(() => {
+        if (!cancelled) setProbing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [eoa, funder, enabled]);
+
+  if (!enabled) return null;
+  if (probing) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        {t("tables.accounts.import.create2Probing")}
+      </p>
+    );
+  }
+  if (derived === null) return null;
+
+  const funderLower = funder.trim().toLowerCase();
+  const matches = funderLower === derived.toLowerCase();
+
+  if (matches) {
+    return (
+      <p className="text-xs text-gain">
+        {t("tables.accounts.import.create2Match")}
+      </p>
+    );
+  }
+  return (
+    <div
+      className="space-y-0.5 rounded border border-amber-500/50 bg-amber-500/5 px-2 py-1.5"
+      role="status"
+      title={t("tables.accounts.import.create2MismatchHint")}
+    >
+      <p className="text-xs font-medium text-amber-600 dark:text-amber-400">
+        {t("tables.accounts.import.create2MismatchHeading")}
+      </p>
+      <p className="font-mono text-[11px] text-muted-foreground">
+        <span className="font-medium text-foreground">
+          {t("tables.accounts.import.create2DerivedLabel")}：
+        </span>
+        <span className="ml-1">{derived}</span>
+      </p>
+      <p className="text-xs text-muted-foreground">
+        {t("tables.accounts.import.create2MismatchHint")}
+      </p>
     </div>
   );
 }
@@ -399,6 +498,18 @@ export function ImportAccountForm() {
           <BalanceLine
             state={funderBalance}
             note={t("tables.accounts.import.balanceFunderNote")}
+          />
+          {/* P2: CREATE2 cross-check (sig-type 1 only). Warn-only — never
+              blocks submit. The CLI does the same. */}
+          <CreateTwoCheck
+            eoa={eoa}
+            funder={funder}
+            enabled={
+              !isType0 &&
+              sigType === "1" &&
+              EVM_ADDRESS_RE.test(eoa.trim()) &&
+              EVM_ADDRESS_RE.test(funder.trim())
+            }
           />
         </div>
 

@@ -280,6 +280,7 @@ def import_key(
     from polyecho.shared.crypto import encrypt_private_key
     from polyecho.shared.db import session_scope
     from polyecho.shared.models import Account
+    from polyecho.shared.polymarket.wallet import magic_proxy_address
 
     try:
         wallets = derive_wallets(eoa)
@@ -306,8 +307,40 @@ def import_key(
     #              fabricated address (runbook §2.3).
     derived = wallets[signature_type]
     if derived is not None:
-        # Types 0/1: use the verified derived value; ignore any --funder.
+        # Types 0/1: prefer the verified derived value.
         funder_addr = derived
+        # P2: CREATE2 cross-check (sig 1 only, when operator EXPLICITLY
+        # supplied --funder). The operator may have legitimate reasons to
+        # override (a customised proxy, a recovered account, etc.) — we
+        # WARN, never BLOCK. For sig 0 the EOA-is-funder identity is
+        # mathematical, so no operator funder makes sense → ignore silently.
+        explicit_funder = funder.strip()
+        if (
+            signature_type == 1
+            and explicit_funder
+            and is_address(explicit_funder)
+        ):
+            explicit_lower = explicit_funder.lower()
+            try:
+                derived_check = magic_proxy_address(eoa_lower)
+            except ValueError:
+                derived_check = None
+            if derived_check is not None and explicit_lower != derived_check.lower():
+                _console.print(
+                    Panel(
+                        f"[yellow]⚠ 你提供的 --funder 與 CREATE2 推導不符。[/yellow]\n"
+                        f"提供的 funder : [bold]{explicit_lower}[/bold]\n"
+                        f"CREATE2 推導  : [bold]{derived_check.lower()}[/bold]\n\n"
+                        "可能是有意的（例如自訂代理 / 已遷移帳戶），\n"
+                        "若你不確定，請對照 polymarket.com/settings 顯示的 funder。\n"
+                        "[dim]系統不阻擋此次匯入 — 仍將以你提供的 funder 寫入。[/dim]",
+                        title="[yellow]CREATE2 cross-check warning[/yellow]",
+                        border_style="yellow",
+                    )
+                )
+                # Honour operator intent: persist the explicit value, not
+                # the derived one (warn-only stance).
+                funder_addr = explicit_lower
     else:
         explicit = funder.strip()
         if not explicit:
