@@ -209,12 +209,32 @@ export function ImportAccountForm() {
 
   const isType0 = sigType === "0";
 
-  // Read-only, best-effort balance of the addresses we actually HAVE.
-  // EOA is always probed; for type 0 the EOA IS the funder (so its balance
-  // is the account value). Funder is probed only when an explicit one is
-  // required (type ≠ 0). Neither probe gates submit.
+  // Progressive-disclosure gates — derived synchronously from state. The
+  // identity section (name / EOA / Funder / sigType) is always editable;
+  // the secrets section (private key, enc pass, danger pass) is visible
+  // but visually muted + interaction-blocked until the identity inputs
+  // are valid, so the operator can SEE the next steps without filling
+  // them out-of-order. The Server Action re-validates authoritatively;
+  // these gates are purely UX.
+  const eoaValid = EVM_ADDRESS_RE.test(eoa.trim());
+  const funderValid = isType0 || EVM_ADDRESS_RE.test(funder.trim());
+  const identityValid = eoaValid && funderValid;
+  const secretsLocked = !identityValid;
+  const privateKeyValid = PRIVATE_KEY_RE.test(privateKey.trim());
+  const fullValid =
+    identityValid &&
+    privateKeyValid &&
+    encPass.length > 0 &&
+    dangerPass.length > 0;
+
+  // Read-only, best-effort balance of the addresses we actually HAVE. The
+  // EOA is always probed. Funder is probed whenever the operator types a
+  // valid EVM there, REGARDLESS of sigType — that way the funder balance
+  // is visible BEFORE the operator picks sigType, so "informed choice"
+  // (sigTypeHint copy) is actually achievable. type 0 still ignores
+  // funder at submit time (server-side normalisation).
   const eoaBalance = useAddressBalance(eoa, true);
-  const funderBalance = useAddressBalance(funder, !isType0);
+  const funderBalance = useAddressBalance(funder, true);
 
   function clearSecrets() {
     setPrivateKey("");
@@ -312,6 +332,9 @@ export function ImportAccountForm() {
         <span>{t("tables.accounts.import.intro")}</span>
       </p>
 
+      {/* Identity section — always editable, informed-choice order.
+          Funder is now BEFORE sigType so the operator can see its balance
+          BEFORE picking a signature type (the sigTypeHint promise). */}
       <div className="grid gap-4 sm:grid-cols-2">
         {/* 1. 帳戶名稱（選填） */}
         <div className="space-y-1.5">
@@ -329,7 +352,7 @@ export function ImportAccountForm() {
           />
         </div>
 
-        {/* 2. EOA 位址 + 3. (auto) read-only balance line */}
+        {/* 2. EOA 位址 + 即時餘額 */}
         <div className="space-y-1.5">
           <label htmlFor="ia-eoa" className="text-sm font-medium leading-none">
             {t("tables.accounts.import.eoaLabel")}
@@ -349,7 +372,37 @@ export function ImportAccountForm() {
           />
         </div>
 
-        {/* 4. 簽章類型 — deliberately near the END (informed choice) */}
+        {/* 3. Funder + 即時餘額 — always enabled. The operator may pre-fill
+              it to see its on-chain balance BEFORE committing to a
+              signature type; type 0 ignores funder at submit time. */}
+        <div className="space-y-1.5">
+          <label
+            htmlFor="ia-funder"
+            className="text-sm font-medium leading-none"
+          >
+            {t("tables.accounts.import.funderLabel")}
+          </label>
+          <Input
+            id="ia-funder"
+            value={funder}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={t("tables.accounts.import.funderPlaceholder")}
+            className="font-mono text-sm"
+            onChange={(e) => setFunder(e.target.value)}
+          />
+          <p className="text-xs text-muted-foreground">
+            {isType0
+              ? t("tables.accounts.import.funderHintType0")
+              : t("tables.accounts.import.funderHintOther")}
+          </p>
+          <BalanceLine
+            state={funderBalance}
+            note={t("tables.accounts.import.balanceFunderNote")}
+          />
+        </div>
+
+        {/* 4. 簽章類型 — informed choice AFTER both balances are visible */}
         <div className="space-y-1.5">
           <label htmlFor="ia-sig" className="text-sm font-medium leading-none">
             {t("tables.accounts.import.sigTypeLabel")}
@@ -377,39 +430,21 @@ export function ImportAccountForm() {
             {t("tables.accounts.import.sigTypeHint")}
           </p>
         </div>
+      </div>
 
-        {/* 5. Funder (only type ≠ 0) + its read-only balance */}
-        <div className="space-y-1.5">
-          <label
-            htmlFor="ia-funder"
-            className="text-sm font-medium leading-none"
-          >
-            {t("tables.accounts.import.funderLabel")}
-          </label>
-          <Input
-            id="ia-funder"
-            value={funder}
-            autoComplete="off"
-            spellCheck={false}
-            disabled={isType0}
-            placeholder={t("tables.accounts.import.funderPlaceholder")}
-            className="font-mono text-sm"
-            onChange={(e) => setFunder(e.target.value)}
-          />
-          <p className="text-xs text-muted-foreground">
-            {isType0
-              ? t("tables.accounts.import.funderHintType0")
-              : t("tables.accounts.import.funderHintOther")}
-          </p>
-          {!isType0 && (
-            <BalanceLine
-              state={funderBalance}
-              note={t("tables.accounts.import.balanceFunderNote")}
-            />
-          )}
-        </div>
-
-        {/* 6. 私鑰 */}
+      {/* Secrets section — visible (so the operator anticipates next steps)
+          but locked until identity is valid (EOA + funder-when-not-type-0).
+          opacity-50 is the visual cue; `disabled` on inputs makes them
+          inert for a11y / keyboard. Submit button also disabled below
+          until ALL fields are valid. */}
+      <div
+        aria-hidden={secretsLocked || undefined}
+        className={
+          "grid gap-4 sm:grid-cols-2 transition-opacity " +
+          (secretsLocked ? "opacity-50" : "")
+        }
+      >
+        {/* 5. 私鑰 */}
         <div className="space-y-1.5">
           <label htmlFor="ia-pk" className="text-sm font-medium leading-none">
             {t("tables.accounts.import.privateKeyLabel")}
@@ -420,6 +455,7 @@ export function ImportAccountForm() {
             value={privateKey}
             autoComplete="off"
             spellCheck={false}
+            disabled={secretsLocked}
             placeholder={t("tables.accounts.import.privateKeyPlaceholder")}
             className="font-mono text-sm"
             onChange={(e) => setPrivateKey(e.target.value)}
@@ -429,7 +465,7 @@ export function ImportAccountForm() {
           </p>
         </div>
 
-        {/* 7. 私鑰加密密語 */}
+        {/* 6. 私鑰加密密語 */}
         <div className="space-y-1.5">
           <label
             htmlFor="ia-encpass"
@@ -443,6 +479,7 @@ export function ImportAccountForm() {
             value={encPass}
             autoComplete="off"
             spellCheck={false}
+            disabled={secretsLocked}
             placeholder={t("tables.accounts.import.encPassPlaceholder")}
             className="text-sm"
             onChange={(e) => setEncPass(e.target.value)}
@@ -452,7 +489,7 @@ export function ImportAccountForm() {
           </p>
         </div>
 
-        {/* 8. 危險操作確認密碼 */}
+        {/* 7. 危險操作確認密碼 */}
         <div className="space-y-1.5 sm:col-span-2">
           <label
             htmlFor="ia-dangerpass"
@@ -466,6 +503,7 @@ export function ImportAccountForm() {
             value={dangerPass}
             autoComplete="off"
             spellCheck={false}
+            disabled={secretsLocked}
             placeholder={t("tables.accounts.import.dangerPassPlaceholder")}
             className="max-w-md text-sm"
             onChange={(e) => setDangerPass(e.target.value)}
@@ -486,7 +524,7 @@ export function ImportAccountForm() {
           type="submit"
           size="sm"
           variant="destructive"
-          disabled={pending}
+          disabled={pending || !fullValid}
         >
           {pending
             ? t("tables.accounts.import.submitting")

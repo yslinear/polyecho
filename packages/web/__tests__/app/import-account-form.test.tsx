@@ -4,15 +4,21 @@ import userEvent from "@testing-library/user-event";
 import { t } from "@/lib/i18n";
 
 /**
- * ImportAccountForm — the operator-authorised key-import island, AFTER the
- * UX reorder + the additive read-only balance probe.
+ * ImportAccountForm — the operator-authorised key-import island AFTER the
+ * progressive-disclosure refactor (informed-choice flow).
  *
  * These tests prove:
- *  - field ORDER: 帳戶名稱 → EOA → 簽章類型 → Funder → 私鑰 → 加密密語
- *    → 危險操作密碼 (signature type is now near the END, not upfront)
- *  - a valid EOA triggers the read-only probeBalance and renders the
- *    balance line (with the "this IS the type-0 account value" note)
- *  - the funder is probed only when signature_type ≠ 0
+ *  - field ORDER: 帳戶名稱 → EOA → Funder → 簽章類型 → 私鑰 → 加密密語
+ *    → 危險操作密碼 (Funder moved BEFORE sigType so operator can see its
+ *    balance BEFORE picking a signature type)
+ *  - both EOA and Funder trigger a read-only probeTotalBalance once they
+ *    are valid EVM addresses, regardless of sigType (lets operator probe
+ *    funder balance pre-commit)
+ *  - the secrets section (私鑰 / 加密密語 / 危險操作密碼) is locked
+ *    (inputs disabled + opacity-50) until the identity section is valid:
+ *    type 0 needs only EOA; type 1/2/3 needs EOA + funder
+ *  - the submit button is disabled until all fields are valid (no more
+ *    out-of-order toast.error surprises — the gate is visual + structural)
  *  - the honest CLI-scope hint is present
  *  - submit STILL calls importAccount with the SAME args (unchanged gate)
  *  - probe failure NEVER blocks submit
@@ -93,19 +99,21 @@ describe("ImportAccountForm (reordered + read-only balance probe)", () => {
     refresh.mockReset();
   });
 
-  it("renders fields with signature type AFTER the EOA (informed order)", async () => {
+  it("renders fields with Funder BEFORE sigType (informed-choice order)", async () => {
     await openForm();
 
-    // Query each accessible control, then compare DOM order.
+    // Query each accessible control, then compare DOM order. Funder is now
+    // BEFORE sigType so the operator can read its balance BEFORE picking
+    // a signature type (delivers on the sigTypeHint promise).
     const name = screen.getByLabelText(L_NAME);
     const eoa = screen.getByLabelText(L_EOA);
-    const sig = screen.getByLabelText(L_SIG);
     const funder = screen.getByLabelText(L_FUNDER);
+    const sig = screen.getByLabelText(L_SIG);
     const pk = screen.getByLabelText(L_PK);
     const enc = screen.getByLabelText(L_ENC);
     const danger = screen.getByLabelText(L_DANGER);
 
-    const order = [name, eoa, sig, funder, pk, enc, danger];
+    const order = [name, eoa, funder, sig, pk, enc, danger];
     for (let i = 1; i < order.length; i++) {
       // Node.DOCUMENT_POSITION_FOLLOWING (4) === order[i] comes AFTER order[i-1]
       expect(
@@ -163,14 +171,23 @@ describe("ImportAccountForm (reordered + read-only balance probe)", () => {
     expect(screen.getByText(new RegExp(NA))).toBeInTheDocument();
   });
 
-  it("does NOT probe the funder for signature_type 0 (EOA == funder)", async () => {
+  it("probes the funder balance even at signature_type 0 (informed-choice flow)", async () => {
+    // The pre-progressive-disclosure form disabled the funder field at
+    // type 0; the new flow keeps it editable so the operator can SEE the
+    // funder's balance BEFORE committing to a sigType. type 0 still
+    // ignores funder at submit time — the server-side normalisation is
+    // untouched (covered by the actions test).
     const user = await openForm();
     await user.type(screen.getByLabelText(L_EOA), EOA);
     await waitFor(() => expect(probeTotalBalance).toHaveBeenCalledWith(EOA));
 
-    // type 0: funder input is disabled and never probed.
-    expect(screen.getByLabelText(L_FUNDER)).toBeDisabled();
-    expect(probeTotalBalance).not.toHaveBeenCalledWith(FUNDER);
+    // Funder input is enabled and probed once it parses as a valid EVM.
+    expect(screen.getByLabelText(L_FUNDER)).not.toBeDisabled();
+    await user.type(screen.getByLabelText(L_FUNDER), FUNDER);
+    await waitFor(
+      () => expect(probeTotalBalance).toHaveBeenCalledWith(FUNDER),
+      { timeout: 2000 }
+    );
   });
 
   it("a partial-failure probe still lets a valid form submit", async () => {
@@ -223,17 +240,43 @@ describe("ImportAccountForm (reordered + read-only balance probe)", () => {
     expect(refresh).toHaveBeenCalled();
   });
 
-  it("client-side EOA validation still gates submit (unchanged)", async () => {
+  it("submit button is disabled until ALL fields are valid (no out-of-order toast surprises)", async () => {
+    // Pre-progressive-disclosure the form let an invalid EOA reach the
+    // onSubmit handler and surface as toast.error. The new flow blocks
+    // submission STRUCTURALLY — button stays disabled, so the form
+    // can't be sent before the fields make sense. importAccount is
+    // never called and no toast fires either way.
     const user = await openForm();
     await user.type(screen.getByLabelText(L_EOA), "0xnothex");
     await user.type(screen.getByLabelText(L_PK), PK);
     await user.type(screen.getByLabelText(L_ENC), "e");
     await user.type(screen.getByLabelText(L_DANGER), "d");
-    await user.click(screen.getByRole("button", { name: BTN_SUBMIT }));
 
+    expect(
+      screen.getByRole("button", { name: BTN_SUBMIT })
+    ).toBeDisabled();
     expect(importAccount).not.toHaveBeenCalled();
-    expect(toastError).toHaveBeenCalledWith(
-      t("tables.accounts.import.errEoa")
-    );
+  });
+
+  it("secrets section is locked (inputs disabled) until the EOA is valid", async () => {
+    // Identity gate: with no EOA typed, the 私鑰 / 加密密語 / 危險操作密碼
+    // inputs must be visible but inert (so the operator anticipates the
+    // next steps without filling them in the wrong order).
+    await openForm();
+
+    expect(screen.getByLabelText(L_PK)).toBeDisabled();
+    expect(screen.getByLabelText(L_ENC)).toBeDisabled();
+    expect(screen.getByLabelText(L_DANGER)).toBeDisabled();
+  });
+
+  it("secrets unlock once the EOA is valid (type 0 path — funder optional)", async () => {
+    const user = await openForm();
+    await user.type(screen.getByLabelText(L_EOA), EOA);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(L_PK)).not.toBeDisabled();
+    });
+    expect(screen.getByLabelText(L_ENC)).not.toBeDisabled();
+    expect(screen.getByLabelText(L_DANGER)).not.toBeDisabled();
   });
 });
