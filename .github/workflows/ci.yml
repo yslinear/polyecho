@@ -252,6 +252,14 @@ jobs:
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v3
 
       - name: Validate docker-compose config
+        # The compose file now requires POSTGRES_PASSWORD via the `:?` strict
+        # interpolation so a bare `docker compose up` on a fresh host fails
+        # loudly instead of silently using the legacy `polyecho:polyecho`
+        # default. CI is not a deploy — supply any non-empty value purely so
+        # the YAML lints. The real cred lives in the operator's gitignored
+        # .env on the target host.
+        env:
+          POSTGRES_PASSWORD: ci-validate-only
         run: docker compose -f infra/docker-compose.yml config --quiet
 
       # GitHub Actions cache (type=gha) is supported by the docker-container
