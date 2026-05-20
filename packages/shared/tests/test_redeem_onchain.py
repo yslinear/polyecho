@@ -213,16 +213,23 @@ def test_idempotent_max_approve_skips_when_already_approved(
 
 
 # ---------------------------------------------------------------------------
-# MAGIC / SAFE / POLY_1271 — abstract relayer seam, fails closed (TODO)
+# MAGIC / POLY_1271 — sig 1 + sig 3 stay fail-closed even after the
+# Phase-4 P3 work (the official Builder-Relayer SDK exposes no PROXY /
+# EIP-191 or 1271 surface — verified 2026-05-20).  SAFE (sig 2) is now
+# concrete via :mod:`polyecho.shared.polymarket.relayer` and is covered
+# in :mod:`packages.shared.tests.test_polymarket_relayer`.
 # ---------------------------------------------------------------------------
 def test_magic_redeem_raises_relayer_not_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _enable_live(monkeypatch)
     fake = _FakeWeb3()
-    with pytest.raises(RelayerNotConfiguredError, match="TODO.verify"):
+    # No relayer injected (default) ⇒ chokepoint fires for sig 1 MAGIC
+    # with the new error message (no more legacy "TODO(verify)" — the
+    # SDK is verified to lack a MAGIC surface).
+    with pytest.raises(RelayerNotConfiguredError, match="signature_type=1"):
         run(_client(fake).redeem(_spec(is_neg_risk=False), binding=_MAGIC))
-    assert fake.sent == []  # never a wrong tx for an unverified relayer
+    assert fake.sent == []  # never a wrong tx for an unsupported sig
 
 
 def test_magic_unwrap_raises_relayer_not_configured(

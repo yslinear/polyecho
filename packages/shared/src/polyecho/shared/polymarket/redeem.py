@@ -22,12 +22,19 @@ Trigger / call / execution semantics (brief §9 / polyhermes-analysis §9):
   * **MAGIC (sig 1)** — Builder-Relayer PROXY (EIP-191 personal_sign):
     ABSTRACT — :meth:`BaseRedeemClient._do_redeem` dispatches to
     :meth:`_relay_redeem`, default raises a clear "relayer not configured"
-    error.  ``# TODO(verify)`` — the official ``py-builder-relayer-client``
-    (PRD §11.2) PyPI name/version could not be verified from this sandbox
-    (2026-05-18); we do NOT invent/import a guessed package name.
-  * **SAFE (sig 2)** — Builder-Relayer SafeTx (EIP-712) / manual
-    ``execTransaction``: ABSTRACT, same dispatch + ``# TODO(verify)``.
-  * **POLY_1271 (sig 3)** — no PolyHermes blueprint: ABSTRACT + TODO.
+    error.  The official ``py-builder-relayer-client`` (v0.0.1, PyPI;
+    verified 2026-05-20) does **not** expose a PROXY/EIP-191 dispatch —
+    its ``RelayClient.execute`` only consumes ``list[SafeTransaction]``
+    (TransactionType.SAFE).  Sig 1 therefore stays fail-closed; we do
+    NOT hand-roll a guessed personal_sign payload.
+  * **SAFE (sig 2)** — Builder-Relayer SafeTx (EIP-712): CONCRETE via
+    :mod:`polyecho.shared.polymarket.relayer.PolymarketRelayerClient`
+    (Phase-4 P3 wave); inject a configured relayer into
+    :class:`Web3RedeemClient` and ``_relay_redeem`` / ``_relay_unwrap``
+    delegate to it.  Without an injected relayer (or without builder
+    API credentials), sig 2 still fails closed.
+  * **POLY_1271 (sig 3)** — no PolyHermes blueprint and no SDK surface
+    in py-builder-relayer-client: stays fail-closed.
 
 The live-lock chokepoint is :func:`assert_live_allowed` called FIRST in
 the public :meth:`BaseRedeemClient.redeem` / :meth:`unwrap_collateral`, so
@@ -42,12 +49,15 @@ Dependency note (Wave C-redeem)
   so the concrete client is unit-testable with a fake and core owns the
   real ``AsyncWeb3`` wiring.
 * ``py-builder-relayer-client`` (PRD §11.2, official gasless relayer for
-  MAGIC/SAFE/1271 redeem): **# TODO(verify)** — PyPI availability could
-  not be confirmed from this sandboxed environment.  Per the brief this
-  MUST NOT block: the gasless path is the abstract :meth:`_relay_redeem` /
-  :meth:`_relay_unwrap` seam (no import of any relayer package), so a
-  later wave slots the concrete dependency with zero change to the frozen
-  :class:`RedeemClient` Protocol or the live-lock chokepoint.
+  SAFE redeem): **verified** at v0.0.1 on PyPI (homepage
+  ``github.com/Polymarket/py-builder-relayer-client``, source inspected
+  2026-05-20).  It is declared as an **optional** runtime dependency
+  (``packages/shared`` ``[relayer]`` extra) and imported lazily by
+  :mod:`polyecho.shared.polymarket.relayer` so this module stays
+  import-side-effect-free.  Hosts without the SDK see a clear
+  :class:`RelayerNotAvailableError` on first use; sig 2 then fails
+  closed at the live-lock chokepoint instead of submitting a guessed
+  payload.
 """
 
 from __future__ import annotations
@@ -170,12 +180,14 @@ ERC20_APPROVE_ABI: tuple[dict[str, Any], ...] = (
 
 
 class RelayerNotConfiguredError(RuntimeError):
-    """Raised when a gasless (MAGIC/SAFE/1271) redeem is requested but no
-    Builder-Relayer client is wired (brief §9 — ``# TODO(verify)``).
+    """Raised when a gasless redeem is requested but no Builder-Relayer
+    client is wired into :class:`Web3RedeemClient`, or when the requested
+    ``signature_type`` has no SDK surface (1 = MAGIC, 3 = POLY_1271).
 
     This is a *correctness* guard: it fails closed with a clear message
-    rather than submitting a wrong transaction via a guessed relayer
-    package.  EOA (sig 0) never raises this — it is the concrete path.
+    rather than submitting a wrong transaction.  EOA (sig 0) never
+    raises this — it is the concrete on-chain path.  SAFE (sig 2)
+    raises only when no :class:`PolymarketRelayerClient` is injected.
     """
 
 
@@ -272,9 +284,10 @@ class BaseRedeemClient:
     The public methods call :func:`assert_live_allowed` FIRST so a
     misconfigured deployment fails closed before any irreversible call.
     :class:`Web3RedeemClient` overrides the ``_do_*`` hooks with the real
-    EOA web3 path; the MAGIC/SAFE/1271 gasless seam (:meth:`_relay_redeem`
-    / :meth:`_relay_unwrap`) stays abstract (``# TODO(verify)``) and fails
-    closed with :class:`RelayerNotConfiguredError`.
+    EOA web3 path *and* the relayer seam for sig 2 SAFE (Phase-4 P3); on
+    this base class the gasless seam stays abstract and fails closed
+    with :class:`RelayerNotConfiguredError` so a misconfigured deployment
+    can never silently fall through.
     """
 
     #: Brief §9 constants surfaced for subclasses (no inline hardcoding).
@@ -311,26 +324,27 @@ class BaseRedeemClient:
             "(brief §9)"
         )
 
-    # -- Gasless seam (MAGIC/SAFE/1271) — ABSTRACT, # TODO(verify) --------
+    # -- Gasless seam (MAGIC/SAFE/1271) — concrete via relayer.py --------
+    # Subclasses (see :class:`Web3RedeemClient`) override this seam to
+    # dispatch SAFE (sig 2) to PolymarketRelayerClient.  MAGIC (sig 1)
+    # and POLY_1271 (sig 3) stay fail-closed everywhere — verified
+    # 2026-05-20: py-builder-relayer-client v0.0.1 only exposes
+    # SafeTransaction submit (TransactionType.SAFE), not PROXY/EIP-191
+    # or 1271; we refuse to invent the wire format.
     async def _relay_redeem(
         self, spec: RedeemJobSpec, *, binding: WalletBinding
     ) -> RedeemResult:
         """Gasless redeem via the official Builder-Relayer (brief §9).
 
-        # TODO(verify): ``py-builder-relayer-client`` (PRD §11.2) PyPI
-        name/version is UNVERIFIED from this sandbox.  MAGIC = PROXY /
-        EIP-191 personal_sign; SAFE = SafeTx / EIP-712 (MultiSend
-        DELEGATECALL); POLY_1271 has no PolyHermes blueprint.  We do NOT
-        hand-roll the relayer/HMAC and do NOT import a guessed package —
-        this fails closed with a clear error so it can be slotted later
-        with zero change to the live-lock chokepoint.
+        Default (no relayer injected) ⇒ fail closed.  Concrete dispatch
+        for sig 2 lives in :meth:`Web3RedeemClient._relay_redeem`.
         """
         raise RelayerNotConfiguredError(
             f"Gasless redeem for wallet_mode={binding.wallet_mode!r} "
-            f"(signature_type={binding.signature_type}) requires the "
-            f"official Builder-Relayer client, which is not configured. "
-            f"# TODO(verify) py-builder-relayer-client (PRD §11.2) — only "
-            f"the EOA (signature_type=0) path is concrete in Wave C-redeem."
+            f"(signature_type={binding.signature_type}) requires a "
+            f"configured Builder-Relayer client (sig 2 SAFE) — only "
+            f"signature_type=0 (EOA) and signature_type=2 (SAFE, with a "
+            f"PolymarketRelayerClient injected) are concrete."
         )
 
     async def _relay_unwrap(
@@ -338,23 +352,26 @@ class BaseRedeemClient:
     ) -> RedeemResult:
         """Gasless WCOL unwrap via the Builder-Relayer (brief §9).
 
-        # TODO(verify): same as :meth:`_relay_redeem` — abstract seam,
-        fails closed, no guessed relayer import.
+        Default (no relayer injected) ⇒ fail closed.  Concrete dispatch
+        for sig 2 lives in :meth:`Web3RedeemClient._relay_unwrap`.
         """
         raise RelayerNotConfiguredError(
             f"Gasless unwrap for wallet_mode={binding.wallet_mode!r} "
-            f"(signature_type={binding.signature_type}) requires the "
-            f"official Builder-Relayer client, which is not configured. "
-            f"# TODO(verify) py-builder-relayer-client (PRD §11.2)."
+            f"(signature_type={binding.signature_type}) requires a "
+            f"configured Builder-Relayer client (sig 2 SAFE)."
         )
 
 
 # Wallet signature_type that has a concrete on-chain path (brief §9).
 _SIG_EOA = 0
+#: SAFE (sig 2) — only non-EOA sig with a concrete relayer SDK surface
+#: (py-builder-relayer-client.RelayClient.execute consumes
+#: ``list[SafeTransaction]``, TransactionType.SAFE).  Verified 2026-05-20.
+_SIG_SAFE = 2
 
 
 class Web3RedeemClient(BaseRedeemClient):
-    """Concrete redeem client (brief §9 — Wave C-redeem).
+    """Concrete redeem client (brief §9 — Wave C-redeem + Phase-4 P3).
 
     * **EOA (signature_type 0)** — CONCRETE: builds the CTF
       ``redeemPositions`` (and WCOL ``unwrap`` for NegRisk) tx via the
@@ -363,9 +380,21 @@ class Web3RedeemClient(BaseRedeemClient):
       receipt.  Verified against web3.py v7 (``sign_transaction`` →
       ``raw_transaction`` → ``send_raw_transaction`` →
       ``wait_for_transaction_receipt``) + the Polymarket CTF examples.
-    * **MAGIC / SAFE / POLY_1271** — dispatched to the abstract
-      :meth:`_relay_redeem` / :meth:`_relay_unwrap` seam, which fails
-      closed (:class:`RelayerNotConfiguredError`, ``# TODO(verify)``).
+    * **SAFE (signature_type 2)** — CONCRETE when a
+      :class:`~polyecho.shared.polymarket.relayer.PolymarketRelayerClient`
+      is injected: ``_relay_redeem`` / ``_relay_unwrap`` build the
+      SafeTransaction calldata and call
+      ``relayer.submit_safe_transaction()`` (which signs the SafeTx
+      EIP-712 hash with the operator's signing key and POSTs to
+      ``relayer-v2.polymarket.com/submit`` with builder-program HMAC
+      headers).  Without an injected relayer, sig 2 fails closed
+      (:class:`RelayerNotConfiguredError`) at the live-lock chokepoint.
+    * **MAGIC (sig 1) / POLY_1271 (sig 3)** — NO SDK surface in
+      py-builder-relayer-client v0.0.1 (only SafeTransaction submit is
+      exposed).  These dispatch to :meth:`_relay_redeem` /
+      :meth:`_relay_unwrap` and always fail closed with
+      :class:`RelayerNotConfiguredError`; we refuse to invent the
+      EIP-191 / 1271 wire format.
 
     The collateral branch is the brief's highest-risk detail and is
     derived ONLY from :attr:`RedeemJobSpec.is_neg_risk` via
@@ -381,6 +410,9 @@ class Web3RedeemClient(BaseRedeemClient):
             on the EOA live path (the lock + worker short-circuit keep it
             uncalled by default).
         chain_id: EVM chain id for the signed tx (default Polygon 137).
+        relayer: Optional :class:`PolymarketRelayerClient` enabling the
+            concrete SAFE (sig 2) path.  Without it, SAFE wallets follow
+            the abstract seam and raise :class:`RelayerNotConfiguredError`.
     """
 
     def __init__(
@@ -389,10 +421,46 @@ class Web3RedeemClient(BaseRedeemClient):
         web3: Web3Backend,
         private_key_resolver: PrivateKeyResolver,
         chain_id: int = POLYGON_CHAIN_ID,
+        relayer: Any | None = None,
     ) -> None:
         self._web3 = web3
         self._resolve_key = private_key_resolver
         self._chain_id = chain_id
+        self._relayer = relayer
+
+    # -- Relayer (sig 2 SAFE) concrete path -----------------------------
+    async def _relay_redeem(
+        self, spec: RedeemJobSpec, *, binding: WalletBinding
+    ) -> RedeemResult:
+        """Dispatch SAFE (sig 2) to the injected PolymarketRelayerClient.
+
+        Sig 1 (MAGIC) and sig 3 (POLY_1271) have no SDK surface and stay
+        fail-closed via the base-class behaviour.
+        """
+        if (
+            binding.signature_type != _SIG_SAFE
+            or self._relayer is None
+        ):
+            return await super()._relay_redeem(spec, binding=binding)
+        # Lazy import keeps this module relayer-free at import time.
+        from polyecho.shared.polymarket.relayer import relay_redeem
+
+        return await relay_redeem(self._relayer, spec, binding=binding)
+
+    async def _relay_unwrap(
+        self, *, binding: WalletBinding, amount: int
+    ) -> RedeemResult:
+        """Dispatch SAFE (sig 2) WCOL unwrap to the injected relayer."""
+        if (
+            binding.signature_type != _SIG_SAFE
+            or self._relayer is None
+        ):
+            return await super()._relay_unwrap(binding=binding, amount=amount)
+        from polyecho.shared.polymarket.relayer import relay_unwrap
+
+        return await relay_unwrap(
+            self._relayer, binding=binding, amount=amount
+        )
 
     # -- EOA concrete path ----------------------------------------------
     async def _do_redeem(

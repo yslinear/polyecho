@@ -1656,6 +1656,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+relayer = [
+    { name = "py-builder-relayer-client" },
+]
 test = [
     { name = "httpx" },
     { name = "pytest" },
@@ -1668,6 +1671,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=43" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27" },
+    { name = "py-builder-relayer-client", marker = "extra == 'relayer'", specifier = ">=0.0.1" },
     { name = "py-clob-client-v2", specifier = "==1.0.1" },
     { name = "py-vapid", specifier = ">=1.9" },
     { name = "pydantic", specifier = ">=2" },
@@ -1677,7 +1681,7 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.49" },
     { name = "structlog", specifier = ">=24" },
 ]
-provides-extras = ["test"]
+provides-extras = ["test", "relayer"]
 
 [[package]]
 name = "propcache"
@@ -1771,6 +1775,33 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/88/fb/46dad6c0ae49ed230ab1b16c890c2b6314e2403e6c412976f4a72d64a527/propcache-0.5.2-cp314-cp314t-win_amd64.whl", hash = "sha256:d447bb0b3054be5818458fbb171208b1d9ff11eba14e18ca18b90cbb45767370", size = 47764, upload-time = "2026-05-08T21:02:07.353Z" },
     { url = "https://files.pythonhosted.org/packages/e7/c4/a47d0a63aa309d10d59ede6e9d4cff03a344a79d1f0f4cd0cd74997b53e0/propcache-0.5.2-cp314-cp314t-win_arm64.whl", hash = "sha256:fe67a3d11cd9b4efabfa45c3d00ffba2b26811442a73a581a94b67c2b5faccf6", size = 41140, upload-time = "2026-05-08T21:02:09.065Z" },
     { url = "https://files.pythonhosted.org/packages/3a/ed/1cdcab6ba3d6ab7feca11fc14f0eeea80755bb53ef4e892079f31b10a25f/propcache-0.5.2-py3-none-any.whl", hash = "sha256:be1ddfcbb376e3de5d2e2db1d58d6d67463e6b4f9f040c000de8e300295465fe", size = 14036, upload-time = "2026-05-08T21:02:10.673Z" },
+]
+
+[[package]]
+name = "py-builder-relayer-client"
+version = "0.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "py-builder-signing-sdk" },
+    { name = "python-dotenv" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8f/f1/25a5bb3a4ccf1084430986871aaff71f1e1455cd10b529a1d2498b7ec9f1/py_builder_relayer_client-0.0.1.tar.gz", hash = "sha256:4cbf7bf070912b34c8b80aaf50a35a88300a44fe6416d2a5d6a7b107a140262c", size = 12835, upload-time = "2025-10-30T12:30:38.343Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/58/3d/afceb6ccab7514a9806eff4c396a13d231b2bee87098e1ece26792f26689/py_builder_relayer_client-0.0.1-py3-none-any.whl", hash = "sha256:3e69a8aacceca86edd6d16389b3bf436adbc0f56fd0d585e4083e133731f7e3b", size = 19725, upload-time = "2025-10-30T12:30:36.922Z" },
+]
+
+[[package]]
+name = "py-builder-signing-sdk"
+version = "0.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dotenv" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/18/e3/fab3253021a4d766345f491f00e40d89c7c5640bf6d20d9f5a3182b482de/py_builder_signing_sdk-0.0.2.tar.gz", hash = "sha256:27fa4401944220c51809f549a263c6e53b5cd981fca98eda7ef6f21944e6bf94", size = 6411, upload-time = "2025-10-20T22:17:56.658Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/57/fb/23c68c8f6356a50f959e2df2ae80e8344c3ff8ccca92943848a57a495928/py_builder_signing_sdk-0.0.2-py3-none-any.whl", hash = "sha256:114b9d57bec228177d759ce15c475589f47db2252ed1fd67cac3c9b0640abe76", size = 9082, upload-time = "2025-10-20T22:17:55.629Z" },
 ]
 
 [[package]]

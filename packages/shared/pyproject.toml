@@ -7,8 +7,11 @@ dependencies = [
   # P0-6: exact pin (supply-chain). The trading SDK owns EIP-712/HMAC/
   # rounding for live orders; an unpinned range would let a future release
   # silently change signing/transport. 1.0.1 == the version in uv.lock
-  # (verified). py-builder-relayer-client is deliberately NOT declared:
-  # gasless deploy is delegated to the off-chain relayer (no client lib).
+  # (verified). py-builder-relayer-client is declared as an OPTIONAL extra
+  # (``relayer``) below — gasless SAFE (signature_type=2) redeem is the
+  # only path that needs it, and hosts that only run EOA wallets never
+  # pay the install cost.  See polyecho.shared.polymarket.relayer for
+  # the lazy-import contract.
   "py-clob-client-v2==1.0.1",
   "sqlalchemy[asyncio]>=2.0.49",
   "asyncpg>=0.30",
@@ -25,6 +28,15 @@ test = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
   "httpx>=0.27",
+]
+# Phase-4 P3: gasless SAFE (signature_type=2) redeem via the official
+# Builder-Relayer.  The SDK is sync (requests) and we wrap it via
+# asyncio.to_thread in polyecho.shared.polymarket.relayer.  Hosts that
+# only run EOA wallets do NOT need this extra; the relayer module
+# imports the SDK lazily and fails closed with RelayerNotAvailableError
+# if the package is missing.
+relayer = [
+  "py-builder-relayer-client>=0.0.1",
 ]
 
 [build-system]
