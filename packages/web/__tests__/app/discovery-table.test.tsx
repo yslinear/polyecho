@@ -330,15 +330,17 @@ describe("DiscoveryTable (shadcn data-table)", () => {
     expect(replicabilityHeader()).not.toBeInTheDocument();
   });
 
-  it("renders strategy + risk badges with LOCALISED labels (insider_suspect = destructive); raw status stays English", () => {
+  it("renders strategy + risk + status badges with LOCALISED labels (insider_suspect = destructive)", () => {
     render(<DiscoveryTable data={rows} />);
-    // strategy_type + risk_flags DISPLAY is the zh-TW label; the raw
-    // user_status badge value stays English (out of i18n scope here).
+    // strategy_type + risk_flags + user_status DISPLAY are all the zh-TW
+    // label; the underlying filter/sort VALUE stays the raw enum. user_status
+    // was previously rendering the raw English enum verbatim — i18n-sweep
+    // routes it through the same `statusOptions` dictionary the facet uses.
     expect(
       screen.getAllByText(TX.stratScalper).length
     ).toBeGreaterThanOrEqual(2);
     expect(screen.getByText(TX.stratSwing)).toBeInTheDocument();
-    expect(screen.getByText("following")).toBeInTheDocument();
+    expect(screen.getByText(TX.statusFollowing)).toBeInTheDocument();
     const riskBadge = screen.getByText(TX.riskInsider);
     expect(riskBadge.className).toMatch(/destructive/);
     // the raw enum is preserved as the badge title (support / filter parity)

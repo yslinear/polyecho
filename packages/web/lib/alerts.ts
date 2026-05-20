@@ -22,6 +22,12 @@ const EVENT_LABELS: Record<string, string> = {
   system_low_balance: "系統：餘額偏低",
   candidate_high_score: "新發現高分候選",
   pending_dangerous_action: "待確認的危險操作",
+  // Discovery worker emits this RAW string (packages/discovery worker.py
+  // ``_insert_drift_event``) — it is NOT in the frozen ``EventType`` enum
+  // in packages/shared/src/polyecho/shared/events.py (which only has
+  // ``risk_strategy_drift``). Without this entry the /alerts row degrades
+  // to "未知類型：strategy_drift" via ``cappedFallback``.
+  strategy_drift: "策略漂移",
 };
 
 /**

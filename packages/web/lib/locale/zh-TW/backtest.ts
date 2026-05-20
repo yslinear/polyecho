@@ -3,12 +3,45 @@
  *  Proper nouns stay English — see common.ts PROPER-NOUN POLICY.
  *  (PnL / USD / Leader / Sharpe / bps / backtest 等技術詞保留英文) */
 export const backtest = {
+  /** `app/backtest/page.tsx` — backtest 任務列表 (Phase 4 UI fill-in).
+   *  技術詞 (backtest / Leader / USD) 保留英文 per common.ts PROPER-NOUN POLICY. */
+  list: {
+    title: "回測",
+    subtitle: "過去送出的 backtest 任務清單（最新 50 筆）。點任一列檢視結果，或建立新任務。",
+    newButton: "新增回測",
+    columns: {
+      date: "建立時間",
+      leaders: "Leader",
+      status: "狀態",
+      progress: "進度",
+      window: "回測期間",
+      capital: "本金",
+      actions: "操作",
+    },
+    status: {
+      pending: "已排入佇列",
+      running: "執行中",
+      completed: "已完成",
+      failed: "失敗",
+    },
+    /** Suffix for leader_addresses[2:] when there are >2 leaders. */
+    leadersMore: "＋{{count}}",
+    empty: {
+      title: "尚無回測記錄。",
+      hint: "請先在 /backtest/new 建立一個 backtest 任務。",
+    },
+    actions: {
+      view: "檢視",
+      rerun: "重新執行",
+    },
+  },
   new: {
     title: "New Backtest",
     desc: "設定一個 backtest 任務。送出佇列後，worker 會接手處理，結果會顯示在它自己的頁面。",
   },
   result: {
-    back: "← New Backtest",
+    /** 2026-05-21: now returns to the list page, not /backtest/new. */
+    back: "← 回測列表",
     title: "Backtest 結果",
     job: "任務：{{id}}",
     leader: "Leader：",

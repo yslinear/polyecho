@@ -161,9 +161,11 @@ export default async function BacktestResultPage({ params }: PageProps) {
 
   return (
     <div className="space-y-6">
-      {/* Back */}
+      {/* Back → list page (R-list 2026-05-21 UX: detail returns to the
+          list, not the create form). The label text remains the i18n key
+          to keep prior copy in case operators have it memorised. */}
       <Link
-        href="/backtest/new"
+        href="/backtest"
         className="text-sm text-muted-foreground hover:text-foreground underline underline-offset-2"
       >
         {t("backtest.result.back")}

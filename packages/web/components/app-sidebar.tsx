@@ -42,7 +42,11 @@ const navItems = [
   { href: "/leaders", labelKey: "sidebar.items.leaders", icon: Users },
   { href: "/discovery", labelKey: "sidebar.items.discovery", icon: Search },
   {
-    href: "/backtest/new",
+    // 2026-05-21: now points at the LIST page; the list has a prominent
+    // 「新增回測」 button leading into `/backtest/new`. The sidebar active-
+    // state contract still relies on `navSection("/backtest")` matching
+    // both `/backtest`, `/backtest/new`, and `/backtest/<id>`.
+    href: "/backtest",
     labelKey: "sidebar.items.backtest",
     icon: FlaskConical,
   },

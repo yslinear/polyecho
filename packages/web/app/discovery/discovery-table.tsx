@@ -115,6 +115,16 @@ function riskFlagLabel(raw: string): string {
   const out = t(`discovery.table.riskFlag.${raw}` as I18nKey);
   return out === `discovery.table.riskFlag.${raw}` ? raw : out;
 }
+// status cell + facet share the SAME dictionary
+// (`discovery.table.statusOptions.*`). The previous cell rendered the
+// RAW enum verbatim (`{v}` only) which leaked English `new`/`watching`/
+// `following`/`rejected` straight into the zh-TW column. Same
+// degrade-to-raw shape as the helpers above: UNMAPPED status falls back
+// to the raw enum (never blank, never "未知類型:X").
+function statusLabel(raw: string): string {
+  const out = t(`discovery.table.statusOptions.${raw}` as I18nKey);
+  return out === `discovery.table.statusOptions.${raw}` ? raw : out;
+}
 
 // Inclusive [min, max] numeric range filter for the 0–100 score columns.
 // filterValue is a [min, max] tuple where either side may be undefined
@@ -534,12 +544,17 @@ const columns: ColumnDef<CandidateLeaderRow, unknown>[] = [
     header: t("discovery.table.columns.status"),
     cell: ({ getValue }) => {
       const v = getValue<string>();
+      // Underlying filter VALUE stays the raw enum; only the DISPLAY is
+      // localised via statusLabel (same degrade-to-raw shape as
+      // strategyLabel / riskFlagLabel — UNMAPPED falls back to the raw
+      // enum verbatim, never blank). `capitalize` is dropped because the
+      // mapped label is already a Chinese string.
       return (
         <Badge
           variant={STATUS_VARIANT[v] ?? "secondary"}
-          className="text-xs capitalize"
+          className="text-xs"
         >
-          {v}
+          {statusLabel(v)}
         </Badge>
       );
     },

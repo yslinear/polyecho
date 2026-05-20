@@ -10,7 +10,20 @@ const returning = vi.fn().mockResolvedValue([{ id: "new-job-id" }]);
 const values = vi.fn(() => ({ returning }));
 const insert = vi.fn(() => ({ values }));
 
-vi.mock("@/lib/db", () => ({ db: { insert: (...a: unknown[]) => insert(...a) } }));
+// listBacktestJobs read-path chain: select().from(...).[where(...)].orderBy().limit()
+let listRows: unknown[] = [];
+const lblLimit = vi.fn(() => Promise.resolve(listRows));
+const lblOrderBy = vi.fn(() => ({ limit: lblLimit }));
+const lblWhere = vi.fn(() => ({ orderBy: lblOrderBy }));
+const lblFrom = vi.fn(() => ({ where: lblWhere, orderBy: lblOrderBy }));
+const lblSelect = vi.fn(() => ({ from: lblFrom }));
+
+vi.mock("@/lib/db", () => ({
+  db: {
+    insert: (...a: unknown[]) => insert(...a),
+    select: (...a: unknown[]) => lblSelect(...a),
+  },
+}));
 vi.mock("@/lib/env", () => ({ env: { POLYECHO_DB_URL_DRIZZLE: "stub" } }));
 
 const redirect = vi.fn((url: string) => {
@@ -21,7 +34,7 @@ vi.mock("next/navigation", () => ({
   redirect: (url: string) => redirect(url),
 }));
 
-import { createBacktestJob } from "@/app/backtest/actions";
+import { createBacktestJob, listBacktestJobs } from "@/app/backtest/actions";
 import type { BacktestFormValues } from "@/app/backtest/actions";
 
 const base: BacktestFormValues = {
@@ -156,5 +169,84 @@ describe("createBacktestJob", () => {
   it("still accepts a fully valid job (no behaviour change)", async () => {
     await expect(createBacktestJob(base)).rejects.toThrow(/NEXT_REDIRECT/);
     expect(insert).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * listBacktestJobs read-path: result_keys collapse + default limit + the
+ * optional statusFilter wiring. We assert the shape of the returned
+ * summary rows (the strict subset of the full row) and that limit is
+ * clamped into [1, 200].
+ */
+describe("listBacktestJobs", () => {
+  beforeEach(() => {
+    listRows = [];
+    lblSelect.mockClear();
+    lblFrom.mockClear();
+    lblWhere.mockClear();
+    lblOrderBy.mockClear();
+    lblLimit.mockClear();
+  });
+
+  it("returns [] when the table is empty (calm empty path)", async () => {
+    listRows = [];
+    const out = await listBacktestJobs();
+    expect(out).toEqual([]);
+    expect(lblLimit).toHaveBeenCalledWith(50); // default limit
+  });
+
+  it("collapses the result jsonb to result_keys (only the key count, not the body)", async () => {
+    listRows = [
+      {
+        id: "j1",
+        leader_addresses: ["0xabc"],
+        start_date: "2025-01-01",
+        end_date: "2025-02-01",
+        initial_capital_usd: "1000",
+        status: "completed",
+        progress: "100",
+        result: { scenarios: [], stats: {}, pnl_curve: [] },
+        created_at: new Date("2026-05-20T00:00:00Z"),
+      },
+      {
+        id: "j2",
+        leader_addresses: ["0xdef"],
+        start_date: "2025-01-01",
+        end_date: "2025-02-01",
+        initial_capital_usd: "500",
+        status: "pending",
+        progress: "0",
+        result: null,
+        created_at: new Date("2026-05-19T00:00:00Z"),
+      },
+    ];
+    const out = await listBacktestJobs();
+    expect(out).toHaveLength(2);
+    expect(out[0].result_keys).toBe(3);
+    expect(out[1].result_keys).toBe(0);
+    // The full `result` body must NOT leak into the summary.
+    expect((out[0] as unknown as Record<string, unknown>).result).toBeUndefined();
+  });
+
+  it("applies statusFilter via .where(...) when supplied", async () => {
+    listRows = [];
+    await listBacktestJobs({ statusFilter: "running" });
+    expect(lblWhere).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT call .where(...) when no statusFilter is supplied", async () => {
+    listRows = [];
+    await listBacktestJobs();
+    expect(lblWhere).not.toHaveBeenCalled();
+  });
+
+  it("clamps limit into [1, 200]", async () => {
+    listRows = [];
+    await listBacktestJobs({ limit: 0 });
+    expect(lblLimit).toHaveBeenLastCalledWith(1);
+    await listBacktestJobs({ limit: 9999 });
+    expect(lblLimit).toHaveBeenLastCalledWith(200);
+    await listBacktestJobs({ limit: 25 });
+    expect(lblLimit).toHaveBeenLastCalledWith(25);
   });
 });

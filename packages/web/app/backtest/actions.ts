@@ -6,8 +6,105 @@
  */
 
 import { redirect } from "next/navigation";
+import { desc, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { backtestJobs } from "@/lib/db/schema";
+
+// ---------------------------------------------------------------------------
+// List Server Action (R-list 2026-05-21)
+// ---------------------------------------------------------------------------
+/**
+ * Backtest job status taxonomy. The DB column is a free-form `text` (see
+ * schema.ts), but only these five values are produced by the form/worker.
+ * Centralised here so the list UI + tests can `import { BacktestJobStatus }`.
+ */
+export type BacktestJobStatus =
+  | "pending"
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed";
+
+/**
+ * Row shape returned by `listBacktestJobs`. Intentionally a STRICT SUBSET
+ * of `backtestJobs.$inferSelect` — the `result` jsonb (which can be
+ * megabytes for a 3-scenario run) is collapsed to a key-count so the
+ * over-the-wire payload stays small. The list UI never needs the full
+ * `result` body; that is only loaded by `/backtest/[id]`.
+ */
+export interface BacktestJobSummary {
+  id: string;
+  leader_addresses: string[];
+  start_date: string;
+  end_date: string;
+  initial_capital_usd: string;
+  status: string;
+  progress: string;
+  /** Number of top-level keys in `result` jsonb (0 if NULL). */
+  result_keys: number;
+  created_at: Date;
+}
+
+/**
+ * listBacktestJobs — read-only list query for the `/backtest` page.
+ *
+ * Surfaced as a Server Action so a future client-side refresh /
+ * pagination island can call it without going through the SSR cache.
+ * Today the SSR page also calls it directly (so the list query lives in
+ * exactly one place and stays consistent between SSR and client refresh).
+ *
+ * IMPORTANT: this is a READ action (PRD §5.7 "唯讀" tier). No mutation,
+ * no danger-action gating. It still filters `result` down to a key-count
+ * to keep payload small even when the result jsonb is megabytes.
+ */
+export async function listBacktestJobs(opts?: {
+  limit?: number;
+  statusFilter?: BacktestJobStatus;
+}): Promise<BacktestJobSummary[]> {
+  const limit = Math.max(1, Math.min(opts?.limit ?? 50, 200));
+
+  const base = db
+    .select({
+      id: backtestJobs.id,
+      leader_addresses: backtestJobs.leader_addresses,
+      start_date: backtestJobs.start_date,
+      end_date: backtestJobs.end_date,
+      initial_capital_usd: backtestJobs.initial_capital_usd,
+      status: backtestJobs.status,
+      progress: backtestJobs.progress,
+      result: backtestJobs.result,
+      created_at: backtestJobs.created_at,
+    })
+    .from(backtestJobs);
+
+  // Drizzle's chain typing keeps `where` optional; the SQL builder accepts
+  // calling .where(eq(...)) only when a status filter is requested.
+  const rows = await (opts?.statusFilter
+    ? base.where(eq(backtestJobs.status, opts.statusFilter))
+    : base
+  )
+    .orderBy(desc(backtestJobs.created_at))
+    .limit(limit);
+
+  return rows.map((r) => {
+    const result = r.result;
+    const result_keys =
+      result && typeof result === "object" && !Array.isArray(result)
+        ? Object.keys(result as Record<string, unknown>).length
+        : 0;
+    return {
+      id: r.id,
+      leader_addresses: r.leader_addresses,
+      start_date: r.start_date,
+      end_date: r.end_date,
+      initial_capital_usd: r.initial_capital_usd,
+      status: r.status,
+      progress: r.progress,
+      result_keys,
+      created_at: r.created_at,
+    };
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Schema validation types (replicate zod shape for server-side coercion)

@@ -50,7 +50,7 @@ const EXPECTED_NAV = [
   [DASHBOARD, "/"],
   [LEADERS, "/leaders"],
   [DISCOVERY, "/discovery"],
-  [BACKTEST, "/backtest/new"],
+  [BACKTEST, "/backtest"],
   [t("sidebar.items.trades"), "/trades"],
   [t("sidebar.items.positions"), "/positions"],
   [t("sidebar.items.accounts"), "/accounts"],
