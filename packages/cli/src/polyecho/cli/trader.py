@@ -33,7 +33,6 @@ Commands
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -50,20 +49,6 @@ _HEARTBEAT_KEY = "trader_heartbeat"
 
 # Heartbeat older than this ⇒ the engine is considered DOWN/STALE.
 _HEARTBEAT_STALE_SECONDS = 90
-
-
-def _countdown(seconds: int = 0) -> None:
-    """Legacy no-op countdown retained as a module-level shim for tests.
-
-    The dangerous ``enable-live`` ritual was removed when the global
-    trading lock was retired; tests may still ``patch`` this symbol.
-    """
-    for remaining in range(seconds, 0, -1):
-        _console.print(
-            f"[bold red] {remaining} [/bold red]… "
-            f"[dim](Ctrl-C to abort)[/dim]"
-        )
-        time.sleep(1)
 
 
 # ---------------------------------------------------------------------------
@@ -324,17 +309,6 @@ def pause_all(
             border_style="yellow",
         )
     )
-
-
-def _confirm_live_or_die(yes: bool, action: str) -> None:  # noqa: ARG001
-    """Legacy no-op shim.
-
-    The global trading lock has been removed; per-op operator
-    confirmation now lives at the web layer (``dangerous-action`` +
-    account-import passphrase).  This function is kept as a symbol so
-    callers / tests that still reference it remain importable.
-    """
-    return
 
 
 @app.command(name="resume-all")

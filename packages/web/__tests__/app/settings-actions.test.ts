@@ -42,6 +42,9 @@ vi.mock("@/lib/env", () => ({ env: { POLYECHO_DB_URL_DRIZZLE: "stub" } }));
 const verifyPassphrase = vi.fn(async () => true);
 vi.mock("@/lib/passphrase", () => ({
   verifyPassphrase: (...a: unknown[]) => verifyPassphrase(...a),
+  // setPolymarketProxy uses requirePassphrase=false; the loadDangerPassphraseHash
+  // branch never runs. Stub it so the import resolves regardless.
+  loadDangerPassphraseHash: async () => "",
 }));
 
 import { setPolymarketProxy } from "@/app/settings/actions";

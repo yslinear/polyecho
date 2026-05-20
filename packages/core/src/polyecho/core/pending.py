@@ -133,7 +133,7 @@ EventHook = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 class PendingActionExecutor:
-    """Execute web-confirmed danger-tier actions through the chokepoint.
+    """Execute web-confirmed danger-tier actions via the shared OrderExecutor.
 
     Args:
         rows_source:    ``async () -> [PendingActionRow]`` — confirmed rows
@@ -144,7 +144,7 @@ class PendingActionExecutor:
                         backing a position-less MANUAL_SELL).
         mark_processed: ``async (action_id, new_params) -> None`` — persist
                         the :data:`PROCESSED_MARKER` so the row is terminal.
-        executor:       The shared :class:`OrderExecutor` (live-locked).
+        executor:       The shared :class:`OrderExecutor` used to place SELLs.
         event_hook:     Optional best-effort ``(kind, payload)`` emitter.
     """
 
@@ -210,10 +210,10 @@ class PendingActionExecutor:
             if row.processed or row.id in self._seen:
                 continue
 
-            # --- Defense-in-depth gates (P0-2), strictly EARLIER than the
-            # live-lock chokepoint (OrderExecutor.execute → assert_live_
-            # allowed).  These ADD an earlier fail-closed refusal; they do
-            # NOT replace the HARD live lock, which still gates every SELL.
+            # --- Defense-in-depth gates (P0-2), applied BEFORE the row is
+            # handed to ``OrderExecutor.execute``.  These fail closed on
+            # expired / unprovisioned-passphrase rows so a stale confirmed
+            # row can never reach order placement.
 
             # (a) Stale-confirmed guard: a confirmed row past its TTL is
             # not a legitimate execution target.  Fail-closed: refuse,
@@ -301,7 +301,7 @@ class PendingActionExecutor:
         return await self._emergency_liquidate(row)
 
     async def _manual_sell(self, row: PendingActionRow) -> ExecutionResult:
-        """Place a SELL for the params-specified position (chokepoint-gated)."""
+        """Place a SELL for the params-specified position via OrderExecutor."""
         p = row.params
         account_id = uuid.UUID(str(p["account_id"]))
         token_id = str(p.get("token_id") or p.get("asset") or "")
@@ -330,7 +330,7 @@ class PendingActionExecutor:
     async def _emergency_liquidate(
         self, row: PendingActionRow
     ) -> list[ExecutionResult]:
-        """SELL **all** open positions for the account (chokepoint-gated)."""
+        """SELL **all** open positions for the account via OrderExecutor."""
         account_id = uuid.UUID(str(row.params["account_id"]))
         positions = await self._positions_for(account_id)
         results: list[ExecutionResult] = []

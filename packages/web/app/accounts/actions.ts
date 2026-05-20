@@ -52,15 +52,11 @@
  *   funder is more dangerous than refusing — runbook §2.3).
  */
 
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import { db } from "@/lib/db";
-import { accounts, settings } from "@/lib/db/schema";
-import {
-  DANGER_PASSPHRASE_HASH_KEY,
-  coerceStringSetting,
-} from "@/lib/settings-keys";
-import { verifyPassphrase } from "@/lib/passphrase";
+import { accounts } from "@/lib/db/schema";
+import { loadDangerPassphraseHash, verifyPassphrase } from "@/lib/passphrase";
 import { encryptPrivateKey } from "@/lib/key-crypto";
 import { EVM_ADDRESS_RE, PRIVATE_KEY_RE } from "@/lib/format";
 import { magicProxyAddress } from "@/lib/magic-proxy";
@@ -168,12 +164,7 @@ export async function importAccount(
   // Same gate as the §5.7 危险-tier flow: read the operator-provisioned
   // `settings.danger_passphrase_hash`; absent => refuse (NEVER provision);
   // constant-time verify via the existing lib/passphrase verifier.
-  const [hashRow] = await db
-    .select({ value: settings.value })
-    .from(settings)
-    .where(eq(settings.key, DANGER_PASSPHRASE_HASH_KEY))
-    .limit(1);
-  const storedHash = coerceStringSetting(hashRow?.value).trim();
+  const storedHash = await loadDangerPassphraseHash();
   if (!storedHash) {
     return {
       ok: false,

@@ -335,11 +335,11 @@ class PolymarketRelayerClient:
     # ------------------------------------------------------------------
 
     def _check_circuit(self) -> None:
-        if self._cb_open_until > time.monotonic():
-            remaining = self._cb_open_until - time.monotonic()
+        now = time.monotonic()
+        if self._cb_open_until > now:
             raise RelayerSubmissionError(
                 f"PolymarketRelayerClient circuit breaker is OPEN "
-                f"(retry after {remaining:.0f}s)."
+                f"(retry after {self._cb_open_until - now:.0f}s)."
             )
 
     def _record_success(self) -> None:

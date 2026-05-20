@@ -95,32 +95,11 @@ def run(
 def schedule() -> None:
     """Start the discovery worker in scheduled/daemon mode.
 
-    Equivalent to ``polyecho discovery run`` (no ``--once``): the
-    daily/hourly/weekly scheduled loop via the shared service entry-point.
-    Only returns when interrupted.
+    Thin alias for ``polyecho discovery run`` (no ``--once``): delegates
+    to :func:`run` so both commands share one code path (handoff panel,
+    error surface, KeyboardInterrupt → exit 130).
     """
-    from polyecho.discovery.__main__ import main as discovery_main
-
-    _console.print(
-        Panel(
-            "[bold]Starting discovery[/bold]: scheduled loop "
-            "(daily / hourly / weekly).\n"
-            "[dim]Shared DiscoveryWorker (python -m polyecho.discovery). "
-            "Ctrl-C to stop.[/dim]",
-            title="[dim]polyecho discovery schedule[/dim]",
-            border_style="cyan",
-        )
-    )
-    try:
-        asyncio.run(discovery_main(once=False))
-    except KeyboardInterrupt:
-        _console.print(
-            "[yellow]Interrupted — discovery loop stopped.[/yellow]"
-        )
-        raise typer.Exit(code=130) from None
-    except Exception as exc:  # noqa: BLE001
-        _console.print(f"[red]Discovery scheduler failed:[/red] {exc}")
-        raise typer.Exit(code=1) from exc
+    run(once=False)
 
 
 @app.command(name="promote")

@@ -149,3 +149,30 @@ export async function verifyPassphrase(
   if (actual.length !== expected.length) return false;
   return timingSafeEqual(actual, expected);
 }
+
+/**
+ * Operator-provisioned canonical danger-passphrase hash, or `""` when the
+ * row has never been written (the consumer MUST treat empty as "not
+ * provisioned" — never auto-provision). Centralises the
+ * `settings.danger_passphrase_hash` → coerce → trim flow that previously
+ * lived in three call sites (inline-confirm-gate.ts, alerts/actions.ts,
+ * accounts/actions.ts) byte-for-byte.
+ *
+ * DB imports are lazy so this module stays import-safe for pure-crypto
+ * tests (`__tests__/lib/passphrase.test.ts`, `key-crypto.test.ts`) that do
+ * NOT mock `@/lib/db` / `@/lib/env`.
+ */
+export async function loadDangerPassphraseHash(): Promise<string> {
+  const [{ db }, { settings }, { eq }, settingsKeys] = await Promise.all([
+    import("@/lib/db"),
+    import("@/lib/db/schema"),
+    import("drizzle-orm"),
+    import("@/lib/settings-keys"),
+  ]);
+  const [hashRow] = await db
+    .select({ value: settings.value })
+    .from(settings)
+    .where(eq(settings.key, settingsKeys.DANGER_PASSPHRASE_HASH_KEY))
+    .limit(1);
+  return settingsKeys.coerceStringSetting(hashRow?.value).trim();
+}

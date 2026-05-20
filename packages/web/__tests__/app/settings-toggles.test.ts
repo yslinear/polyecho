@@ -47,9 +47,13 @@ vi.mock("@/lib/db", () => ({
 vi.mock("@/lib/env", () => ({ env: { POLYECHO_DB_URL_DRIZZLE: "stub" } }));
 
 // Mock the passphrase verifier so the gate is exercised without PBKDF2.
+// `loadDangerPassphraseHash` is surfaced verbatim from `hashRows` so the
+// shared helper extracted from inline-confirm-gate.ts still reads the same
+// mock-fed row a test sets up.
 const verifyPassphrase = vi.fn(async (_pw: string, _stored: string) => true);
 vi.mock("@/lib/passphrase", () => ({
   verifyPassphrase: (...a: unknown[]) => verifyPassphrase(...a),
+  loadDangerPassphraseHash: async () => (hashRows[0]?.value ?? "").trim(),
 }));
 
 import { setRiskMode, setGlobalPaused } from "@/app/settings/actions";

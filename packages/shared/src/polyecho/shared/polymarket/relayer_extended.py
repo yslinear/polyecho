@@ -50,6 +50,7 @@ Design constraints (mirror ``relayer.py``)
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import time
@@ -391,6 +392,51 @@ async def _post_json(
     resp = await client.post(url, json=body, headers=headers)
     resp.raise_for_status()
     return resp.json()
+
+
+async def _post_submit(
+    client: httpx.AsyncClient,
+    base_url: str,
+    body: dict[str, Any],
+    creds: ExtendedRelayerCredentials,
+    *,
+    require_tx_id: bool = True,
+) -> str:
+    """POST *body* to ``<base_url>/submit`` with HMAC headers; return tx id.
+
+    Canonicalises *body* with ``json.dumps(separators=(",", ":"))`` so the
+    HMAC-signed bytes match what the relayer actually receives.  Used by
+    every sig-1 / sig-3 ``/submit`` call path; consolidating here removes
+    four near-duplicate copies of the same pattern.
+
+    When *require_tx_id* is ``False`` (e.g. ``WALLET-CREATE``) the ACK is
+    parsed leniently — an empty string is returned if no id is present
+    rather than raising.
+    """
+    canonical = json.dumps(body, separators=(",", ":"))
+    headers = _builder_headers(
+        creds, method="POST", request_path="/submit", body=canonical
+    )
+    resp = await _retry(
+        client.post,
+        f"{base_url.rstrip('/')}/submit",
+        content=canonical,
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    assert isinstance(resp, httpx.Response)
+    if resp.status_code >= 400:
+        raise RelayerSubmissionError(
+            f"/submit HTTP {resp.status_code}: {resp.text[:200]!r}"
+        )
+    ack = resp.json()
+    tx_id = ack.get("transactionID") or ack.get("id") if isinstance(ack, dict) else None
+    if not tx_id:
+        if require_tx_id:
+            raise RelayerSubmissionError(
+                f"unexpected /submit ACK shape: {ack!r}"
+            )
+        return ""
+    return str(tx_id)
 
 
 async def _poll_until_terminal(
@@ -786,35 +832,7 @@ async def _submit_proxy(
         # Compute HMAC headers against the canonical JSON body.  httpx
         # serialises with default separators; we mirror that here so the
         # signed bytes match what the relayer actually receives.
-        import json as _json
-
-        canonical = _json.dumps(body, separators=(",", ":"))
-        headers = _builder_headers(
-            creds,
-            method="POST",
-            request_path="/submit",
-            body=canonical,
-        )
-        # Use the canonical body so HMAC + payload match byte-for-byte.
-        resp = await _retry(
-            client.post,
-            f"{base_url.rstrip('/')}/submit",
-            content=canonical,
-            headers={**headers, "Content-Type": "application/json"},
-        )
-        if isinstance(resp, httpx.Response):
-            if resp.status_code >= 400:
-                raise RelayerSubmissionError(
-                    f"/submit HTTP {resp.status_code}: {resp.text[:200]!r}"
-                )
-            ack = resp.json()
-        else:
-            ack = resp
-        if not isinstance(ack, dict) or "transactionID" not in ack and "id" not in ack:
-            raise RelayerSubmissionError(
-                f"unexpected /submit ACK shape: {ack!r}"
-            )
-        tx_id = str(ack.get("transactionID") or ack.get("id"))
+        tx_id = await _post_submit(client, base_url, body, creds)
 
         # 4. Poll until mined.  provenance: brief §sig-1 step 7.
         terminal = await _poll_until_terminal(
@@ -958,39 +976,12 @@ async def _submit_deposit_wallet(
                 "from": eoa,
                 "to": DEPOSIT_WALLET_FACTORY,
             }
-            import json as _json
-
-            create_canonical = _json.dumps(create_body, separators=(",", ":"))
-            create_headers = _builder_headers(
-                creds,
-                method="POST",
-                request_path="/submit",
-                body=create_canonical,
-            )
-            create_resp = await _retry(
-                client.post,
-                f"{base_url.rstrip('/')}/submit",
-                content=create_canonical,
-                headers={
-                    **create_headers,
-                    "Content-Type": "application/json",
-                },
-            )
-            if isinstance(create_resp, httpx.Response):
-                if create_resp.status_code >= 400:
-                    raise RelayerSubmissionError(
-                        f"WALLET-CREATE failed HTTP {create_resp.status_code}: "
-                        f"{create_resp.text[:200]!r}"
-                    )
-                create_ack = create_resp.json()
-            else:
-                create_ack = create_resp
-            create_tx_id = (
-                create_ack.get("transactionID") or create_ack.get("id")
+            create_tx_id = await _post_submit(
+                client, base_url, create_body, creds, require_tx_id=False
             )
             if create_tx_id:
                 await _poll_until_terminal(
-                    client, base_url=base_url, transaction_id=str(create_tx_id)
+                    client, base_url=base_url, transaction_id=create_tx_id
                 )
 
         # 1. nonce.
@@ -1048,33 +1039,7 @@ async def _submit_deposit_wallet(
             },
             "metadata": metadata,
         }
-        import json as _json
-
-        canonical = _json.dumps(body, separators=(",", ":"))
-        headers = _builder_headers(
-            creds, method="POST", request_path="/submit", body=canonical
-        )
-        resp = await _retry(
-            client.post,
-            f"{base_url.rstrip('/')}/submit",
-            content=canonical,
-            headers={**headers, "Content-Type": "application/json"},
-        )
-        if isinstance(resp, httpx.Response):
-            if resp.status_code >= 400:
-                raise RelayerSubmissionError(
-                    f"/submit HTTP {resp.status_code}: {resp.text[:200]!r}"
-                )
-            ack = resp.json()
-        else:
-            ack = resp
-        if not isinstance(ack, dict) or (
-            "transactionID" not in ack and "id" not in ack
-        ):
-            raise RelayerSubmissionError(
-                f"unexpected /submit ACK shape: {ack!r}"
-            )
-        tx_id = str(ack.get("transactionID") or ack.get("id"))
+        tx_id = await _post_submit(client, base_url, body, creds)
 
         # 5. poll until mined.
         terminal = await _poll_until_terminal(

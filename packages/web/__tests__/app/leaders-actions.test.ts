@@ -48,6 +48,10 @@ vi.mock("@/lib/env", () => ({ env: { POLYECHO_DB_URL_DRIZZLE: "stub" } }));
 const verifyPassphrase = vi.fn(async () => true);
 vi.mock("@/lib/passphrase", () => ({
   verifyPassphrase: (...a: unknown[]) => verifyPassphrase(...a),
+  // setFollowStatus("active") never hits requirePassphrase=true, so the
+  // loadDangerPassphraseHash branch never runs; expose a stub so the import
+  // resolves regardless.
+  loadDangerPassphraseHash: async () => "",
 }));
 
 import * as actions from "@/app/leaders/actions";

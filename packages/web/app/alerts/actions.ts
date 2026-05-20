@@ -52,10 +52,9 @@ import {
 } from "@/lib/db/schema";
 import {
   VAPID_PUBLIC_KEY,
-  DANGER_PASSPHRASE_HASH_KEY,
   coerceStringSetting,
 } from "@/lib/settings-keys";
-import { verifyPassphrase } from "@/lib/passphrase";
+import { loadDangerPassphraseHash, verifyPassphrase } from "@/lib/passphrase";
 import {
   CONFIRM_PHRASE,
   type PendingActionType,
@@ -310,12 +309,7 @@ export async function confirmDangerousAction(
 
   // (c) read the operator-provisioned danger passphrase hash. FAIL CLOSED
   // if it has not been provisioned — never auto-provision / derive it.
-  const [hashRow] = await db
-    .select({ value: settings.value })
-    .from(settings)
-    .where(eq(settings.key, DANGER_PASSPHRASE_HASH_KEY))
-    .limit(1);
-  const storedHash = coerceStringSetting(hashRow?.value).trim();
+  const storedHash = await loadDangerPassphraseHash();
   if (!storedHash) {
     return {
       ok: false,

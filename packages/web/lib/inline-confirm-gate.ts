@@ -19,15 +19,8 @@
  * to be exported.
  */
 
-import { eq } from "drizzle-orm";
-
 import { db } from "@/lib/db";
-import { settings } from "@/lib/db/schema";
-import {
-  DANGER_PASSPHRASE_HASH_KEY,
-  coerceStringSetting,
-} from "@/lib/settings-keys";
-import { verifyPassphrase } from "@/lib/passphrase";
+import { loadDangerPassphraseHash, verifyPassphrase } from "@/lib/passphrase";
 import { CONFIRM_PHRASE } from "@/app/alerts/dangerous-shared";
 
 export interface InlineConfirmGateInput {
@@ -71,12 +64,7 @@ export async function checkInlineConfirm(
     return { ok: false, message: "請輸入危險操作通行碼。" };
   }
 
-  const [hashRow] = await db
-    .select({ value: settings.value })
-    .from(settings)
-    .where(eq(settings.key, DANGER_PASSPHRASE_HASH_KEY))
-    .limit(1);
-  const storedHash = coerceStringSetting(hashRow?.value).trim();
+  const storedHash = await loadDangerPassphraseHash();
   if (!storedHash) {
     return {
       ok: false,

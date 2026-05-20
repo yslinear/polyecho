@@ -307,8 +307,8 @@ class TraderCore:
         self._executor = OrderExecutor(ledger=self._ledger)
         self._redeem_candidate_source = redeem_candidate_source
         # Confirmed-pending-action executor (web confirms; core executes
-        # through the same chokepoint).  Optional / injected so the engine
-        # stays DB-free in tests.
+        # through the same OrderExecutor).  Optional / injected so the
+        # engine stays DB-free in tests.
         self._pending_executor = pending_action_executor
         # SYSTEM_BOT_RESTART fires exactly once per process start.
         self._bot_restart_emitted = False
