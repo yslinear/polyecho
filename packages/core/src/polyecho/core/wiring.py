@@ -244,6 +244,34 @@ class _AsyncWeb3Backend:
         return await contract.functions[fn_name](*args).call()
 
 
+def _build_safe_proxy_resolver() -> Any:
+    """Construct the injected :data:`SafeProxyResolver` for SAFE (sig 2).
+
+    Lazily builds an ``AsyncWeb3`` (no node touched until the first SAFE
+    account is resolved) wired to the verified Polymarket Safe Proxy
+    Factory (``constants.SAFE_PROXY_FACTORY`` — brief §9).  The factory's
+    ``computeProxyAddress(eoa)`` is a *view* function (no gas), so this
+    only ever issues a read-only ``eth_call``.  Returns ``None`` if web3
+    is unavailable or settings cannot be loaded, so the SAFE path falls
+    back to its existing fail-closed behaviour (operator must supply
+    ``funder_address``) — never silently fabricates an address.
+    """
+    try:
+        from web3 import AsyncWeb3
+
+        from polyecho.shared.polymarket.wallet import make_safe_proxy_resolver
+
+        rpc_url = get_settings().polygon_rpc_url
+        w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
+        return make_safe_proxy_resolver(w3)
+    except Exception as exc:  # noqa: BLE001 - fail-soft: stays fail-closed
+        logger.warning(
+            "safe_proxy_resolver_unavailable_falling_back_to_fail_closed",
+            extra={"error": str(exc)},
+        )
+        return None
+
+
 async def _resolve_account(
     account_id: uuid.UUID,
 ) -> tuple[str, WalletBinding] | None:
@@ -252,8 +280,14 @@ async def _resolve_account(
     Reads the ``accounts`` row and runs the FROZEN
     :func:`polyecho.shared.polymarket.wallet.resolve_wallet` (single
     source of truth for the 4 wallet modes; fail-closed on unknown).
-    Returns ``None`` (skip this account) on any error — never raises into
-    the redeem loop.  Only called on the live path.
+    For SAFE (sig 2) accounts that don't have an explicit
+    ``funder_address``, injects a :func:`_build_safe_proxy_resolver`
+    that issues a *view* ``computeProxyAddress(eoa)`` RPC call on the
+    verified Polymarket Safe Proxy Factory (brief §9) — a gas-free
+    eth_call.  An explicit operator-supplied funder is still preferred
+    (resolve_wallet short-circuits before the RPC).  Returns ``None``
+    (skip this account) on any error — never raises into the redeem
+    loop.  Only called on the live path.
     """
     try:
         from sqlalchemy import select
@@ -274,7 +308,9 @@ async def _resolve_account(
                     extra={"account_id": str(account_id)},
                 )
                 return None
-            binding = await resolve_wallet(row)
+            binding = await resolve_wallet(
+                row, safe_proxy_resolver=_build_safe_proxy_resolver()
+            )
             return binding.funder, binding
     except Exception as exc:  # noqa: BLE001 - fail-soft per account
         logger.warning(

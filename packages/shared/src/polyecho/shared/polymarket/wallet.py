@@ -33,7 +33,7 @@ import-side-effect-free and unit-testable without a node.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from eth_utils.address import is_address, to_checksum_address
 from eth_utils.crypto import keccak
@@ -42,6 +42,7 @@ from polyecho.shared.accounts import SignatureType
 from polyecho.shared.constants import (
     MAGIC_PROXY_FACTORY,
     MAGIC_PROXY_INIT_CODE_HASH,
+    SAFE_PROXY_FACTORY,
 )
 from polyecho.shared.copytrading import WalletBinding
 
@@ -52,6 +53,8 @@ __all__ = [
     "SafeProxyResolver",
     "resolve_wallet",
     "magic_proxy_address",
+    "SAFE_PROXY_FACTORY_ABI",
+    "make_safe_proxy_resolver",
 ]
 
 
@@ -238,3 +241,94 @@ async def resolve_wallet(
     return WalletBinding(
         signature_type=sig_type, funder=explicit_l, wallet_mode=mode, derived=False
     )
+
+
+# ---------------------------------------------------------------------------
+# SAFE proxy address — RPC view-call on the Polymarket Safe Proxy Factory
+# ---------------------------------------------------------------------------
+#: Minimal ABI fragment for the ONE function we call on
+#: ``constants.SAFE_PROXY_FACTORY``.  Verified against the on-chain source
+#: at `Polymarket/proxy-factories`
+#: (``packages/safe-factory/contracts/SafeProxyFactory.sol``):
+#:
+#:     function computeProxyAddress(address user) external view returns (address)
+#:
+#: The factory address is the verified PolygonScan-labelled "Polymarket : Safe
+#: Proxy Factory" (``0xaacFeEa03eb1561C4e67d661e40682Bd20E3541b``) — same
+#: contract whose ``NAME`` constant reads ``"Polymarket Contract Proxy
+#: Factory"``.  This is a **view** function: ``eth_call`` only, no gas.
+SAFE_PROXY_FACTORY_ABI: tuple[dict[str, object], ...] = (
+    {
+        "inputs": [{"internalType": "address", "name": "user", "type": "address"}],
+        "name": "computeProxyAddress",
+        "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+)
+
+
+def make_safe_proxy_resolver(
+    w3: object,
+    *,
+    factory_address: str = SAFE_PROXY_FACTORY,
+) -> SafeProxyResolver:
+    """Build an injected :data:`SafeProxyResolver` backed by a web3.py client.
+
+    The returned coroutine performs a single ``eth_call`` to
+    ``computeProxyAddress(eoa)`` on the verified Polymarket Safe Proxy
+    Factory (brief §9 / ``constants.SAFE_PROXY_FACTORY``) — a *view*
+    function, so it costs no gas and never modifies chain state.
+
+    Args:
+        w3:               An ``AsyncWeb3`` instance (or any object exposing
+                          ``eth.contract(address, abi).functions.<name>(args).call()``
+                          as an awaitable).  Injected so this module stays
+                          import-side-effect-free and unit-testable without
+                          a node.
+        factory_address:  Override the factory address (defaults to the
+                          verified :data:`SAFE_PROXY_FACTORY`).  Tests
+                          typically leave this alone.
+
+    Returns:
+        An ``async (eoa: str) -> "0x…"`` callable suitable for
+        :func:`resolve_wallet`'s ``safe_proxy_resolver=`` keyword.  The
+        returned address is lower-cased + checksum-validated by
+        :func:`_norm`; on any RPC error the underlying web3 exception
+        propagates (the caller — :func:`resolve_wallet` SAFE path —
+        already wraps in ``_resolve_account``'s broad ``except`` so the
+        redeem loop is never crashed by a flaky node).
+
+    .. note:: Standing rule (brief §6/§9): **prefer an explicit
+       operator-confirmed funder; treat derivation as a convenience to
+       verify, never to trust blindly.**  :func:`resolve_wallet` already
+       short-circuits to ``account.funder_address`` when one is supplied
+       and only calls this resolver when no explicit funder is set.
+    """
+    # Late-import web3 so unit tests that don't need this resolver never
+    # have to import web3 (its tx-decoding deps are heavy).  Tests that DO
+    # exercise the resolver inject a stub object instead — no import here.
+    factory_address_normalised = _norm(factory_address)
+
+    # ``eth_utils.to_checksum_address`` produces the EIP-55 checksum form
+    # accepted by web3.py's ``eth.contract(...)``; ``web3`` is NOT a direct
+    # dependency of ``polyecho-shared`` (it ships with ``polyecho-core``),
+    # so we deliberately do not import it here — only the injected ``w3``
+    # object is used for the RPC call.  This keeps ``shared`` web3-free and
+    # the resolver fully unit-testable with a structural fake.
+    factory_checksum = to_checksum_address(factory_address_normalised)
+
+    async def _resolve(eoa: str) -> str:
+        eoa_l = _norm(eoa)
+        w3_any: Any = w3
+        contract = w3_any.eth.contract(
+            address=factory_checksum,
+            abi=list(SAFE_PROXY_FACTORY_ABI),
+        )
+        addr = await contract.functions.computeProxyAddress(
+            to_checksum_address(eoa_l)
+        ).call()
+        # web3.py returns a checksum string; _norm validates + lowercases.
+        return _norm(str(addr))
+
+    return _resolve
