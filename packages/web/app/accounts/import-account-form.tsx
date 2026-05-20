@@ -51,7 +51,7 @@ import {
 import { t } from "@/lib/i18n";
 import { EVM_ADDRESS_RE, PRIVATE_KEY_RE, formatUsd } from "@/lib/format";
 import { importAccount } from "./actions";
-import { probeBalance } from "./balance";
+import { probeTotalBalance } from "./balance";
 
 /** Debounce (ms) so the probe fires once per SETTLED address, not per key. */
 const PROBE_DEBOUNCE_MS = 600;
@@ -59,12 +59,20 @@ const PROBE_DEBOUNCE_MS = 600;
 type ProbeState =
   | { status: "idle" }
   | { status: "probing" }
-  | { status: "done"; valueUsd: number | null; ok: boolean };
+  | {
+      status: "done";
+      ok: boolean;
+      positionsUsd: number | null;
+      idleUsdc: number | null;
+      totalUsd: number | null;
+    };
 
 /**
- * useAddressBalance — fires the read-only `probeBalance` once the address
- * has settled to a valid EVM shape (debounced). Stale results are dropped.
- * `enabled` lets the caller suppress the funder probe for signature_type 0.
+ * useAddressBalance — fires the read-only `probeTotalBalance` once the
+ * address has settled to a valid EVM shape (debounced). Stale results
+ * are dropped. `enabled` lets the caller suppress the funder probe for
+ * signature_type 0. Each call returns the data-api positions value (a),
+ * the on-chain idle USDC.e (b), and their composed total.
  */
 function useAddressBalance(address: string, enabled: boolean): ProbeState {
   const [state, setState] = React.useState<ProbeState>({ status: "idle" });
@@ -79,19 +87,27 @@ function useAddressBalance(address: string, enabled: boolean): ProbeState {
     let cancelled = false;
     const handle = setTimeout(() => {
       setState({ status: "probing" });
-      probeBalance(trimmed)
+      probeTotalBalance(trimmed)
         .then((res) => {
           if (cancelled) return;
           setState({
             status: "done",
-            valueUsd: res.valueUsd,
             ok: res.ok,
+            positionsUsd: res.positionsUsd,
+            idleUsdc: res.idleUsdc,
+            totalUsd: res.totalUsd,
           });
         })
         .catch(() => {
-          // probeBalance never throws, but stay defensive: fail soft.
+          // probeTotalBalance never throws, but stay defensive: fail soft.
           if (!cancelled) {
-            setState({ status: "done", valueUsd: null, ok: false });
+            setState({
+              status: "done",
+              ok: false,
+              positionsUsd: null,
+              idleUsdc: null,
+              totalUsd: null,
+            });
           }
         });
     }, PROBE_DEBOUNCE_MS);
@@ -105,7 +121,30 @@ function useAddressBalance(address: string, enabled: boolean): ProbeState {
   return state;
 }
 
-/** Inline, read-only balance line. Never blocks submit; fail-soft copy. */
+/** Render one labelled balance row (label · value-or-N/A). */
+function BalanceRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: number | null;
+}) {
+  return (
+    <p className="text-xs text-muted-foreground">
+      <span className="font-medium text-foreground">{label}：</span>
+      <span className="ml-1">
+        {value === null ? t("tables.accounts.import.balanceNa") : formatUsd(value)}
+      </span>
+    </p>
+  );
+}
+
+/**
+ * Inline, read-only composite balance display: three labelled lines
+ * (部位 / 閒置 / 合計). Never blocks submit; fail-soft copy. Each half
+ * renders independently — a successful half is shown even if the other
+ * half failed.
+ */
 function BalanceLine({
   state,
   note,
@@ -118,17 +157,18 @@ function BalanceLine({
   if (state.status === "probing") {
     return (
       <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-        <Loader2
-          className="h-3 w-3 animate-spin"
-          aria-hidden="true"
-        />
+        <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
         <span>{t("tables.accounts.import.balanceProbing")}</span>
       </p>
     );
   }
 
   // status === "done"
-  if (!state.ok || state.valueUsd === null) {
+  if (
+    !state.ok &&
+    state.positionsUsd === null &&
+    state.idleUsdc === null
+  ) {
     return (
       <p className="text-xs text-muted-foreground">
         {t("tables.accounts.import.balanceFailed")}
@@ -137,13 +177,21 @@ function BalanceLine({
   }
 
   return (
-    <p className="text-xs text-muted-foreground">
-      <span className="font-medium text-foreground">
-        {t("tables.accounts.import.balanceLabel")}：
-        {formatUsd(state.valueUsd)}
-      </span>
-      <span className="ml-1">{note}</span>
-    </p>
+    <div className="space-y-0.5">
+      <BalanceRow
+        label={t("tables.accounts.import.balancePositionsLabel")}
+        value={state.positionsUsd}
+      />
+      <BalanceRow
+        label={t("tables.accounts.import.balanceIdleLabel")}
+        value={state.idleUsdc}
+      />
+      <BalanceRow
+        label={t("tables.accounts.import.balanceTotalLabel")}
+        value={state.totalUsd}
+      />
+      <p className="text-xs text-muted-foreground">{note}</p>
+    </div>
   );
 }
 

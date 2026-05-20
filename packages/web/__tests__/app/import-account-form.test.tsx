@@ -26,9 +26,9 @@ vi.mock("@/app/accounts/actions", () => ({
   importAccount: (...a: unknown[]) => importAccount(...a),
 }));
 
-const probeBalance = vi.fn();
+const probeTotalBalance = vi.fn();
 vi.mock("@/app/accounts/balance", () => ({
-  probeBalance: (...a: unknown[]) => probeBalance(...a),
+  probeTotalBalance: (...a: unknown[]) => probeTotalBalance(...a),
 }));
 
 const toastSuccess = vi.fn();
@@ -57,7 +57,10 @@ const L_PK = t("tables.accounts.import.privateKeyLabel");
 const L_ENC = t("tables.accounts.import.encPassLabel");
 const L_DANGER = t("tables.accounts.import.dangerPassLabel");
 const BTN_SUBMIT = t("tables.accounts.import.submit");
-const BALANCE_LABEL = t("tables.accounts.import.balanceLabel");
+const L_BAL_POSITIONS = t("tables.accounts.import.balancePositionsLabel");
+const L_BAL_IDLE = t("tables.accounts.import.balanceIdleLabel");
+const L_BAL_TOTAL = t("tables.accounts.import.balanceTotalLabel");
+const NA = t("tables.accounts.import.balanceNa");
 const CLI_HINT = t("tables.accounts.import.balanceCliHint");
 
 const EOA = "0x" + "ab".repeat(20);
@@ -78,9 +81,13 @@ describe("ImportAccountForm (reordered + read-only balance probe)", () => {
       message: "已建立帳戶 acct（狀態 → ready）。",
       action: "created",
     });
-    probeBalance
-      .mockReset()
-      .mockResolvedValue({ ok: true, valueUsd: 4321, message: "" });
+    probeTotalBalance.mockReset().mockResolvedValue({
+      ok: true,
+      positionsUsd: 4321,
+      idleUsdc: 100,
+      totalUsd: 4421,
+      message: "",
+    });
     toastSuccess.mockReset();
     toastError.mockReset();
     refresh.mockReset();
@@ -110,37 +117,88 @@ describe("ImportAccountForm (reordered + read-only balance probe)", () => {
     expect(screen.getByText(CLI_HINT)).toBeInTheDocument();
   });
 
-  it("probes the EOA balance once it is a valid address and shows it", async () => {
+  it("probes the EOA balance once it is a valid address and shows 部位/閒置/合計 three lines", async () => {
     const user = await openForm();
     await user.type(screen.getByLabelText(L_EOA), EOA);
 
     await waitFor(
-      () => expect(probeBalance).toHaveBeenCalledWith(EOA),
+      () => expect(probeTotalBalance).toHaveBeenCalledWith(EOA),
       { timeout: 2000 }
     );
-    // The read-only balance line renders the formatted value + label.
+    // All three labelled lines render.
     await waitFor(() =>
       expect(
-        screen.getByText(new RegExp(BALANCE_LABEL))
+        screen.getByText(new RegExp(L_BAL_POSITIONS))
       ).toBeInTheDocument()
     );
+    expect(screen.getByText(new RegExp(L_BAL_IDLE))).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(L_BAL_TOTAL))).toBeInTheDocument();
+    // And each renders the correct formatted USD value.
     expect(screen.getByText(/\$4,321\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/\$100\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/\$4,421\.00/)).toBeInTheDocument();
+  });
+
+  it("renders 部位 $50, 閒置 N/A, 合計 $50 on a partial idle failure", async () => {
+    probeTotalBalance.mockResolvedValue({
+      ok: true,
+      positionsUsd: 50,
+      idleUsdc: null,
+      totalUsd: 50,
+      message: t("tables.accounts.import.balancePartialFailed"),
+    });
+    const user = await openForm();
+    await user.type(screen.getByLabelText(L_EOA), EOA);
+
+    await waitFor(
+      () => expect(probeTotalBalance).toHaveBeenCalledWith(EOA),
+      { timeout: 2000 }
+    );
+    // Both 部位 and 合計 are $50 — there are exactly two matches.
+    await waitFor(() => {
+      const hits = screen.getAllByText(/\$50\.00/);
+      expect(hits.length).toBe(2);
+    });
+    // Idle is the failed half — renders the i18n N/A token.
+    expect(screen.getByText(new RegExp(NA))).toBeInTheDocument();
   });
 
   it("does NOT probe the funder for signature_type 0 (EOA == funder)", async () => {
     const user = await openForm();
     await user.type(screen.getByLabelText(L_EOA), EOA);
-    await waitFor(() => expect(probeBalance).toHaveBeenCalledWith(EOA));
+    await waitFor(() => expect(probeTotalBalance).toHaveBeenCalledWith(EOA));
 
     // type 0: funder input is disabled and never probed.
     expect(screen.getByLabelText(L_FUNDER)).toBeDisabled();
-    expect(probeBalance).not.toHaveBeenCalledWith(FUNDER);
+    expect(probeTotalBalance).not.toHaveBeenCalledWith(FUNDER);
+  });
+
+  it("a partial-failure probe still lets a valid form submit", async () => {
+    probeTotalBalance.mockResolvedValue({
+      ok: true,
+      positionsUsd: 50,
+      idleUsdc: null,
+      totalUsd: 50,
+      message: t("tables.accounts.import.balancePartialFailed"),
+    });
+    const user = await openForm();
+
+    await user.type(screen.getByLabelText(L_EOA), EOA);
+    await user.type(screen.getByLabelText(L_PK), PK);
+    await user.type(screen.getByLabelText(L_ENC), "enc-pass");
+    await user.type(screen.getByLabelText(L_DANGER), "danger-pass");
+    await user.click(screen.getByRole("button", { name: BTN_SUBMIT }));
+
+    await waitFor(() => expect(importAccount).toHaveBeenCalledTimes(1));
+    expect(toastSuccess).toHaveBeenCalled();
   });
 
   it("a probe failure does NOT block a valid submit (best-effort only)", async () => {
-    probeBalance.mockResolvedValue({
+    probeTotalBalance.mockResolvedValue({
       ok: false,
-      valueUsd: null,
+      positionsUsd: null,
+      idleUsdc: null,
+      totalUsd: null,
       message: t("tables.accounts.import.balanceFailed"),
     });
     const user = await openForm();

@@ -142,7 +142,8 @@ export const tables = {
         "請先確認上方 EOA（與 funder）餘額，再於此選擇簽章類型——這是知情後的選擇，而非預先盲選。",
       /** Read-only, best-effort balance line for the address we ALREADY
        *  have (EOA, or an explicit operator funder). It is NOT a full
-       *  detect — that stays the CLI `polyecho account detect`. */
+       *  detect — that stays the CLI `polyecho account detect`. The
+       *  composite probe shows three labelled lines: 部位 / 閒置 / 合計. */
       balanceLabel: "Polymarket 倉位價值",
       balanceProbing: "偵測中…",
       balanceFailed: "偵測失敗，可改用 CLI polyecho account detect",
@@ -150,6 +151,12 @@ export const tables = {
       balanceFunderNote: "（此為所填 funder 位址的倉位價值）",
       balanceCliHint:
         "本頁僅顯示所持位址（EOA 或操作員填入的 funder）的餘額。完整四種簽章類型偵測（含推導的 funder）請於 trader-core 主機執行 CLI：polyecho account detect <EOA>。",
+      balancePositionsLabel: "部位",
+      balanceIdleLabel: "閒置 USDC",
+      balanceTotalLabel: "合計",
+      balanceNa: "N/A",
+      balanceIdleFailed: "鏈上 USDC 餘額讀取失敗",
+      balancePartialFailed: "部分餘額讀取失敗（仍可送出）",
     },
   },
   leaders: {

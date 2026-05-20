@@ -45,6 +45,29 @@ const DEFAULT_DATA_API_BASE = "https://data-api.polymarket.com";
 /** Same `settings` key app/settings/actions.ts writes the proxy URL under. */
 const PROXY_SETTINGS_KEY = "polymarket_proxy_url";
 
+/**
+ * Polygon JSON-RPC URL used for the on-chain idle-USDC.e probe. The
+ * settings table can override it via `polygon_rpc_url`; otherwise the
+ * `POLYECHO_POLYGON_RPC_URL` env var; otherwise the project's known-good
+ * dRPC default (see polyecho-ops-runbook: polygon-rpc.com is dead 401,
+ * polygon.drpc.org is the project's documented working endpoint).
+ *
+ * Polygon dRPC is NOT geo-blocked, so this leg is DIRECT — it must NOT
+ * route through `polymarket_proxy_url`.
+ */
+const POLYGON_RPC_SETTINGS_KEY = "polygon_rpc_url";
+const DEFAULT_POLYGON_RPC_URL = "https://polygon.drpc.org";
+
+/**
+ * USDC.e (Polygon — bridged 6-decimal USDC, what Polymarket actually
+ * settles in). `balanceOf(address)` selector is `0x70a08231`.
+ */
+const USDC_E_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+const BALANCE_OF_SELECTOR = "0x70a08231";
+
+/** USDC.e is 6-decimal; divide on-chain integer units by 10^6 to get USD. */
+const USDC_DECIMALS = 6n;
+
 /** httpx-client-equivalent request timeout (Python uses timeout_s=10.0). */
 const TIMEOUT_MS = 10_000;
 
@@ -54,6 +77,34 @@ export interface ProbeBalanceResult {
   /** Parsed USD position value, or null when unknown / failed. */
   valueUsd: number | null;
   /** zh-TW operator message. Never contains anything sensitive. */
+  message: string;
+}
+
+/** Result of the on-chain idle-USDC.e probe (b). */
+export interface ProbeIdleUsdcResult {
+  /** false on ANY failure (the call is strictly best-effort). */
+  ok: boolean;
+  /** USDC.e idle balance (USD; 6-decimal converted), or null on failure. */
+  idleUsdc: number | null;
+  /** zh-TW operator message. Never contains anything sensitive. */
+  message: string;
+}
+
+/**
+ * Composite balance result combining the data-api positions value (a) and
+ * the on-chain idle USDC.e (b). `totalUsd` is the sum, with a non-null
+ * half NEVER being zeroed by the other half's failure.
+ */
+export interface ProbeTotalBalanceResult {
+  /** true iff AT LEAST one of the two sub-probes succeeded. */
+  ok: boolean;
+  /** Polymarket positions value (a), null on failure. */
+  positionsUsd: number | null;
+  /** On-chain idle USDC.e (b), null on failure. */
+  idleUsdc: number | null;
+  /** Sum of the two halves (treating null as 0), or null if BOTH failed. */
+  totalUsd: number | null;
+  /** zh-TW operator message — distinguishes full vs partial failure. */
   message: string;
 }
 
@@ -158,4 +209,174 @@ export async function probeBalance(
     // Nothing sensitive exists here, but nothing is logged regardless.
     return failed;
   }
+}
+
+/**
+ * Resolve the Polygon JSON-RPC URL using the same precedence the rest of
+ * this module follows: settings row → env var → known-good default.
+ * Never throws — a DB hiccup must NOT block a best-effort public read.
+ */
+async function resolvePolygonRpcUrl(): Promise<string> {
+  try {
+    const [row] = await db
+      .select({ value: settings.value })
+      .from(settings)
+      .where(eq(settings.key, POLYGON_RPC_SETTINGS_KEY))
+      .limit(1);
+    const fromDb = coerceStringSetting(row?.value).trim();
+    if (fromDb) return fromDb;
+  } catch {
+    // Fall through to env/default.
+  }
+  const fromEnv = (process.env.POLYECHO_POLYGON_RPC_URL ?? "").trim();
+  return fromEnv || DEFAULT_POLYGON_RPC_URL;
+}
+
+/**
+ * Parse the JSON-RPC `result` hex (0x-prefixed) into a 6-decimal USDC
+ * USD number. `"0x"` and missing/empty are treated as zero. The BigInt
+ * divmod path preserves sub-cent precision (Number(remainder)/1e6
+ * avoids the float-loss that `Number(bigint)/1e6` would suffer for very
+ * large balances).
+ */
+function parseUsdcHex(hexResult: unknown): number | null {
+  if (typeof hexResult !== "string") return null;
+  const raw = hexResult.trim();
+  if (raw === "" || raw === "0x" || raw === "0X") return 0;
+  if (!/^0x[0-9a-fA-F]+$/.test(raw)) return null;
+  let units: bigint;
+  try {
+    units = BigInt(raw);
+  } catch {
+    return null;
+  }
+  if (units < 0n) return null;
+  const divisor = 10n ** USDC_DECIMALS;
+  const whole = units / divisor;
+  const remainder = units % divisor;
+  // Sub-cent precision: Number(remainder)/1e6 is exact for any 6-digit
+  // remainder; Number(whole) loses precision only above 2^53, far above
+  // any realistic wallet balance.
+  const value = Number(whole) + Number(remainder) / 1_000_000;
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * probeIdleUsdc — best-effort, fail-soft on-chain read of an address's
+ * idle USDC.e (Polygon) balance. Direct fetch (no proxy — dRPC is not
+ * geo-blocked). Never throws; never writes; never logs.
+ *
+ * @param address 0x + 40 hex (validated with the shared EVM_ADDRESS_RE).
+ */
+export async function probeIdleUsdc(
+  address: string
+): Promise<ProbeIdleUsdcResult> {
+  const failed: ProbeIdleUsdcResult = {
+    ok: false,
+    idleUsdc: null,
+    message: t("tables.accounts.import.balanceIdleFailed"),
+  };
+
+  const addr = (address ?? "").trim();
+  if (!EVM_ADDRESS_RE.test(addr)) return failed;
+
+  try {
+    const rpcUrl = await resolvePolygonRpcUrl();
+
+    // Encode `balanceOf(address)` calldata: selector + 32-byte
+    // zero-padded LOWERCASED address (no 0x prefix).
+    const paddedAddr = addr.toLowerCase().slice(2).padStart(64, "0");
+    const data = `${BALANCE_OF_SELECTOR}${paddedAddr}`;
+    const payload = {
+      jsonrpc: "2.0",
+      method: "eth_call",
+      params: [{ to: USDC_E_CONTRACT, data }, "latest"],
+      id: 1,
+    };
+
+    const resp = await fetch(rpcUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      cache: "no-store",
+    });
+    if (!resp.ok) return failed;
+
+    const body: unknown = await resp.json();
+    if (!body || typeof body !== "object") return failed;
+    const result = (body as { result?: unknown }).result;
+    if (result === undefined || result === null) return failed;
+
+    const idleUsdc = parseUsdcHex(result);
+    if (idleUsdc === null) return failed;
+
+    return {
+      ok: true,
+      idleUsdc,
+      message: t("tables.accounts.import.balanceIdleLabel"),
+    };
+  } catch {
+    // Network / parse / timeout — strictly best-effort. Never logs.
+    return failed;
+  }
+}
+
+/**
+ * probeTotalBalance — run the data-api positions probe (a) and the
+ * on-chain idle-USDC.e probe (b) in PARALLEL, and compose a total. A
+ * successful half is NEVER zeroed because the other half failed.
+ *
+ *   totalUsd = (positionsUsd ?? 0) + (idleUsdc ?? 0)
+ *              when at least one is non-null, else null.
+ *   ok       = at least one sub-probe succeeded.
+ *
+ * Never throws; never writes; never logs.
+ */
+export async function probeTotalBalance(
+  address: string
+): Promise<ProbeTotalBalanceResult> {
+  const addr = (address ?? "").trim();
+  if (!EVM_ADDRESS_RE.test(addr)) {
+    return {
+      ok: false,
+      positionsUsd: null,
+      idleUsdc: null,
+      totalUsd: null,
+      message: t("tables.accounts.import.balanceFailed"),
+    };
+  }
+
+  const [posRes, idleRes] = await Promise.all([
+    probeBalance(addr),
+    probeIdleUsdc(addr),
+  ]);
+
+  const positionsUsd = posRes.valueUsd;
+  const idleUsdc = idleRes.idleUsdc;
+  const anyOk = posRes.ok || idleRes.ok;
+  const totalUsd =
+    positionsUsd === null && idleUsdc === null
+      ? null
+      : (positionsUsd ?? 0) + (idleUsdc ?? 0);
+
+  let message: string;
+  if (posRes.ok && idleRes.ok) {
+    message = t("tables.accounts.import.balanceTotalLabel");
+  } else if (anyOk) {
+    message = t("tables.accounts.import.balancePartialFailed");
+  } else {
+    message = t("tables.accounts.import.balanceFailed");
+  }
+
+  return {
+    ok: anyOk,
+    positionsUsd,
+    idleUsdc,
+    totalUsd,
+    message,
+  };
 }
