@@ -40,6 +40,14 @@ x-python-defaults: &python-defaults
   # Flip to `on` only after an end-to-end dry-run sign-off.
   environment:
     POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:${POSTGRES_PASSWORD}@db:5432/polyecho}
+    # POLYECHO_DB_URL_DRIZZLE is the SAME database, just a different DSN
+    # dialect (no `+asyncpg`) used by web's Drizzle ORM. Python services
+    # never read it BUT shared.config.Settings parses both fields from env
+    # on import, and the live-mode validator rejects a localhost sentinel
+    # for either — so every Python service needs a non-localhost default
+    # here too, or migrate / core / push / discovery / backtest all crash
+    # on `get_settings()` before doing anything.
+    POLYECHO_DB_URL_DRIZZLE: ${POLYECHO_DB_URL_DRIZZLE:-postgresql://polyecho:${POSTGRES_PASSWORD}@db:5432/polyecho}
     POLYECHO_DATASOURCE: ${POLYECHO_DATASOURCE:-live}
     POLYECHO_LIVE_TRADING: ${POLYECHO_LIVE_TRADING:-off}
   # Ordering: db healthy → migrate completed-successfully → apps.
@@ -108,6 +116,11 @@ services:
       - ./migrations:/app/infra/migrations:ro
     environment:
       POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:${POSTGRES_PASSWORD}@db:5432/polyecho}
+      # See anchor comment — Settings parses BOTH DSNs on import, and the
+      # live-mode validator rejects localhost defaults for either, so the
+      # migrate one-shot needs the drizzle URL too even though it never
+      # opens a drizzle connection (cli/__main__.py → get_settings()).
+      POLYECHO_DB_URL_DRIZZLE: ${POLYECHO_DB_URL_DRIZZLE:-postgresql://polyecho:${POSTGRES_PASSWORD}@db:5432/polyecho}
       POLYECHO_DATASOURCE: ${POLYECHO_DATASOURCE:-live}
       POLYECHO_DB_MIGRATE_YES: "1"
     depends_on:
