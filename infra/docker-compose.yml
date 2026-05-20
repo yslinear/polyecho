@@ -29,9 +29,19 @@ x-python-defaults: &python-defaults
   # ../.env (loaded above) still overrides these because env_file wins over
   # `environment` only when the var is set there — so we use ${VAR:-default}
   # which yields the container default unless the host shell/.env exports it.
+  #
+  # POLYECHO_DATASOURCE default is `live` (production-safe): operator-facing
+  # services read the real Polymarket feed and never emit synthetic
+  # copy_fill events that could surface as real-looking notifications.
+  # fixture mode is now EXPLICIT opt-in — CI / local tests start the stack
+  # with `POLYECHO_DATASOURCE=fixture docker compose up`.
+  # POLYECHO_LIVE_TRADING is the §5 G5 trading lock; default `off` means
+  # trader-core observes + writes audit events but issues NO real orders.
+  # Flip to `on` only after an end-to-end dry-run sign-off.
   environment:
-    POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:polyecho@db:5432/polyecho}
-    POLYECHO_DATASOURCE: ${POLYECHO_DATASOURCE:-fixture}
+    POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:${POSTGRES_PASSWORD}@db:5432/polyecho}
+    POLYECHO_DATASOURCE: ${POLYECHO_DATASOURCE:-live}
+    POLYECHO_LIVE_TRADING: ${POLYECHO_LIVE_TRADING:-off}
   # Ordering: db healthy → migrate completed-successfully → apps.
   # Every app service waits for the one-shot `migrate` job so a clean
   # `docker compose up` on an EMPTY volume yields a fully-populated schema
@@ -61,7 +71,7 @@ services:
     environment:
       POSTGRES_DB: polyecho
       POSTGRES_USER: polyecho
-      POSTGRES_PASSWORD: polyecho
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD env var must be set}
     volumes:
       - pgdata:/var/lib/postgresql/data
     # Bind to localhost only — never expose to network (PRD §4.2)
@@ -97,8 +107,8 @@ services:
     volumes:
       - ./migrations:/app/infra/migrations:ro
     environment:
-      POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:polyecho@db:5432/polyecho}
-      POLYECHO_DATASOURCE: ${POLYECHO_DATASOURCE:-fixture}
+      POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:${POSTGRES_PASSWORD}@db:5432/polyecho}
+      POLYECHO_DATASOURCE: ${POLYECHO_DATASOURCE:-live}
       POLYECHO_DB_MIGRATE_YES: "1"
     depends_on:
       db:
@@ -156,7 +166,8 @@ services:
     # Self-sufficient default — in-container the DB host is `db`, not localhost.
     # A real ../.env still overrides via ${VAR:-default}.
     environment:
-      POLYECHO_DB_URL_DRIZZLE: ${POLYECHO_DB_URL_DRIZZLE:-postgresql://polyecho:polyecho@db:5432/polyecho}
+      POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:${POSTGRES_PASSWORD}@db:5432/polyecho}
+      POLYECHO_DB_URL_DRIZZLE: ${POLYECHO_DB_URL_DRIZZLE:-postgresql://polyecho:${POSTGRES_PASSWORD}@db:5432/polyecho}
       # The container still LISTENS on 3000 (see healthcheck below, unchanged)
       # but is PUBLISHED on :3006 — so the browser's Origin/Host is :3006.
       # The CSRF middleware allow-list keys off POLYECHO_WEB_PORT, so it must
@@ -214,9 +225,9 @@ services:
     # Self-sufficient defaults — in-container the DB host is `db`, not
     # localhost. A real ../.env still overrides via ${VAR:-default}.
     environment:
-      POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:polyecho@db:5432/polyecho}
-      POLYECHO_DB_URL_DRIZZLE: ${POLYECHO_DB_URL_DRIZZLE:-postgresql://polyecho:polyecho@db:5432/polyecho}
-      POLYECHO_DATASOURCE: ${POLYECHO_DATASOURCE:-fixture}
+      POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:${POSTGRES_PASSWORD}@db:5432/polyecho}
+      POLYECHO_DB_URL_DRIZZLE: ${POLYECHO_DB_URL_DRIZZLE:-postgresql://polyecho:${POSTGRES_PASSWORD}@db:5432/polyecho}
+      POLYECHO_DATASOURCE: ${POLYECHO_DATASOURCE:-live}
     depends_on:
       db:
         condition: service_healthy
