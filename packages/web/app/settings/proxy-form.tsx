@@ -7,6 +7,13 @@
  * server action (http(s) only; SOCKS rejected). On success: sonner toast +
  * router.refresh() so the Server Component re-reads the persisted value.
  * No card grid, no modal — a calm single control (DESIGN.md).
+ *
+ * P7d / R24 asymmetry:
+ *   - CLEAR (empty value): safe-direction → keeps the bare single click.
+ *   - SET / CHANGE (non-empty value): risk-increasing → must pass the inline
+ *     confirm (CONFIRM_PHRASE only, no passphrase) before persist. The form
+ *     reveals the inline-confirm primitive inline once the user submits a
+ *     valid http(s) URL.
  */
 
 import { useState, useTransition } from "react";
@@ -15,6 +22,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { InlineConfirm } from "@/components/inline-confirm";
 import { t } from "@/lib/i18n";
 import { setPolymarketProxy } from "./actions";
 
@@ -48,17 +56,16 @@ export function ProxyForm({ current, lastUpdated }: ProxyFormProps) {
   const [pending, startTransition] = useTransition();
 
   const dirty = value.trim() !== current.trim();
+  const trimmed = value.trim();
+  const isClear = trimmed === "";
 
-  function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+  function onClearSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setTouched(true);
-    const localErr = validate(value);
-    setError(localErr);
-    if (localErr) return;
-
+    if (!isClear) return; // safety: only this form path handles the clear
     startTransition(async () => {
       try {
-        const res = await setPolymarketProxy(value);
+        const res = await setPolymarketProxy("");
         if (res.ok) {
           toast.success(res.message);
           setError(null);
@@ -74,7 +81,7 @@ export function ProxyForm({ current, lastUpdated }: ProxyFormProps) {
   }
 
   return (
-    <form onSubmit={onSubmit} className="space-y-3" noValidate>
+    <form onSubmit={onClearSubmit} className="space-y-3" noValidate>
       <div className="space-y-1.5">
         <label
           htmlFor="polymarket_proxy_url"
@@ -113,12 +120,39 @@ export function ProxyForm({ current, lastUpdated }: ProxyFormProps) {
         )}
       </div>
 
-      <div className="flex items-center gap-3">
-        <Button type="submit" disabled={pending || !dirty}>
-          {pending
-            ? t("alertsSettings.settings.proxy.saving")
-            : t("alertsSettings.settings.proxy.save")}
-        </Button>
+      <div className="flex flex-wrap items-center gap-3">
+        {isClear ? (
+          // Safe-direction: clearing the proxy stays single-click.
+          <Button type="submit" disabled={pending || !dirty}>
+            {pending
+              ? t("alertsSettings.settings.proxy.saving")
+              : t("alertsSettings.settings.proxy.save")}
+          </Button>
+        ) : (
+          // Risk-increasing: setting a NEW proxy must inline-confirm.
+          <InlineConfirm
+            title={t("alertsSettings.settings.proxy.save")}
+            description="這會改變 trader-core 對 Polymarket 的對外連線位址。請完成二次確認後送出（將於下一次 Polymarket 請求生效，無需重啟）。"
+            requirePassphrase={false}
+            triggerVariant="default"
+            triggerClassName="h-9 gap-1.5"
+            successToast="Proxy saved. Takes effect on the next Polymarket call."
+            action={async ({ confirmText }) => {
+              const localErr = validate(value);
+              if (localErr) {
+                setError(localErr);
+                setTouched(true);
+                return { ok: false, message: localErr };
+              }
+              const res = await setPolymarketProxy({
+                value,
+                confirmText,
+              });
+              if (!res.ok) setError(res.message);
+              return res;
+            }}
+          />
+        )}
         <span className="text-xs text-muted-foreground tabular-nums">
           {value.trim() === ""
             ? t("alertsSettings.settings.proxy.currentDirect")

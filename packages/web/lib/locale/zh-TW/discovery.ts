@@ -225,6 +225,12 @@ export const discovery = {
       leaderMarked: "Leader 已標記為{{label}}",
       leaderFailed: "更新 Leader 狀態失敗，請稍候重試。",
     },
+    /** P7d / R24 inline-confirm for the risk-increasing "follow" promotion.
+     *  {{wallet}} = the leader's wallet address (literal, not translated). */
+    followConfirm: {
+      description:
+        "將此 Leader（{{wallet}}）升等為「跟單中」會讓 trader-core 之後依範本實際跟單。請完成二次確認後送出。",
+    },
     /** Empty states. */
     empty: {
       filteredTitle: "沒有符合篩選條件的 Leader。",

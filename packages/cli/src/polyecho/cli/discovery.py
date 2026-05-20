@@ -26,6 +26,7 @@ reimplemented here.  ``promote`` is a single safe-write UPDATE on
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -134,6 +135,14 @@ def promote(
     same DB surface the web UI uses.  This does NOT move money: actual
     copying still requires active ``follow_relations``.  Read of an
     unknown / already-rejected wallet is reported, not silently ignored.
+
+    Risk gate
+    ---------
+    ``promote`` is risk-increasing (it moves a wallet into the trader-core
+    follow set). To avoid misclick the CLI forces an interactive
+    ``typer.confirm`` BEFORE the DB write; there is intentionally no
+    ``--yes`` bypass (operator-side parity with the web
+    ``dangerous-action`` CONFIRM_PHRASE).
     """
     from sqlalchemy import select
 
@@ -141,6 +150,51 @@ def promote(
     from polyecho.shared.models import CandidateLeader
 
     wallet_norm = wallet.strip().lower()
+
+    async def _fetch() -> Any | None:
+        async with session_scope() as session:
+            return (
+                await session.execute(
+                    select(CandidateLeader).where(
+                        CandidateLeader.wallet_address == wallet_norm
+                    )
+                )
+            ).scalar_one_or_none()
+
+    try:
+        existing = asyncio.run(_fetch())
+    except Exception as exc:  # noqa: BLE001 - clean CLI error surface
+        _console.print(f"[red]promote failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if existing is None:
+        _console.print(
+            Panel(
+                f"[red]No candidate found for wallet "
+                f"[bold]{wallet_norm}[/bold].[/red]\n"
+                "[dim]Only wallets discovered into candidate_leaders can be "
+                "promoted. Run `polyecho discovery run --once` first.[/dim]",
+                title="[dim]polyecho discovery promote[/dim]",
+                border_style="red",
+            )
+        )
+        raise typer.Exit(code=1)
+
+    prev_status = str(existing.user_status)
+    _console.print(
+        Panel(
+            f"Wallet           [bold]{wallet_norm}[/bold]\n"
+            f"Current status   [bold]{prev_status}[/bold]\n"
+            f"Target status    [bold green]{_FOLLOWING_STATUS}[/bold green]\n"
+            "[dim]Promoting marks this wallet as trader-core eligible "
+            "(may be evaluated for copying).[/dim]",
+            title="[dim]polyecho discovery promote (confirm)[/dim]",
+            border_style="cyan",
+        )
+    )
+    typer.confirm(
+        "Confirm promote this wallet to 'following'?", abort=True
+    )
 
     async def _run() -> tuple[str, str] | None:
         async with session_scope() as session:

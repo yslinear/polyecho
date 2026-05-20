@@ -498,16 +498,44 @@ describe("DiscoveryTable per-row quick actions", () => {
     expect(quickBacktest).not.toHaveBeenCalled();
   });
 
-  it("status items call updateLeaderStatus with the right status + refresh", async () => {
+  it("watch / reject menu items call updateLeaderStatus directly (safe-direction)", async () => {
+    render(<DiscoveryTable data={rows} />);
+    await userEvent.click(actionsTrigger(BETA));
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: TX.actWatch })
+    );
+    expect(updateLeaderStatus).toHaveBeenCalledWith(BETA, "watching");
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it("follow menu item reveals the inline-confirm primitive (P7d/R24)", async () => {
     render(<DiscoveryTable data={rows} />);
     await userEvent.click(actionsTrigger(BETA));
     await userEvent.click(
       await screen.findByRole("menuitem", { name: TX.actFollow })
     );
-    expect(updateLeaderStatus).toHaveBeenCalledWith(BETA, "following");
-    expect(toastSuccess).toHaveBeenCalledWith(TX.toastMarkedFollow);
-    expect(refresh).toHaveBeenCalledTimes(1);
-    expect(push).not.toHaveBeenCalled();
+    // Selecting Follow does NOT directly fire the action — the inline
+    // confirm primitive is now in the action cell instead.
+    expect(updateLeaderStatus).not.toHaveBeenCalled();
+    // The inline-confirm trigger expands inline; complete the gate.
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: new RegExp(TX.actFollow),
+      })
+    );
+    await userEvent.type(
+      screen.getByLabelText(
+        t("inlineConfirm.confirmPhraseLabel", { phrase: "確認執行" })
+      ),
+      "確認執行"
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: t("inlineConfirm.submitButton") })
+    );
+    expect(updateLeaderStatus).toHaveBeenCalledWith(BETA, "following", {
+      confirmText: "確認執行",
+    });
   });
 
   it("hides the menu item matching the leader's current status", async () => {

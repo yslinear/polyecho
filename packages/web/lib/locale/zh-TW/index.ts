@@ -10,6 +10,7 @@ import { backtest } from "./backtest";
 import { common, sidebar } from "./common";
 import { dashboard } from "./dashboard";
 import { discovery } from "./discovery";
+import { inlineConfirm } from "./inline-confirm";
 import { status } from "./status";
 import { tables } from "./tables";
 
@@ -22,4 +23,5 @@ export const dict = {
   backtest,
   tables,
   alertsSettings,
+  inlineConfirm,
 } as const;

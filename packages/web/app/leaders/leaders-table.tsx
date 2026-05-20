@@ -15,10 +15,11 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Pause, Play } from "lucide-react";
+import { Pause } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { InlineConfirm } from "@/components/inline-confirm";
 import {
   Table,
   TableBody,
@@ -45,17 +46,46 @@ function RowAction({ row }: { row: LeaderRow }) {
   const router = useRouter();
   const [pending, setPending] = React.useState(false);
   const isActive = row.status === "active";
-  const next = isActive ? "paused" : "active";
 
-  async function onToggle() {
+  // P7d / R24 asymmetry:
+  //  - PAUSE (active → paused): safe-direction → single click.
+  //  - RESUME (paused → active): risk-increasing → inline-confirm primitive.
+  if (!isActive) {
+    return (
+      <div className="flex justify-end">
+        <InlineConfirm
+          title={t("tables.leaders.resume")}
+          description={t("tables.leaders.resumeConfirmDescription", {
+            address: row.leader_address,
+          })}
+          requirePassphrase={false}
+          triggerVariant="default"
+          triggerClassName="h-8 gap-1.5 text-xs"
+          successToast={t("tables.leaders.resumedToast")}
+          action={async ({ confirmText }) => {
+            try {
+              await setFollowStatus(row.id, "active", { confirmText });
+              return { ok: true, message: "OK" };
+            } catch (err) {
+              return {
+                ok: false,
+                message:
+                  err instanceof Error
+                    ? err.message
+                    : t("tables.leaders.updateError"),
+              };
+            }
+          }}
+        />
+      </div>
+    );
+  }
+
+  async function onPause() {
     setPending(true);
     try {
-      await setFollowStatus(row.id, next);
-      toast.success(
-        next === "paused"
-          ? t("tables.leaders.pausedToast")
-          : t("tables.leaders.resumedToast")
-      );
+      await setFollowStatus(row.id, "paused");
+      toast.success(t("tables.leaders.pausedToast"));
       router.refresh();
     } catch {
       toast.error(t("tables.leaders.updateError"));
@@ -64,28 +94,19 @@ function RowAction({ row }: { row: LeaderRow }) {
     }
   }
 
-  const Icon = isActive ? Pause : Play;
   return (
     <Button
       variant="outline"
       size="sm"
       className="h-8 text-xs"
       disabled={pending}
-      aria-label={
-        isActive
-          ? t("tables.leaders.pauseAria", { address: row.leader_address })
-          : t("tables.leaders.resumeAria", { address: row.leader_address })
-      }
-      onClick={onToggle}
+      aria-label={t("tables.leaders.pauseAria", {
+        address: row.leader_address,
+      })}
+      onClick={onPause}
     >
-      <Icon className="mr-1 h-3.5 w-3.5" aria-hidden="true" />
-      {pending
-        ? isActive
-          ? t("tables.leaders.pausing")
-          : t("tables.leaders.resuming")
-        : isActive
-          ? t("tables.leaders.pause")
-          : t("tables.leaders.resume")}
+      <Pause className="mr-1 h-3.5 w-3.5" aria-hidden="true" />
+      {pending ? t("tables.leaders.pausing") : t("tables.leaders.pause")}
     </Button>
   );
 }

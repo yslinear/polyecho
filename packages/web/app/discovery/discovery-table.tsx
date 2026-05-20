@@ -79,6 +79,7 @@ import {
 } from "@/components/ui/table";
 import { Slider } from "@/components/ui/slider";
 import { ScoreBadge } from "@/components/score-badge";
+import { InlineConfirm } from "@/components/inline-confirm";
 import { cn } from "@/lib/utils";
 import { t, type I18nKey } from "@/lib/i18n";
 import { quickBacktest, updateLeaderStatus } from "./actions";
@@ -252,6 +253,10 @@ const STATUS_ACTIONS: {
 function RowActions({ row }: { row: CandidateLeaderRow }) {
   const router = useRouter();
   const [pending, setPending] = React.useState(false);
+  // P7d / R24: when the operator selects "follow" (promote), reveal the
+  // inline-confirm primitive in this row's action cell. "watch" / "reject"
+  // stay single-click (safe / safer-direction).
+  const [confirmFollow, setConfirmFollow] = React.useState(false);
   const wallet = row.wallet_address;
 
   async function onQuickBacktest() {
@@ -266,7 +271,7 @@ function RowActions({ row }: { row: CandidateLeaderRow }) {
     }
   }
 
-  async function onSetStatus(status: LeaderStatus, label: string) {
+  async function onSetStatusSafe(status: LeaderStatus, label: string) {
     setPending(true);
     try {
       await updateLeaderStatus(wallet, status);
@@ -281,6 +286,41 @@ function RowActions({ row }: { row: CandidateLeaderRow }) {
 
   // Stop row click/keyboard navigation from firing for any action interaction.
   const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+
+  if (confirmFollow) {
+    // Risk-increasing inline-confirm: promote to "following".
+    return (
+      <div onClick={stop} onKeyDown={stop} className="min-w-[18rem]">
+        <InlineConfirm
+          title={t("discovery.table.actions.follow")}
+          description={t("discovery.table.followConfirm.description", {
+            wallet,
+          })}
+          requirePassphrase={false}
+          triggerVariant="default"
+          triggerClassName="h-7 gap-1.5 text-xs"
+          successToast={t("discovery.table.toast.leaderMarked", {
+            label: t("discovery.table.actions.follow"),
+          })}
+          action={async ({ confirmText }) => {
+            try {
+              await updateLeaderStatus(wallet, "following", { confirmText });
+              return { ok: true, message: "OK" };
+            } catch (err) {
+              return {
+                ok: false,
+                message:
+                  err instanceof Error
+                    ? err.message
+                    : t("discovery.table.toast.leaderFailed"),
+              };
+            }
+          }}
+          onConfirmed={() => setConfirmFollow(false)}
+        />
+      </div>
+    );
+  }
 
   return (
     <div onClick={stop} onKeyDown={stop}>
@@ -333,7 +373,13 @@ function RowActions({ row }: { row: CandidateLeaderRow }) {
                 disabled={pending}
                 onSelect={(e) => {
                   e.preventDefault();
-                  void onSetStatus(status, label);
+                  // P7d / R24: "following" reveals the inline-confirm
+                  // primitive; "watching" / "rejected" stay single-click.
+                  if (status === "following") {
+                    setConfirmFollow(true);
+                  } else {
+                    void onSetStatusSafe(status, label);
+                  }
                 }}
               >
                 <Icon className="mr-2 h-3.5 w-3.5" aria-hidden="true" />

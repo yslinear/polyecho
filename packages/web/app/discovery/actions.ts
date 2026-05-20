@@ -18,6 +18,10 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { backtestJobs, candidateLeaders } from "@/lib/db/schema";
 import { EVM_ADDRESS_RE } from "@/lib/format";
+import {
+  checkInlineConfirm,
+  emitInlineConfirmAudit,
+} from "@/lib/inline-confirm-gate";
 
 // ---------------------------------------------------------------------------
 // Balanced template preset — PRD §5.6
@@ -105,13 +109,34 @@ export async function quickBacktest(
 /**
  * updateLeaderStatus — set candidate_leaders.user_status for a wallet.
  * PRD §3.2 lifecycle: new → watching → following (or rejected).
+ *
+ * P7d / R24 asymmetry:
+ *   - "watching" / "rejected" stay single-click (safe / safer-direction).
+ *   - "following" is risk-increasing (the leader becomes copy-trade-eligible)
+ *     and must pass the inline-confirm gate (CONFIRM_PHRASE only, no
+ *     passphrase) BEFORE the user_status row is rewritten.
+ *
+ * The third arg carries the optional inline-confirm payload so existing
+ * watching/rejected call sites keep the bare two-arg shape (back-compat).
+ * For "following", the third arg is REQUIRED — a missing or wrong phrase
+ * throws so the caller's catch surfaces the gate failure.
  */
 export async function updateLeaderStatus(
   wallet: string,
-  status: LeaderStatus
+  status: LeaderStatus,
+  confirm?: { confirmText?: string | null }
 ): Promise<{ wallet: string; status: LeaderStatus }> {
   if (!LEADER_STATUSES.has(status)) {
     throw new Error(`不允許的領單者狀態：${String(status)}`);
+  }
+
+  if (status === "following") {
+    const gate = await checkInlineConfirm({
+      confirmText: confirm?.confirmText ?? null,
+    });
+    if (!gate.ok) {
+      throw new Error(gate.message);
+    }
   }
 
   const updated = await db
@@ -122,6 +147,14 @@ export async function updateLeaderStatus(
 
   if (updated.length === 0) {
     throw new Error(`找不到候選領單者 ${wallet}，狀態未更新`);
+  }
+
+  if (status === "following") {
+    await emitInlineConfirmAudit({
+      opType: "update_leader_status_following",
+      context: { wallet },
+      requirePassphrase: false,
+    });
   }
 
   return { wallet, status };

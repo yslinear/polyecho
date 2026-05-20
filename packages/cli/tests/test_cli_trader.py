@@ -158,7 +158,7 @@ class TestBulkPauseResume:
     def test_pause_all_sets_paused(self) -> None:
         scope = _make_scope(rowcount=7)
         with patch("polyecho.shared.db.session_scope", scope):
-            result = runner.invoke(app, ["trader", "pause-all"])
+            result = runner.invoke(app, ["trader", "pause-all", "--yes"])
         assert result.exit_code == 0, result.output
         assert "Paused 7" in result.output
         stmt = scope._captured["executed"][0]
@@ -203,9 +203,52 @@ class TestBulkPauseResume:
             yield  # pragma: no cover
 
         with patch("polyecho.shared.db.session_scope", boom):
-            result = runner.invoke(app, ["trader", "pause-all"])
+            result = runner.invoke(app, ["trader", "pause-all", "--yes"])
         assert result.exit_code != 0
         assert "pause-all failed" in result.output
+
+    # ---- P7e: --yes / typer.confirm gate on the --all blast radius -------
+    def test_pause_all_without_yes_prompts_aborts_on_no(self) -> None:
+        """No ``--yes`` ⇒ a confirmation prompt; answering ``n`` aborts
+        BEFORE the mutating UPDATE runs (no rows touched)."""
+        scope = _make_scope(rowcount=7)
+        with patch("polyecho.shared.db.session_scope", scope):
+            result = runner.invoke(
+                app, ["trader", "pause-all"], input="n\n"
+            )
+        # typer.confirm(abort=True) raises typer.Abort ⇒ exit code 1.
+        assert result.exit_code != 0
+        # No mutating UPDATE was issued (count SELECT may have been).
+        executed_sql = [str(s).lower() for s in scope._captured["executed"]]
+        assert not any(
+            "update follow_relations" in s for s in executed_sql
+        ), executed_sql
+        assert "About to pause" in result.output or "confirm" in result.output.lower()
+
+    def test_pause_all_with_yes_skips_prompt(self) -> None:
+        """``--yes`` ⇒ no prompt panel, no count-SELECT path."""
+        scope = _make_scope(rowcount=3)
+        with patch("polyecho.shared.db.session_scope", scope):
+            result = runner.invoke(
+                app, ["trader", "pause-all", "--yes"]
+            )
+        assert result.exit_code == 0, result.output
+        # The "confirm" panel must NOT have been rendered.
+        assert "About to pause" not in result.output
+        assert "Paused 3" in result.output
+
+    def test_pause_all_with_yes_does_mutating_op(self) -> None:
+        """``--yes`` actually issues the UPDATE follow_relations bulk write."""
+        scope = _make_scope(rowcount=5)
+        with patch("polyecho.shared.db.session_scope", scope):
+            result = runner.invoke(
+                app, ["trader", "pause-all", "--yes"]
+            )
+        assert result.exit_code == 0, result.output
+        executed_sql = [str(s).lower() for s in scope._captured["executed"]]
+        assert any(
+            "update follow_relations" in s for s in executed_sql
+        ), executed_sql
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,10 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { followRelations } from "@/lib/db/schema";
+import {
+  checkInlineConfirm,
+  emitInlineConfirmAudit,
+} from "@/lib/inline-confirm-gate";
 
 export type FollowStatus = "active" | "paused";
 
@@ -33,11 +37,30 @@ export interface SetFollowStatusResult {
  * setFollowStatus — pause ('paused') or resume ('active') one follow
  * relation. Stamps paused_at when pausing; clears it when resuming so the
  * row's lifecycle stays honest for trader-core's reconcile cursor.
+ *
+ * P7d / R24 asymmetry:
+ *   - status="paused" is safe-direction → single-click, NO gate.
+ *   - status="active" (RESUME a paused leader) is risk-increasing and must
+ *     pass the inline-confirm gate (CONFIRM_PHRASE only, no passphrase)
+ *     BEFORE the row is rewritten.
+ *
+ * The third arg carries the optional inline-confirm payload so the pause
+ * call site keeps the bare two-arg shape (back-compat).
  */
 export async function setFollowStatus(
   id: string,
-  status: FollowStatus
+  status: FollowStatus,
+  confirm?: { confirmText?: string | null }
 ): Promise<SetFollowStatusResult> {
+  if (status === "active") {
+    const gate = await checkInlineConfirm({
+      confirmText: confirm?.confirmText ?? null,
+    });
+    if (!gate.ok) {
+      throw new Error(gate.message);
+    }
+  }
+
   // rev-web I-1: server-side ownership/existence check. Drizzle's
   // .returning() yields the rows the UPDATE actually matched (an empty
   // array when the WHERE matched nothing). Without this an arbitrary or
@@ -55,6 +78,14 @@ export async function setFollowStatus(
 
   if (updated.length === 0) {
     throw new Error(`找不到跟單關係 ${id}，狀態未更新`);
+  }
+
+  if (status === "active") {
+    await emitInlineConfirmAudit({
+      opType: "set_follow_status_active",
+      context: { id },
+      requirePassphrase: false,
+    });
   }
 
   return { id, status };

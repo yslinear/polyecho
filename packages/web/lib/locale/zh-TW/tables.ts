@@ -193,12 +193,14 @@ export const tables = {
     pause: "暫停",
     resume: "恢復",
     pausing: "暫停中…",
-    resuming: "恢復中…",
     pauseAria: "暫停跟單 {{address}}",
-    resumeAria: "恢復跟單 {{address}}",
     pausedToast: "已暫停 Leader。trader-core 將停止對其跟單。",
     resumedToast: "已恢復 Leader。下一筆 Leader 交易將繼續跟單。",
     updateError: "更新跟單狀態失敗，請稍候重試。",
+    /** P7d / R24 inline-confirm description for resume.
+     *  {{address}} = the leader's wallet address (literal, not translated). */
+    resumeConfirmDescription:
+      "這會恢復對 Leader {{address}} 的跟單。trader-core 將於下一筆 Leader 交易繼續跟。請完成二次確認後送出。",
     skips: {
       heading: "近期略過",
       subtitleEmpty:

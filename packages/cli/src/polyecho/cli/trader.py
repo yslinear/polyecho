@@ -249,13 +249,67 @@ def _bulk_set_status(target: str) -> int:
     return asyncio.run(_run())
 
 
+def _count_active_relations() -> int:
+    """Count follow_relations whose ``status`` is ``active``."""
+    from sqlalchemy import func as sa_func
+    from sqlalchemy import select
+
+    from polyecho.shared.db import session_scope
+    from polyecho.shared.models import FollowRelation
+
+    async def _run() -> int:
+        async with session_scope() as session:
+            row = (
+                await session.execute(
+                    select(sa_func.count()).where(
+                        FollowRelation.status == "active"
+                    )
+                )
+            ).scalar_one_or_none()
+            return int(row or 0)
+
+    return asyncio.run(_run())
+
+
 @app.command(name="pause-all")
-def pause_all() -> None:
+def pause_all(
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the interactive confirmation prompt (CI / scripted use).",
+    ),
+) -> None:
     """Globally pause copy-trading (safe-write): all follows → ``paused``.
 
     The ``core`` engine reacts to the status change; it keeps running but
     copies nothing while every relation is paused.
+
+    A confirmation prompt protects against misclick (the ``--all`` blast
+    radius); pass ``--yes`` to bypass.  pause is itself the safe-direction
+    (it only stops copies), so this gate is intentionally lighter than the
+    risk-increasing ones (web ``dangerous-action`` + account-import).
     """
+    if not yes:
+        try:
+            n_active = _count_active_relations()
+        except Exception as exc:  # noqa: BLE001
+            _console.print(f"[red]pause-all failed:[/red] {exc}")
+            raise typer.Exit(code=1) from exc
+        _console.print(
+            Panel(
+                f"[bold yellow]About to pause[/bold yellow] {n_active} "
+                "active follow_relation(s).\n"
+                "[dim]Pass --yes / -y to skip this prompt. Re-enable with "
+                "`polyecho trader resume-all`.[/dim]",
+                title="[dim]polyecho trader pause-all (confirm)[/dim]",
+                border_style="yellow",
+            )
+        )
+        typer.confirm(
+            "Confirm pause ALL follow_relations?", abort=True
+        )
+
     try:
         n = _bulk_set_status("paused")
     except Exception as exc:  # noqa: BLE001

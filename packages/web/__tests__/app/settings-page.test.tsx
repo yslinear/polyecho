@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 /**
@@ -8,11 +8,11 @@ import userEvent from "@testing-library/user-event";
  * The page reads the `polymarket_proxy_url` row through a mocked Drizzle
  * select chain (no DB). The form's server action and next/navigation +
  * sonner are mocked so nothing touches the network.
+ *
+ * P7d / R24: setting a NEW non-empty proxy renders the InlineConfirm
+ * primitive (CONFIRM_PHRASE only, no passphrase). Clearing stays single-click.
  */
 
-// The page now reads several keys in ONE query:
-//   db.select({...}).from(settings).where(inArray(key, [...]))
-// so .where() resolves directly to the row array (no .limit()).
 let rowsResult: unknown[] = [];
 const where = vi.fn(() => Promise.resolve(rowsResult));
 const from = vi.fn(() => ({ where }));
@@ -28,8 +28,6 @@ vi.mock("@/app/settings/actions", () => ({
   setRiskMode: (...a: unknown[]) => setRiskMode(...a),
 }));
 
-// PushSubscribe touches navigator/PushManager; stub it so the page test
-// stays focused on the proxy/risk-mode reads (it has its own suite).
 vi.mock("@/components/push-subscribe", () => ({
   PushSubscribe: () => null,
 }));
@@ -49,13 +47,16 @@ import SettingsPage from "@/app/settings/page";
 import { ProxyForm } from "@/app/settings/proxy-form";
 import { t } from "@/lib/i18n";
 
-// Locators derive from the i18n dictionary, not hardcoded copy: the test
-// asserts the ProxyForm STRUCTURE / validation behaviour and stays correct
-// if a zh-TW string changes, while still proving the i18n seam renders.
+const CONFIRM_PHRASE = "確認執行";
 const PROXY_URL_LABEL = t("alertsSettings.settings.proxy.urlLabel");
 const PROXY_SAVE = t("alertsSettings.settings.proxy.save");
 const PROXY_ERR_SOCKS = t("alertsSettings.settings.proxy.errSocks");
 const PROXY_DIRECT = t("alertsSettings.settings.proxy.currentDirect");
+const IC_OPEN = t("inlineConfirm.openButton", { title: PROXY_SAVE });
+const IC_SUBMIT = t("inlineConfirm.submitButton");
+const IC_CONFIRM_LABEL = t("inlineConfirm.confirmPhraseLabel", {
+  phrase: CONFIRM_PHRASE,
+});
 
 describe("/settings page (Server Component)", () => {
   beforeEach(() => {
@@ -116,18 +117,17 @@ describe("ProxyForm (client island)", () => {
     toastError.mockClear();
   });
 
-  it("shows an inline error and does not call the action for socks5://", async () => {
+  it("shows an inline error for socks5:// on blur (no action call)", async () => {
     render(<ProxyForm current="" lastUpdated={null} />);
     const input = screen.getByLabelText(PROXY_URL_LABEL);
     await userEvent.type(input, "socks5://127.0.0.1:1080");
-    await userEvent.click(
-      screen.getByRole("button", { name: PROXY_SAVE })
-    );
-    expect(screen.getByText(PROXY_ERR_SOCKS)).toBeInTheDocument();
+    // Tab away from the input to trigger the on-blur validate.
+    await userEvent.tab();
+    expect(await screen.findByText(PROXY_ERR_SOCKS)).toBeInTheDocument();
     expect(setPolymarketProxy).not.toHaveBeenCalled();
   });
 
-  it("submits a valid http URL, toasts success and refreshes", async () => {
+  it("submits a valid http URL through the inline-confirm gate", async () => {
     setPolymarketProxy.mockResolvedValue({
       ok: true,
       message: "Proxy saved. Takes effect on the next Polymarket call.",
@@ -138,18 +138,48 @@ describe("ProxyForm (client island)", () => {
       screen.getByLabelText(PROXY_URL_LABEL),
       "http://10.0.0.1:8080"
     );
+    // The inline-confirm trigger replaces the bare submit button.
     await userEvent.click(
-      screen.getByRole("button", { name: PROXY_SAVE })
+      screen.getByRole("button", { name: new RegExp(PROXY_SAVE) })
     );
-    expect(setPolymarketProxy).toHaveBeenCalledWith("http://10.0.0.1:8080");
+    await userEvent.type(
+      screen.getByLabelText(IC_CONFIRM_LABEL),
+      CONFIRM_PHRASE
+    );
+    await userEvent.click(screen.getByRole("button", { name: IC_SUBMIT }));
+    await waitFor(() =>
+      expect(setPolymarketProxy).toHaveBeenCalledWith({
+        value: "http://10.0.0.1:8080",
+        confirmText: CONFIRM_PHRASE,
+      })
+    );
     expect(toastSuccess).toHaveBeenCalled();
     expect(refresh).toHaveBeenCalled();
   });
 
-  it("disables the primary action until the value changes", () => {
+  it("clearing (empty value) stays single-click (safe-direction)", async () => {
+    setPolymarketProxy.mockResolvedValue({
+      ok: true,
+      message: "Proxy cleared. Polymarket calls now go direct.",
+      value: "",
+    });
     render(<ProxyForm current="http://a.b:1" lastUpdated={null} />);
-    expect(
+    const input = screen.getByLabelText(PROXY_URL_LABEL);
+    await userEvent.clear(input);
+    await userEvent.click(
       screen.getByRole("button", { name: PROXY_SAVE })
-    ).toBeDisabled();
+    );
+    expect(setPolymarketProxy).toHaveBeenCalledWith("");
+    expect(toastSuccess).toHaveBeenCalled();
+  });
+
+  it("hides the inline-confirm trigger when value matches current and not dirty", () => {
+    render(<ProxyForm current="" lastUpdated={null} />);
+    // No InlineConfirm trigger should be present at empty/initial state
+    // (the safe-direction clear button is disabled until dirty).
+    expect(
+      screen.queryByRole("button", { name: IC_OPEN })
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: PROXY_SAVE })).toBeDisabled();
   });
 });

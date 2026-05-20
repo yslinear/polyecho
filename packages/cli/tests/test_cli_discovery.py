@@ -117,7 +117,10 @@ class TestDiscoveryPromote:
         scope = _make_scope(scalar_one=row)
         with patch("polyecho.shared.db.session_scope", scope):
             result = runner.invoke(
-                app, ["discovery", "promote", _WALLET], env={"COLUMNS": "200"}
+                app,
+                ["discovery", "promote", _WALLET],
+                input="y\n",
+                env={"COLUMNS": "200"},
             )
         assert result.exit_code == 0, result.output
         assert row.user_status == "following"
@@ -128,7 +131,10 @@ class TestDiscoveryPromote:
         scope = _make_scope(scalar_one=None)
         with patch("polyecho.shared.db.session_scope", scope):
             result = runner.invoke(
-                app, ["discovery", "promote", _WALLET], env={"COLUMNS": "200"}
+                app,
+                ["discovery", "promote", _WALLET],
+                input="y\n",
+                env={"COLUMNS": "200"},
             )
         assert result.exit_code != 0
         assert "No candidate found" in result.output
@@ -141,7 +147,10 @@ class TestDiscoveryPromote:
 
         with patch("polyecho.shared.db.session_scope", boom):
             result = runner.invoke(
-                app, ["discovery", "promote", _WALLET], env={"COLUMNS": "200"}
+                app,
+                ["discovery", "promote", _WALLET],
+                input="y\n",
+                env={"COLUMNS": "200"},
             )
         assert result.exit_code != 0
         assert "promote failed" in result.output
@@ -154,10 +163,64 @@ class TestDiscoveryPromote:
             result = runner.invoke(
                 app,
                 ["discovery", "promote", _WALLET.upper()],
+                input="y\n",
                 env={"COLUMNS": "200"},
             )
         assert result.exit_code == 0, result.output
         assert _WALLET.lower() in result.output
+
+    # ---- P7e: typer.confirm gate (risk-increasing, no --yes bypass) ------
+    def test_promote_prompts_confirm(self) -> None:
+        """Without input the prompt is rendered (the confirm panel + the
+        ``Confirm promote ...`` question)."""
+        row = MagicMock()
+        row.user_status = "new"
+        scope = _make_scope(scalar_one=row)
+        with patch("polyecho.shared.db.session_scope", scope):
+            result = runner.invoke(
+                app,
+                ["discovery", "promote", _WALLET],
+                input="y\n",
+                env={"COLUMNS": "200"},
+            )
+        assert result.exit_code == 0, result.output
+        # The confirm panel + the typer.confirm question text.
+        assert "Current status" in result.output
+        assert "Confirm promote" in result.output
+
+    def test_promote_aborts_on_no(self) -> None:
+        """Answering ``n`` ⇒ typer.Abort ⇒ non-zero AND the candidate row
+        was never mutated to ``following``."""
+        row = MagicMock()
+        row.user_status = "new"
+        scope = _make_scope(scalar_one=row)
+        with patch("polyecho.shared.db.session_scope", scope):
+            result = runner.invoke(
+                app,
+                ["discovery", "promote", _WALLET],
+                input="n\n",
+                env={"COLUMNS": "200"},
+            )
+        assert result.exit_code != 0
+        # The row was fetched (for the panel) but never re-assigned.
+        assert row.user_status == "new"
+        assert "Promoted" not in result.output
+
+    def test_promote_with_input_yes_proceeds(self) -> None:
+        """``y`` proceeds through the gate ⇒ row.user_status is flipped."""
+        row = MagicMock()
+        row.user_status = "watching"
+        scope = _make_scope(scalar_one=row)
+        with patch("polyecho.shared.db.session_scope", scope):
+            result = runner.invoke(
+                app,
+                ["discovery", "promote", _WALLET],
+                input="y\n",
+                env={"COLUMNS": "200"},
+            )
+        assert result.exit_code == 0, result.output
+        assert row.user_status == "following"
+        assert "Promoted" in result.output
 
 
 # ---------------------------------------------------------------------------

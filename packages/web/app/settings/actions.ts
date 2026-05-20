@@ -23,6 +23,10 @@ import {
   GLOBAL_PAUSED_KEY,
   type RiskMode,
 } from "@/lib/settings-keys";
+import {
+  checkInlineConfirm,
+  emitInlineConfirmAudit,
+} from "@/lib/inline-confirm-gate";
 
 const SETTINGS_KEY = "polymarket_proxy_url";
 
@@ -121,20 +125,39 @@ export interface SetProxyResult {
 /**
  * setPolymarketProxy — called from the /settings client form.
  *
- * Accepts a FormData (native <form action>) or a bare string so the call
- * site can stay simple. Validates, then upserts (or deletes when cleared).
+ * Accepts a FormData (native <form action>), a bare string, or an object
+ * `{ value, confirmText }` so the call site can stay simple. Validates, then
+ * upserts (or deletes when cleared).
+ *
+ * P7d / R24: setting a NEW non-empty proxy is risk-increasing (it changes
+ * where trader-core dials Polymarket), so it now requires an inline confirm
+ * (CONFIRM_PHRASE only — no passphrase). CLEARING the row (trimmed === "")
+ * is safe-direction and stays single-click (no gate).
  */
 export async function setPolymarketProxy(
-  input: FormData | string
+  input:
+    | FormData
+    | string
+    | { value: string; confirmText?: string | null }
 ): Promise<SetProxyResult> {
-  const raw =
-    typeof input === "string"
-      ? input
-      : String(input.get("polymarket_proxy_url") ?? "");
+  let raw: string;
+  let confirmText: string | null = null;
+  if (typeof input === "string") {
+    raw = input;
+  } else if (input instanceof FormData) {
+    raw = String(input.get("polymarket_proxy_url") ?? "");
+    const ct = input.get("confirmText");
+    confirmText = typeof ct === "string" ? ct : null;
+  } else {
+    raw = String(input?.value ?? "");
+    confirmText = input?.confirmText ?? null;
+  }
 
   const trimmed = raw.trim();
 
   // --- Empty -> clear the row (direct connection) ---------------------------
+  // Safe-direction: clearing a proxy can never INCREASE risk, so it stays
+  // single-click and bypasses the inline-confirm gate by design (P7d).
   if (trimmed === "") {
     await db.delete(settings).where(eq(settings.key, SETTINGS_KEY));
     return {
@@ -191,6 +214,15 @@ export async function setPolymarketProxy(
     };
   }
 
+  // --- P7d/R24 inline confirm gate (risk-increasing direction only) --------
+  // Setting a NEW proxy changes where trader-core dials Polymarket and must
+  // pass the verbatim type-to-confirm gate BEFORE persisting. No passphrase
+  // (this is a §5.7 sanctioned write, not a §5.7 危險 op).
+  const gate = await checkInlineConfirm({ confirmText });
+  if (!gate.ok) {
+    return { ok: false, message: gate.message, value: trimmed };
+  }
+
   // --- Upsert the bare string into the jsonb value column -------------------
   const updated_at = new Date();
   await db
@@ -200,6 +232,11 @@ export async function setPolymarketProxy(
       target: settings.key,
       set: { value: trimmed, updated_at },
     });
+  await emitInlineConfirmAudit({
+    opType: "set_polymarket_proxy",
+    context: { value: trimmed },
+    requirePassphrase: false,
+  });
 
   return {
     ok: true,
@@ -221,11 +258,31 @@ export interface SetRiskModeResult {
  * ("normal" | "conservative"), IDENTICAL shape convention to the
  * polymarket_proxy_url row above. Python `polyecho.shared.risk_mode` reads
  * this live; conservative tightens copy ratio + risk caps (PRD §5.6).
+ *
+ * P7d / R24 asymmetry:
+ *   - "conservative" (tighter caps) is safe-direction → single-click, NO gate.
+ *   - "normal" (leave conservative, loosen caps) is risk-increasing → must
+ *     pass the inline-confirm gate (CONFIRM_PHRASE only, no passphrase).
+ *
+ * The second argument carries the optional inline-confirm payload so a safe-
+ * direction call site can keep the bare `setRiskMode("conservative")` shape
+ * (backward compatible).
  */
 export async function setRiskMode(
-  mode: RiskMode
+  mode: RiskMode,
+  confirm?: { confirmText?: string | null }
 ): Promise<SetRiskModeResult> {
   const value: RiskMode = mode === "conservative" ? "conservative" : "normal";
+
+  // Risk-increasing direction (normal) must pass the inline-confirm gate
+  // BEFORE the upsert; conservative bypasses (safe-direction by design).
+  if (value === "normal") {
+    const gate = await checkInlineConfirm({
+      confirmText: confirm?.confirmText ?? null,
+    });
+    if (!gate.ok) return { ok: false, message: gate.message, value };
+  }
+
   const updated_at = new Date();
   await db
     .insert(settings)
@@ -234,6 +291,15 @@ export async function setRiskMode(
       target: settings.key,
       set: { value, updated_at },
     });
+
+  if (value === "normal") {
+    await emitInlineConfirmAudit({
+      opType: "set_risk_mode_normal",
+      context: { value },
+      requirePassphrase: false,
+    });
+  }
+
   return {
     ok: true,
     message:
@@ -257,11 +323,35 @@ export interface SetGlobalPausedResult {
  * string "true" | "false" (same convention). trader-core's reconcile loop
  * honours this as a kill-switch across every follow relation; consistent
  * with the per-leader pause in app/leaders/actions.ts.
+ *
+ * P7d / R24 asymmetry (THE HIGHEST OF THE 5 INLINE-CONFIRM OPS):
+ *   - pause (paused=true) is safe-direction → single-click, NO gate.
+ *   - RESUME (paused=false) lifts the system-wide kill-switch and is the
+ *     single most consequential web-side write. It MUST pass BOTH
+ *     CONFIRM_PHRASE AND a constant-time danger-passphrase verify before
+ *     the row is rewritten (same gate as §5.7 danger-tier ops; identical
+ *     mechanism to confirmDangerousAction).
+ *
+ * The second argument carries the inline-confirm payload (confirmText +
+ * passphrase) so a safe-direction call site keeps the bare
+ * `setGlobalPaused(true)` shape (backward compatible).
  */
 export async function setGlobalPaused(
-  paused: boolean
+  paused: boolean,
+  confirm?: { confirmText?: string | null; passphrase?: string | null }
 ): Promise<SetGlobalPausedResult> {
   const value = paused ? "true" : "false";
+
+  // Resume is the highest-tier inline-confirm gate: both factors required.
+  if (!paused) {
+    const gate = await checkInlineConfirm({
+      confirmText: confirm?.confirmText ?? null,
+      passphrase: confirm?.passphrase ?? null,
+      requirePassphrase: true,
+    });
+    if (!gate.ok) return { ok: false, message: gate.message, paused: true };
+  }
+
   const updated_at = new Date();
   await db
     .insert(settings)
@@ -270,6 +360,15 @@ export async function setGlobalPaused(
       target: settings.key,
       set: { value, updated_at },
     });
+
+  if (!paused) {
+    await emitInlineConfirmAudit({
+      opType: "set_global_paused_false",
+      context: { value },
+      requirePassphrase: true,
+    });
+  }
+
   return {
     ok: true,
     message: paused

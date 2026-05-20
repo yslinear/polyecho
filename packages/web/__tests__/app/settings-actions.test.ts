@@ -1,46 +1,64 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 /**
- * setPolymarketProxy server action — incl. P0-4 SSRF guard.
+ * setPolymarketProxy server action — incl. P0-4 SSRF guard + P7d/R24 gate.
  *
  * Verifies the exact settings-row write contract:
- *  - empty value DELETEs the row (direct connection)
+ *  - empty value DELETEs the row (direct connection)  ← safe-direction, no gate
  *  - socks5:// is rejected with the precise message, no write
  *  - non-http(s) is rejected, no write
  *  - SSRF: loopback / RFC1918 / link-local / metadata / localhost / .local
  *    / .internal / ::1 are rejected with a zh-TW message, no write
- *  - a normal public https host UPSERTs { key:'polymarket_proxy_url',
- *    value:<bare string> }
+ *  - setting a NEW public URL UPSERTs { key:'polymarket_proxy_url',
+ *    value:<bare string> } ONLY when the inline-confirm phrase matches
  *
  * Drizzle (`@/lib/db`) is fully mocked: no DB, no network.
  */
 
 const onConflictDoUpdate = vi.fn().mockResolvedValue(undefined);
-const insertValues = vi.fn(() => ({ onConflictDoUpdate }));
+const insertReturning = vi.fn().mockResolvedValue([{ id: 1 }]);
+const insertValues = vi.fn(() => ({
+  onConflictDoUpdate,
+  returning: insertReturning,
+}));
 const insert = vi.fn(() => ({ values: insertValues }));
 const deleteWhere = vi.fn().mockResolvedValue(undefined);
 const del = vi.fn(() => ({ where: deleteWhere }));
+
+const selectLimit = vi.fn(() => Promise.resolve([]));
+const selectWhere = vi.fn(() => ({ limit: selectLimit }));
+const selectFrom = vi.fn(() => ({ where: selectWhere }));
+const select = vi.fn(() => ({ from: selectFrom }));
 
 vi.mock("@/lib/db", () => ({
   db: {
     insert: (...a: unknown[]) => insert(...a),
     delete: (...a: unknown[]) => del(...a),
+    select: (...a: unknown[]) => select(...a),
   },
 }));
 vi.mock("@/lib/env", () => ({ env: { POLYECHO_DB_URL_DRIZZLE: "stub" } }));
 
+const verifyPassphrase = vi.fn(async () => true);
+vi.mock("@/lib/passphrase", () => ({
+  verifyPassphrase: (...a: unknown[]) => verifyPassphrase(...a),
+}));
+
 import { setPolymarketProxy } from "@/app/settings/actions";
+
+const CONFIRM_PHRASE = "確認執行";
 
 describe("setPolymarketProxy", () => {
   beforeEach(() => {
     insert.mockClear();
     insertValues.mockClear();
     onConflictDoUpdate.mockClear().mockResolvedValue(undefined);
+    insertReturning.mockClear().mockResolvedValue([{ id: 1 }]);
     del.mockClear();
     deleteWhere.mockClear().mockResolvedValue(undefined);
   });
 
-  it("clears (deletes) the row when the value is empty", async () => {
+  it("clears (deletes) the row when the value is empty (safe-direction, no gate)", async () => {
     const res = await setPolymarketProxy("");
     expect(res.ok).toBe(true);
     expect(res.value).toBe("");
@@ -76,10 +94,21 @@ describe("setPolymarketProxy", () => {
     expect(insert).not.toHaveBeenCalled();
   });
 
-  it("upserts a bare string for a valid PUBLIC http URL", async () => {
+  it("rejects a valid URL without the inline-confirm phrase (no write)", async () => {
     const res = await setPolymarketProxy("http://203.0.113.10:8080");
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/確認執行/);
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("upserts a bare string for a valid PUBLIC http URL when the phrase matches", async () => {
+    const res = await setPolymarketProxy({
+      value: "http://203.0.113.10:8080",
+      confirmText: CONFIRM_PHRASE,
+    });
     expect(res.ok).toBe(true);
-    expect(insert).toHaveBeenCalledTimes(1);
+    // FIRST insert is the settings row (best-effort audit emit may follow).
+    expect(insert).toHaveBeenCalled();
     const row = insertValues.mock.calls[0][0] as Record<string, unknown>;
     expect(row.key).toBe("polymarket_proxy_url");
     expect(row.value).toBe("http://203.0.113.10:8080");
@@ -91,17 +120,21 @@ describe("setPolymarketProxy", () => {
     expect(conflict.set.value).toBe("http://203.0.113.10:8080");
   });
 
-  it("accepts a normal public https host", async () => {
-    const res = await setPolymarketProxy("https://proxy.example.com:3128");
+  it("accepts a normal public https host (with phrase)", async () => {
+    const res = await setPolymarketProxy({
+      value: "https://proxy.example.com:3128",
+      confirmText: CONFIRM_PHRASE,
+    });
     expect(res.ok).toBe(true);
-    expect(insert).toHaveBeenCalledTimes(1);
+    expect(insert).toHaveBeenCalled();
     const row = insertValues.mock.calls[0][0] as Record<string, unknown>;
     expect(row.value).toBe("https://proxy.example.com:3128");
   });
 
-  it("reads the value from FormData when given a form", async () => {
+  it("reads the value AND the confirmText from FormData when given a form", async () => {
     const fd = new FormData();
     fd.set("polymarket_proxy_url", "https://corp-proxy.example.net:8888");
+    fd.set("confirmText", CONFIRM_PHRASE);
     const res = await setPolymarketProxy(fd);
     expect(res.ok).toBe(true);
     const row = insertValues.mock.calls[0][0] as Record<string, unknown>;
