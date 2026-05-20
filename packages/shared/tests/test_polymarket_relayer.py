@@ -45,7 +45,6 @@ import pytest
 
 from polyecho.shared import constants
 from polyecho.shared.copytrading import (
-    LiveTradingLockedError,
     RedeemJobSpec,
     RedeemJobStatus,
     WalletBinding,
@@ -490,12 +489,12 @@ async def _key(_binding: WalletBinding) -> str:
 
 
 def _enable_lock(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Enable the live-lock chokepoint via env (same pattern as
-    :mod:`test_redeem_onchain`)."""
-    monkeypatch.setenv("POLYECHO_LIVE_TRADING", "true")
-    from polyecho.shared.config import get_settings
+    """Legacy no-op shim — the global trading lock was removed.
 
-    get_settings.cache_clear()
+    Retained so the existing test bodies that pass ``monkeypatch`` through
+    keep their argument list / call style.
+    """
+    del monkeypatch
 
 
 def test_sig0_eoa_path_unchanged_when_relayer_injected(
@@ -588,20 +587,3 @@ def test_sig2_without_relayer_fails_closed(
         run(client.redeem(_spec(is_neg_risk=False), binding=_SAFE))
 
 
-def test_live_lock_off_blocks_even_with_relayer(
-    fake_sdk: _FakeRelayClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Live-lock chokepoint MUST fire before any relayer or web3 call."""
-    monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
-    from polyecho.shared.config import get_settings
-
-    get_settings.cache_clear()
-    relayer = PolymarketRelayerClient(_creds())
-    client = Web3RedeemClient(
-        web3=_FakeWeb3(),
-        private_key_resolver=_key,
-        relayer=relayer,
-    )
-    with pytest.raises(LiveTradingLockedError):
-        run(client.redeem(_spec(is_neg_risk=False), binding=_SAFE))
-    assert fake_sdk.executed == []

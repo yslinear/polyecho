@@ -18,9 +18,10 @@ Surface area
 ------------
 This wrapper is the **trading** chokepoint only:
 
-* ``place_order`` / ``cancel_order`` — Phase-4 W2 deliverables (still
-  ``NotImplementedError``; gated by ``assert_live_allowed`` so they fail
-  closed when the HARD live lock is off).
+* ``place_order`` / ``cancel_order`` — Phase-4 W2 deliverables.  Per-op
+  confirmation lives at the operator layer (web ``dangerous-action`` +
+  account-import passphrase); these SDK methods dispatch directly to the
+  underlying py-clob-client-v2 call.
 
 The four read-only methods (``get_leaderboard``, ``get_user_activity``,
 ``get_positions``, ``get_orderbook``) are **retired stubs**: every
@@ -76,7 +77,6 @@ from py_clob_client_v2 import (  # type: ignore[import-untyped]
 )
 
 from polyecho.shared.config import get_settings
-from polyecho.shared.copytrading import assert_live_allowed
 
 #: Map our public ``order_type`` strings → SDK ``OrderType`` constants.
 #: Brief §2: copy-trades default to FOK (taker); GTC/FAK/GTD are accepted
@@ -396,16 +396,12 @@ class PolymarketClient:
             Response dict from CLOB including ``orderID`` and ``status``.
 
         Raises:
-            LiveTradingLockedError: If ``POLYECHO_LIVE_TRADING`` is off
-                                    (the HARD lock — checked FIRST).
-            ValueError:             If ``order_type`` is not one of
-                                    ``"FOK" / "FAK" / "GTC" / "GTD"`` —
-                                    raised *before* the live gate so a
-                                    typo never reaches the network.
+            ValueError: If ``order_type`` is not one of
+                ``"FOK" / "FAK" / "GTC" / "GTD"`` — raised *before*
+                dispatch so a typo never reaches the network.
         """
-        # Validate the order_type string up-front, BEFORE the live gate.
-        # A typo here is a programming bug, not a live-money decision;
-        # surface it loudly without burning the live-trading lock check.
+        # Validate the order_type string up-front.  A typo here is a
+        # programming bug; surface it loudly before any network call.
         try:
             sdk_order_type = _ORDER_TYPE_MAP[order_type]
         except KeyError as exc:
@@ -413,11 +409,6 @@ class PolymarketClient:
                 f"Unknown order_type {order_type!r}; expected one of "
                 f"{sorted(_ORDER_TYPE_MAP)}"
             ) from exc
-
-        # The single live-money chokepoint — MUST be first, before any
-        # irreversible work (brief: default-OFF hard lock).  Any
-        # irreversible side-effect below this line is gated.
-        assert_live_allowed("place_order")
 
         order_args = OrderArgs(
             token_id=token_id,
@@ -451,12 +442,7 @@ class PolymarketClient:
 
         Returns:
             Response dict confirming cancellation.
-
-        Raises:
-            LiveTradingLockedError: If ``POLYECHO_LIVE_TRADING`` is off.
         """
-        # Live-money chokepoint — first, before the SDK call.
-        assert_live_allowed("cancel_order")
         return cast(
             "dict[str, Any]",
             await self._run_sync(

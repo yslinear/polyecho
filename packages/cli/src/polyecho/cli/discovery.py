@@ -132,8 +132,7 @@ def promote(
 
     Sets ``candidate_leaders.user_status = 'following'`` for *wallet* — the
     same DB surface the web UI uses.  This does NOT move money: actual
-    copying still requires active ``follow_relations`` AND the host
-    ``POLYECHO_LIVE_TRADING`` env lock in the core engine.  Read of an
+    copying still requires active ``follow_relations``.  Read of an
     unknown / already-rejected wallet is reported, not silently ignored.
     """
     from sqlalchemy import select
@@ -184,8 +183,7 @@ def promote(
             f"[bold]{wallet_norm}[/bold]\n"
             f"user_status  {prev} → [bold green]{now}[/bold green]\n"
             "[dim]This is a safe-write only. Real copying still requires "
-            "active follow_relations AND POLYECHO_LIVE_TRADING for the core "
-            "engine.[/dim]",
+            "active follow_relations.[/dim]",
             title="[dim]polyecho discovery promote[/dim]",
             border_style="green",
         )

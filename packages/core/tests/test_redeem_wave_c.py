@@ -165,9 +165,9 @@ async def test_poller_failsoft_on_datasource_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. Default double-lock OFF — zero on-chain, idempotent (safety proof)
+# 2. ``auto_redeem`` off ⇒ zero on-chain, idempotent (safety proof)
 # ---------------------------------------------------------------------------
-async def test_default_lock_off_zero_onchain_and_idempotent(
+async def test_auto_redeem_off_zero_onchain_and_idempotent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _disable_live(monkeypatch)
@@ -191,7 +191,7 @@ async def test_default_lock_off_zero_onchain_and_idempotent(
     w = RedeemWorker(
         candidate_source=candidates,
         job_upserter=upsert,
-        auto_redeem=True,  # live still off ⇒ double-lock STILL closed
+        auto_redeem=False,
         redeem_client=client,
         binding_for=lambda _a: _aw(_EOA),
     )
@@ -202,30 +202,6 @@ async def test_default_lock_off_zero_onchain_and_idempotent(
     assert all(o.result.status is RedeemJobStatus.PENDING for o in outs)
     assert all(o.result.skip_reason is SkipReason.LIVE_LOCKED for o in outs)
     # PROOF: nothing was ever built/signed/sent on-chain.
-    assert fake.sent == []
-
-
-async def test_auto_redeem_off_also_locks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _enable_live(monkeypatch)  # live ON but auto_redeem OFF ⇒ still locked
-
-    async def candidates() -> list[RedeemCandidate]:
-        return [RedeemCandidate(ACCT, "0xc", 0, False)]
-
-    async def upsert(_s: RedeemJobSpec) -> bool:
-        return True
-
-    fake = _FakeWeb3()
-    w = RedeemWorker(
-        candidate_source=candidates,
-        job_upserter=upsert,
-        auto_redeem=False,
-        redeem_client=Web3RedeemClient(web3=fake, private_key_resolver=_key),
-        binding_for=lambda _a: _aw(_EOA),
-    )
-    outs = await w.poll_once()
-    assert outs[0].result.skip_reason is SkipReason.LIVE_LOCKED
     assert fake.sent == []
 
 

@@ -578,60 +578,32 @@ def test_fifo_sell_match_oldest_first() -> None:
 
 
 # ---------------------------------------------------------------------------
-# HARD live lock — default OFF ⇒ ZERO placement (the central proof)
+# Audit-only path — OrderExecutor without a client_factory records skips
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_live_lock_default_off_places_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default (POLYECHO_LIVE_TRADING unset) ⇒ NO order placed, ever."""
-    from polyecho.shared.config import get_settings
-
-    monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
-    get_settings.cache_clear()
-
-    # A client_factory that MUST never be called in dry-run.
-    called = {"n": 0}
-
-    async def forbidden_factory(_e: EvaluatedCopy):  # type: ignore[no-untyped-def]
-        called["n"] += 1
-        raise AssertionError("client_factory must not run when live lock is off")
-
+async def test_executor_without_client_factory_records_skip() -> None:
+    """An ``OrderExecutor`` with no ``client_factory`` configured records
+    the intended order as an audit-only skip (no SDK call)."""
     ev = _eval(_copy_decision(side=TradeSide.BUY))
-    execu = OrderExecutor(client_factory=forbidden_factory)
+    execu = OrderExecutor()
     res = await execu.execute(ev)
 
     assert res.placed is False
     assert res.skip_reason is SkipReason.LIVE_LOCKED
-    assert called["n"] == 0  # zero placement work
 
 
 @pytest.mark.asyncio
-async def test_engine_dry_run_records_live_locked_skip() -> None:
+async def test_engine_audit_only_records_skip() -> None:
+    """The default ``TraderCore`` wires an audit-only ``OrderExecutor``
+    (no ``client_factory``) so detected trades are recorded but not
+    placed."""
     core = TraderCore(follows=[_follow()])
     await core.process_detected(_trade(side="BUY", price=0.5, size=100.0))
     assert core.stats.placed == 0
     assert core.stats.copied == 1
-    # The intended order is logged as a LIVE_LOCKED skip (taxonomy).
     assert any(r == SkipReason.LIVE_LOCKED.value for r, _ in core.skips)
-
-
-@pytest.mark.asyncio
-async def test_place_order_chokepoint_raises_when_locked(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The shared chokepoint itself fails closed (defence in depth)."""
-    from polyecho.shared.config import get_settings
-    from polyecho.shared.copytrading import LiveTradingLockedError
-    from polyecho.shared.polymarket.client import PolymarketClient
-
-    monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
-    get_settings.cache_clear()
-    client = PolymarketClient(
-        signature_type=0, funder=LEADER, creds=None, private_key=None
-    )
-    with pytest.raises(LiveTradingLockedError):
-        await client.place_order(token_id="t", side="BUY", price=0.5, size=1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -680,12 +652,11 @@ async def test_reconcile_backfills_after_cursor() -> None:
 
 
 @pytest.mark.asyncio
-async def test_redeem_idempotent_and_live_locked(monkeypatch: pytest.MonkeyPatch) -> None:
-    from polyecho.shared.config import get_settings
+async def test_redeem_idempotent_and_auto_redeem_off() -> None:
+    """``auto_redeem=False`` ⇒ candidates are upserted (idempotent on
+    ``(account, condition, outcome)``) but the worker submits nothing
+    on-chain and records each result as a PENDING / LIVE_LOCKED skip."""
     from polyecho.shared.copytrading import RedeemJobStatus
-
-    monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
-    get_settings.cache_clear()
 
     seen: set[tuple[str, str, int]] = set()
 
@@ -703,13 +674,13 @@ async def test_redeem_idempotent_and_live_locked(monkeypatch: pytest.MonkeyPatch
         return True
 
     w = RedeemWorker(
-        candidate_source=candidates, job_upserter=upsert, auto_redeem=True
+        candidate_source=candidates, job_upserter=upsert, auto_redeem=False
     )
     outs = await w.poll_once()
     assert len(outs) == 2
     assert outs[0].created is True
     assert outs[1].created is False  # idempotent on (account, condition, outcome)
-    # Live lock off ⇒ nothing submitted, all PENDING + LIVE_LOCKED.
+    # ``auto_redeem`` off ⇒ nothing submitted, all PENDING + LIVE_LOCKED.
     assert all(o.result.status is RedeemJobStatus.PENDING for o in outs)
     assert all(o.result.skip_reason is SkipReason.LIVE_LOCKED for o in outs)
 
@@ -1318,17 +1289,17 @@ def _fake_shared_health(
         *,
         phase: str,
         datasource: str,
-        live_trading: bool,
         counters: dict[str, Any],
     ) -> None:
         # F0 stamps ``ts`` itself (keyword-only signature, no ``ts`` arg);
         # the caller passes none, so the recorder captures none.
+        # R24 (2026-05-20): live_trading dropped from the shared write_heartbeat
+        # signature along with the global trading-lock chokepoint.
         hb_writes.append(
             {
                 "kind": kind,
                 "phase": phase,
                 "datasource": datasource,
-                "live_trading": live_trading,
                 "counters": counters,
             }
         )
@@ -1407,7 +1378,8 @@ async def test_task1_heartbeat_uses_canonical_shared_helper() -> None:
     # F0 stamps ``ts`` itself (keyword-only signature, no ``ts`` arg) so the
     # caller passes none and the fake recorder captures none — ts is
     # asserted on the legacy ``last_heartbeat`` mirror below instead.
-    assert isinstance(w["live_trading"], bool)
+    # R24 (2026-05-20): live_trading field removed from heartbeat alongside
+    # the global trading-lock chokepoint (per polyecho-known-gaps R24).
     assert set(w["counters"]) >= {"detected", "copied", "skipped", "placed"}
     # Semantically identical: canonical counters mirror the legacy mirror.
     assert core.last_heartbeat is not None

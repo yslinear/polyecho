@@ -265,10 +265,12 @@ async def test_build_redeem_worker_returns_real_worker() -> None:
     assert isinstance(w, RedeemWorker)
 
 
-async def test_redeem_worker_locks_off_zero_onchain(
+async def test_redeem_worker_auto_redeem_off_skips_onchain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _disable_live(monkeypatch)  # BOTH locks off (default)
+    """``auto_redeem=False`` ⇒ the worker logs intent and submits nothing
+    on-chain (no key resolver call, no fake web3 traffic)."""
+    _disable_live(monkeypatch)
 
     fake = _FakeWeb3()
 
@@ -276,7 +278,7 @@ async def test_redeem_worker_locks_off_zero_onchain(
         return [RedeemCandidate(ACCT, "0xcond", 0, False)]
 
     async def _key(_b: WalletBinding) -> str:  # must NEVER be called
-        raise AssertionError("key resolver reached with locks off")
+        raise AssertionError("key resolver reached with auto_redeem off")
 
     from polyecho.shared.polymarket.redeem import Web3RedeemClient
 
@@ -294,7 +296,7 @@ async def test_redeem_worker_locks_off_zero_onchain(
         redeem_client=Web3RedeemClient(
             web3=fake, private_key_resolver=_key
         ),
-        auto_redeem=True,  # live still OFF ⇒ double-lock STILL closed
+        auto_redeem=False,
     )
     outs = await worker.poll_once()
     assert len(outs) == 1

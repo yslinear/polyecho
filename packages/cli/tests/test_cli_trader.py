@@ -4,16 +4,10 @@ Tests for ``polyecho trader`` — Phase-4 Wave-2 trader controls.
 Design
 ------
 * importlib mode (no ``tests/__init__.py``).
-* NO real network / DB: ``session_scope`` is a fake async-CM; crypto is
-  patched.  The 5-second countdown is patched to a no-op so the suite is
-  deterministic and never sleeps.
-* ``status`` renders LIVE-TRADING: LOCKED when the live lock is off.
+* NO real network / DB: ``session_scope`` is a fake async-CM.
+* ``status`` renders engine liveness + skip summary.
 * ``pause-all`` / ``resume-all`` issue the right bulk status UPDATE.
 * ``pause`` / ``resume`` scope the UPDATE to one leader.
-* ``enable-live``: wrong passphrase aborts (nonzero exit, NO ack row
-  written, passphrase never printed); correct passphrase writes the audit
-  row AND prints the host-env-var requirement; the passphrase is never
-  echoed in any path.
 * ``skips`` / ``redeems`` render and filter.
 """
 
@@ -33,25 +27,14 @@ from polyecho.cli.__main__ import app
 runner = CliRunner()
 
 _LEADER = "0xLeAdEr0000000000000000000000000000000001"
-_PASSPHRASE = "correct horse battery staple"
 
 
 @pytest.fixture(autouse=True)
-def _no_countdown(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Patch the 5s countdown to a no-op — deterministic, no real sleep."""
-    monkeypatch.setattr("polyecho.cli.trader._countdown", lambda *a, **k: None)
+def _default_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default DB URL so config parse never fails on import."""
     monkeypatch.setenv(
         "POLYECHO_DB_URL", "postgresql+asyncpg://u:p@localhost/test"
     )
-
-
-@pytest.fixture(autouse=True)
-def _live_lock_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default: live lock OFF (the HARD default)."""
-    monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
-    from polyecho.shared.config import get_settings
-
-    get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -106,20 +89,11 @@ def _setting_row(key: str, value: Any) -> MagicMock:
     return s
 
 
-def _account_row(name: str = "alice", blob: bytes = b"\x00" * 80) -> MagicMock:
-    a = MagicMock()
-    a.name = name
-    a.eoa_address = "0x" + "ab" * 20
-    a.encrypted_private_key = blob
-    a.created_at = "2026-05-17T00:00:00+00:00"
-    return a
-
-
 # ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
 class TestStatus:
-    def test_status_locked_when_live_off(self) -> None:
+    def test_status_renders_follow_counts(self) -> None:
         scope = _make_scope(
             scalar_one=None,
             rows=[("active", 3), ("paused", 1)],
@@ -129,8 +103,6 @@ class TestStatus:
                 app, ["trader", "status"], env={"COLUMNS": "200"}
             )
         assert result.exit_code == 0, result.output
-        assert "LIVE-TRADING: LOCKED" in result.output
-        assert "UNLOCKED" not in result.output
         assert "3 active" in result.output
         assert "1 paused" in result.output
 
@@ -164,7 +136,6 @@ class TestStatus:
                 app, ["trader", "status"], env={"COLUMNS": "200"}
             )
         assert result.exit_code == 0, result.output
-        assert "LIVE-TRADING: LOCKED" in result.output
         assert "ALIVE" in result.output
         assert "data_unavailable" in result.output
 
@@ -238,187 +209,13 @@ class TestBulkPauseResume:
 
 
 # ---------------------------------------------------------------------------
-# resume-all live-mode danger gate (P3 hardening)
-# ---------------------------------------------------------------------------
-class TestResumeAllLiveGate:
-    """When LIVE-TRADING is UNLOCKED, resume-all must require --yes/confirm
-    (mirrors the danger UX). pause-all is NEVER gated."""
-
-    def test_resume_all_blocked_without_yes_when_live_nontty(self) -> None:
-        """live ON + no --yes + non-TTY (CliRunner) ⇒ refuse, exit 2, the
-        bulk UPDATE never runs."""
-        scope = _make_scope(rowcount=9)
-        with (
-            patch(
-                "polyecho.shared.copytrading.is_live_enabled",
-                return_value=True,
-            ),
-            patch("polyecho.shared.db.session_scope", scope),
-        ):
-            result = runner.invoke(app, ["trader", "resume-all"])
-        assert result.exit_code == 2, result.output
-        assert "LIVE-TRADING is UNLOCKED" in result.output
-        # The status UPDATE was never issued.
-        assert scope._captured["executed"] == []
-
-    def test_resume_all_allowed_with_yes_when_live(self) -> None:
-        """live ON + --yes ⇒ proceeds (explicit operator intent)."""
-        scope = _make_scope(rowcount=3)
-        with (
-            patch(
-                "polyecho.shared.copytrading.is_live_enabled",
-                return_value=True,
-            ),
-            patch("polyecho.shared.db.session_scope", scope),
-        ):
-            result = runner.invoke(app, ["trader", "resume-all", "--yes"])
-        assert result.exit_code == 0, result.output
-        assert "Resumed 3" in result.output
-
-    def test_resume_all_env_var_bypasses_gate_when_live(self) -> None:
-        scope = _make_scope(rowcount=2)
-        with (
-            patch(
-                "polyecho.shared.copytrading.is_live_enabled",
-                return_value=True,
-            ),
-            patch("polyecho.shared.db.session_scope", scope),
-            patch.dict(
-                "os.environ",
-                {"POLYECHO_TRADER_RESUME_YES": "1"},
-                clear=False,
-            ),
-        ):
-            result = runner.invoke(app, ["trader", "resume-all"])
-        assert result.exit_code == 0, result.output
-        assert "Resumed 2" in result.output
-
-    def test_resume_all_unguarded_when_live_lock_off(self) -> None:
-        """live OFF ⇒ NO gate even without --yes (harmless safe-write)."""
-        scope = _make_scope(rowcount=5)
-        with (
-            patch(
-                "polyecho.shared.copytrading.is_live_enabled",
-                return_value=False,
-            ),
-            patch("polyecho.shared.db.session_scope", scope),
-        ):
-            result = runner.invoke(app, ["trader", "resume-all"])
-        assert result.exit_code == 0, result.output
-        assert "Resumed 5" in result.output
-
-    def test_pause_all_never_gated_even_when_live(self) -> None:
-        """pause-all stays unguarded regardless of the live lock."""
-        scope = _make_scope(rowcount=6)
-        with (
-            patch(
-                "polyecho.shared.copytrading.is_live_enabled",
-                return_value=True,
-            ),
-            patch("polyecho.shared.db.session_scope", scope),
-        ):
-            result = runner.invoke(app, ["trader", "pause-all"])
-        assert result.exit_code == 0, result.output
-        assert "Paused 6" in result.output
-
-
-# ---------------------------------------------------------------------------
-# R15 #5 — per-leader `resume` MUST be live-gated like `resume-all`
-# (otherwise an operator bypasses the live gate one leader at a time).
-# `pause` (per-leader) stays UNGATED.
-# ---------------------------------------------------------------------------
-class TestPerLeaderResumeLiveGate:
-    def test_per_leader_resume_blocked_without_yes_when_live_nontty(
-        self,
-    ) -> None:
-        """live ON + no --yes + non-TTY ⇒ refuse (exit 2); UPDATE never
-        runs — same gate as resume-all (R15 #5 bypass closed)."""
-        scope = _make_scope(rowcount=4)
-        with (
-            patch(
-                "polyecho.shared.copytrading.is_live_enabled",
-                return_value=True,
-            ),
-            patch("polyecho.shared.db.session_scope", scope),
-        ):
-            result = runner.invoke(app, ["trader", "resume", _LEADER])
-        assert result.exit_code == 2, result.output
-        assert "LIVE-TRADING is UNLOCKED" in result.output
-        assert scope._captured["executed"] == []
-
-    def test_per_leader_resume_allowed_with_yes_when_live(self) -> None:
-        scope = _make_scope(rowcount=1)
-        with (
-            patch(
-                "polyecho.shared.copytrading.is_live_enabled",
-                return_value=True,
-            ),
-            patch("polyecho.shared.db.session_scope", scope),
-        ):
-            result = runner.invoke(
-                app, ["trader", "resume", _LEADER, "--yes"]
-            )
-        assert result.exit_code == 0, result.output
-        assert "Resumed 1" in result.output
-
-    def test_per_leader_resume_env_var_bypass_when_live(self) -> None:
-        scope = _make_scope(rowcount=2)
-        with (
-            patch(
-                "polyecho.shared.copytrading.is_live_enabled",
-                return_value=True,
-            ),
-            patch("polyecho.shared.db.session_scope", scope),
-            patch.dict(
-                "os.environ",
-                {"POLYECHO_TRADER_RESUME_YES": "1"},
-                clear=False,
-            ),
-        ):
-            result = runner.invoke(app, ["trader", "resume", _LEADER])
-        assert result.exit_code == 0, result.output
-        assert "Resumed 2" in result.output
-
-    def test_per_leader_resume_unguarded_when_live_off(self) -> None:
-        """live OFF ⇒ no gate even without --yes (harmless safe-write)."""
-        scope = _make_scope(rowcount=3)
-        with (
-            patch(
-                "polyecho.shared.copytrading.is_live_enabled",
-                return_value=False,
-            ),
-            patch("polyecho.shared.db.session_scope", scope),
-        ):
-            result = runner.invoke(app, ["trader", "resume", _LEADER])
-        assert result.exit_code == 0, result.output
-        assert "Resumed 3" in result.output
-
-    def test_per_leader_pause_never_gated_even_when_live(self) -> None:
-        """`pause` (per-leader) stays UNGATED regardless of the live
-        lock — pausing is always safe."""
-        scope = _make_scope(rowcount=5)
-        with (
-            patch(
-                "polyecho.shared.copytrading.is_live_enabled",
-                return_value=True,
-            ),
-            patch("polyecho.shared.db.session_scope", scope),
-        ):
-            result = runner.invoke(app, ["trader", "pause", _LEADER])
-        assert result.exit_code == 0, result.output
-        assert "Paused 5" in result.output
-
-
-# ---------------------------------------------------------------------------
 # start  (handoff guidance + optional dry-run check)
 # ---------------------------------------------------------------------------
 class TestStart:
-    def test_start_explains_handoff_and_dry_run(self) -> None:
+    def test_start_explains_handoff(self) -> None:
         result = runner.invoke(app, ["trader", "start"], env={"COLUMNS": "200"})
         assert result.exit_code == 0, result.output
         assert "docker compose up -d core" in result.output
-        assert "DRY-RUN" in result.output
-        assert "POLYECHO_LIVE_TRADING" in result.output
 
     def test_start_check_probes_follow_counts(self) -> None:
         scope = _make_scope(rows=[("active", 5), ("paused", 0)])
@@ -428,133 +225,6 @@ class TestStart:
             )
         assert result.exit_code == 0, result.output
         assert "5 active" in result.output
-        assert "no orders placed" in result.output
-
-
-# ---------------------------------------------------------------------------
-# enable-live  — the dangerous ACK ritual (CLI-only)
-# ---------------------------------------------------------------------------
-class TestEnableLive:
-    def test_wrong_passphrase_aborts_no_ack(self) -> None:
-        scope = _make_scope(scalars_list=[_account_row("alice")])
-        with (
-            patch("polyecho.shared.db.session_scope", scope),
-            patch(
-                "polyecho.shared.crypto.decrypt_private_key",
-                side_effect=ValueError("bad passphrase"),
-            ),
-        ):
-            result = runner.invoke(
-                app,
-                ["trader", "enable-live"],
-                input="wrong-pass\n",
-                env={"COLUMNS": "200"},
-            )
-        assert result.exit_code != 0
-        assert "FAILED" in result.output
-        assert "wrong-pass" not in result.output  # secret never echoed
-        # Only the account-load SELECT ran; NO ack write/Setting add.
-        session = scope._captured["session"]
-        session.add.assert_not_called()
-        # No INSERT/UPDATE on settings was executed.
-        for stmt in scope._captured["executed"]:
-            assert "live_trading_ack" not in str(stmt)
-
-    def test_correct_passphrase_writes_ack_and_prints_env_requirement(
-        self,
-    ) -> None:
-        scope = _make_scope(
-            scalars_list=[_account_row("alice")],
-            scalar_one=None,  # no existing ack row → session.add path
-        )
-        with (
-            patch("polyecho.shared.db.session_scope", scope),
-            patch(
-                "polyecho.shared.crypto.decrypt_private_key",
-                return_value="0xdeadbeef",
-            ),
-        ):
-            result = runner.invoke(
-                app,
-                ["trader", "enable-live"],
-                input=f"{_PASSPHRASE}\n",
-                env={"COLUMNS": "200"},
-            )
-        assert result.exit_code == 0, result.output
-        assert "ACK recorded" in result.output
-        # Crystal-clear it is ACK-only and names the binding env var.
-        assert "AUDIT ACK ONLY" in result.output
-        assert "POLYECHO_LIVE_TRADING=1" in result.output
-        assert "assert_live_allowed" in result.output
-        # Secret + decrypted key never printed.
-        assert _PASSPHRASE not in result.output
-        assert "0xdeadbeef" not in result.output
-        # The audit Setting row was added.
-        added = scope._captured["session"].add.call_args[0][0]
-        assert added.key == "live_trading_ack"
-        assert added.value["by"] == "alice"
-        assert "at" in added.value
-
-    def test_ack_row_and_panel_share_one_timestamp(self) -> None:
-        """R15 #2: the stored ack `at` and the printed panel timestamp
-        must be byte-identical (a single _now() capture, not two). With a
-        MONOTONIC fake _now() two separate calls would diverge — this
-        test catches exactly that regression."""
-        ticking = {"n": 0}
-
-        def _ticking_now() -> datetime:
-            ticking["n"] += 1
-            # Every call returns a DIFFERENT instant — so if production
-            # ever calls _now() twice the row and the panel disagree.
-            return datetime(2026, 5, 18, 12, 0, ticking["n"], tzinfo=UTC)
-
-        scope = _make_scope(
-            scalars_list=[_account_row("alice")],
-            scalar_one=None,
-        )
-        with (
-            patch("polyecho.shared.db.session_scope", scope),
-            patch(
-                "polyecho.shared.crypto.decrypt_private_key",
-                return_value="0xkey",
-            ),
-            patch("polyecho.cli.trader._now", side_effect=_ticking_now),
-        ):
-            result = runner.invoke(
-                app,
-                ["trader", "enable-live"],
-                input=f"{_PASSPHRASE}\n",
-                env={"COLUMNS": "200"},
-            )
-        assert result.exit_code == 0, result.output
-        added = scope._captured["session"].add.call_args[0][0]
-        stored_at = added.value["at"]
-        # The EXACT stored timestamp must appear in the printed panel.
-        assert stored_at in result.output, (stored_at, result.output)
-        # _now() was captured exactly ONCE for the ack (any extra calls
-        # are unrelated, e.g. none here) — proven by the row/panel match
-        # despite a monotonically-advancing clock.
-        assert datetime.fromisoformat(stored_at) == datetime(
-            2026, 5, 18, 12, 0, 1, tzinfo=UTC
-        )
-
-    def test_no_account_aborts(self) -> None:
-        scope = _make_scope(scalars_list=[], scalars_first=None)
-        with patch("polyecho.shared.db.session_scope", scope):
-            result = runner.invoke(
-                app, ["trader", "enable-live"], env={"COLUMNS": "200"}
-            )
-        assert result.exit_code != 0
-        assert "No account with an encrypted key" in result.output
-
-    def test_disable_live_clears_ack(self) -> None:
-        scope = _make_scope(rowcount=1)
-        with patch("polyecho.shared.db.session_scope", scope):
-            result = runner.invoke(app, ["trader", "disable-live"])
-        assert result.exit_code == 0, result.output
-        assert "Cleared" in result.output
-        compiled = str(scope._captured["executed"][0]).lower()
-        assert "delete from settings" in compiled
 
 
 # ---------------------------------------------------------------------------

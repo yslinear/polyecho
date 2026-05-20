@@ -56,7 +56,6 @@ from polyecho.shared.copytrading import (
     Decision,
     DecisionOutcome,
     EvaluatedCopy,
-    LiveTradingLockedError,
     RedeemJobSpec,
     RedeemJobStatus,
     RedeemResult,
@@ -467,27 +466,6 @@ async def test_eoa_redeem_neg_risk_uses_wrapped_collateral(
     # NegRisk ⇒ WrappedCollateral, NOT pUSD (and the two differ).
     assert coll == collateral_for(is_neg_risk=True)
     assert coll != collateral_for(is_neg_risk=False)
-
-
-async def test_eoa_redeem_locked_off_makes_zero_onchain_calls(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The chokepoint: with the live lock OFF, redeem() raises BEFORE any
-    on-chain call (assert_live_allowed first) — proof the EOA path is
-    fail-closed even if reached directly."""
-    _disable_live(monkeypatch)
-    fake = _RecordingWeb3()
-    client = Web3RedeemClient(web3=fake, private_key_resolver=_key)
-    spec = RedeemJobSpec(
-        account_id=ACCT,
-        condition_id="0xc",
-        outcome_index=0,
-        index_set=1,
-        is_neg_risk=False,
-    )
-    with pytest.raises(LiveTradingLockedError):  # the chokepoint
-        await client.redeem(spec, binding=_EOA)
-    assert fake.sent == []  # zero on-chain calls with the lock off
 
 
 # ===========================================================================

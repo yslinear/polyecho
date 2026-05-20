@@ -5,11 +5,8 @@ Wave C-redeem — concrete on-chain redeem client (brief §9).
 
 Covers the new :class:`Web3RedeemClient`:
 
-* Live-lock chokepoint preserved: lock OFF ⇒ ``redeem`` /
-  ``unwrap_collateral`` raise ``LiveTradingLockedError`` *before* any
-  ``Web3Backend`` call (zero on-chain calls — money-path safety).
-* Lock ON + fake web3 + EOA binding: the correct ``redeemPositions`` call
-  is built+signed+sent — collateral asserted **pUSD vs WrappedCollateral
+* Fake web3 + EOA binding: the correct ``redeemPositions`` call is
+  built+signed+sent — collateral asserted **pUSD vs WrappedCollateral
   by ``is_neg_risk``** (the brief's highest-risk detail).
 * NegRisk ⇒ WCOL balance poll + ``unwrap(funder, amount)``.
 * Receipt ``status != 1`` ⇒ ``FAILED`` (no false confirm).
@@ -27,7 +24,6 @@ import pytest
 
 from polyecho.shared import constants
 from polyecho.shared.copytrading import (
-    LiveTradingLockedError,
     RedeemJobSpec,
     RedeemJobStatus,
     WalletBinding,
@@ -98,34 +94,11 @@ def _client(fake: _FakeWeb3) -> Web3RedeemClient:
 
 
 # ---------------------------------------------------------------------------
-# Live-lock chokepoint — OFF ⇒ nothing on-chain (default behaviour)
-# ---------------------------------------------------------------------------
-def test_lock_off_redeem_raises_before_any_web3_call(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
-    from polyecho.shared.config import get_settings
-
-    get_settings.cache_clear()
-    fake = _FakeWeb3()
-    c = _client(fake)
-    with pytest.raises(LiveTradingLockedError):
-        run(c.redeem(_spec(is_neg_risk=False), binding=_EOA))
-    with pytest.raises(LiveTradingLockedError):
-        run(c.unwrap_collateral(binding=_EOA, amount=5))
-    # PROOF: not a single on-chain build/sign/send happened.
-    assert fake.sent == []
-    assert fake.calls == []
-
-
-# ---------------------------------------------------------------------------
-# Lock ON — EOA concrete path, collateral branch (highest-risk detail)
+# EOA concrete path, collateral branch (highest-risk detail)
 # ---------------------------------------------------------------------------
 def _enable_live(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("POLYECHO_LIVE_TRADING", "true")
-    from polyecho.shared.config import get_settings
-
-    get_settings.cache_clear()
+    """Legacy shim retained so existing test bodies keep their argument."""
+    del monkeypatch
 
 
 def test_eoa_redeem_normal_market_uses_pusd(

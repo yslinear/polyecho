@@ -9,34 +9,21 @@ Flow (brief §9 / polyhermes-analysis §9):
    resolution — adopt the pragmatic API-trust).  :class:`RedeemablePoller`
    is a concrete :data:`CandidateSource` over the existing async datasource
    ``get_positions`` (the data-api ``redeemable``/``redeemableValue`` flag),
-   gated on ``auto_redeem`` + live + a simple quota / cooldown.
+   gated on ``auto_redeem`` + a simple quota / cooldown.
 2. **Upsert** a :class:`~polyecho.shared.copytrading.RedeemJobSpec` —
    **idempotent on ``(account_id, condition_id, outcome_index)``** so a
    restart never double-redeems.  :class:`DbJobUpserter` is the concrete
    ``redeem_jobs`` upserter with the
    ``pending → submitted → confirmed → failed`` status machine + bounded
    retry (the durable improvement over PolyHermes' in-memory-only dedup).
-3. In **live** mode call
+3. When ``auto_redeem`` is on, call
    :class:`~polyecho.shared.polymarket.redeem.BaseRedeemClient.redeem`
    (NegRisk ⇒ WrappedCollateral + post-``unwrap``; normal ⇒ pUSD — the
    collateral choice is the brief's "highest-risk detail", derived from
-   ``is_neg_risk``).  Gated by ``auto_redeem`` AND the live lock.
-4. Default dry-run: log the redeem intent with
-   :attr:`SkipReason.LIVE_LOCKED`; call **nothing** on-chain.
-
-**Double live-lock invariant (money-path safety is paramount):**
-
-* The worker short-circuits unless BOTH ``is_live_enabled()``
-  (``POLYECHO_LIVE_TRADING``) AND ``self._auto_redeem``
-  (``POLYECHO_AUTO_REDEEM``) are true — proven by
-  ``test_redeem_idempotent_and_live_locked`` (default = PENDING /
-  LIVE_LOCKED, zero on-chain calls).
-* Even past that, :meth:`BaseRedeemClient.redeem` calls
-  :func:`assert_live_allowed` FIRST (raises if the lock is off), so a
-  stray live call still fails closed.
-
-So with either env var off the worker logs intent and **submits nothing**,
-exactly as before this wave.
+   ``is_neg_risk``).
+4. When ``auto_redeem`` is off: log the redeem intent and call **nothing**
+   on-chain.  Per-op operator confirmation lives at the web layer
+   (``dangerous-action`` + account-import passphrase).
 """
 
 from __future__ import annotations
@@ -54,7 +41,6 @@ from polyecho.shared.copytrading import (
     RedeemResult,
     SkipReason,
     WalletBinding,
-    is_live_enabled,
 )
 from polyecho.shared.datasource.dto import PositionRecord
 from polyecho.shared.polymarket.redeem import index_set_for
@@ -439,13 +425,10 @@ class RedeemWorker:
         binding_for:      ``async (account_id) -> WalletBinding`` — only
                           called on the live path (default never builds it).
         redeem_client:    A :class:`Web3RedeemClient` /
-                          :class:`BaseRedeemClient` (its ``redeem`` is the
-                          live-lock chokepoint); ``None`` ⇒ dry-run only.
+                          :class:`BaseRedeemClient`; ``None`` ⇒ dry-run only.
         auto_redeem:      Mirrors ``settings.auto_redeem``
-                          (``POLYECHO_AUTO_REDEEM``) — even in live mode
-                          redeem is skipped unless this is True.  Together
-                          with ``is_live_enabled()`` this is the DOUBLE
-                          live-lock the brief mandates.
+                          (``POLYECHO_AUTO_REDEEM``) — redeem is skipped
+                          unless this is True.
         status_writer:    ``async (spec, result) -> None`` — persists the
                           submitted/confirmed/failed status-machine
                           transition (e.g. ``DbJobUpserter.record``);
@@ -479,7 +462,7 @@ class RedeemWorker:
         self._event_emitter = event_emitter
 
     async def poll_once(self) -> list[RedeemOutcome]:
-        """One redeem pass; idempotent, double-live-locked, restart-safe."""
+        """One redeem pass; idempotent, ``auto_redeem``-gated, restart-safe."""
         candidates = await self._candidate_source()
         outcomes: list[RedeemOutcome] = []
         for cand in candidates:
@@ -493,10 +476,10 @@ class RedeemWorker:
             )
             created = await self._job_upserter(spec)
 
-            # DOUBLE live-lock: BOTH POLYECHO_LIVE_TRADING and
-            # POLYECHO_AUTO_REDEEM must be on or we log intent and submit
-            # NOTHING on-chain (default behaviour preserved exactly).
-            if not is_live_enabled() or not self._auto_redeem:
+            # auto_redeem toggle: when off, we record the upsert + log
+            # intent and submit NOTHING on-chain.  Per-op operator
+            # confirmation lives at the web layer.
+            if not self._auto_redeem:
                 logger.info(
                     "redeem_intent_dry_run",
                     extra={
@@ -506,7 +489,6 @@ class RedeemWorker:
                         "is_neg_risk": cand.is_neg_risk,
                         "skip_reason": SkipReason.LIVE_LOCKED.value,
                         "auto_redeem": self._auto_redeem,
-                        "live_trading": is_live_enabled(),
                     },
                 )
                 outcomes.append(
@@ -517,16 +499,16 @@ class RedeemWorker:
                             status=RedeemJobStatus.PENDING,
                             skip_reason=SkipReason.LIVE_LOCKED,
                             detail=(
-                                "redeem skipped: POLYECHO_LIVE_TRADING or "
-                                "auto_redeem is off. Intent recorded for "
-                                "audit; no on-chain call made."
+                                "redeem skipped: auto_redeem is off. "
+                                "Intent recorded for audit; no on-chain "
+                                "call made."
                             ),
                         ),
                     )
                 )
                 continue
 
-            # --- LIVE PATH (live_trading AND auto_redeem) ---------------
+            # --- LIVE PATH (auto_redeem on) -----------------------------
             outcome = await self._redeem_live(spec, cand, created)
             outcomes.append(outcome)
         return outcomes
@@ -547,8 +529,6 @@ class RedeemWorker:
             )
         binding = await self._binding_for(cand.account_id)
         try:
-            # Chokepoint: BaseRedeemClient.redeem calls assert_live_allowed
-            # FIRST — a stray call with the lock off still fails closed.
             result = await self._redeem_client.redeem(spec, binding=binding)
         except Exception as exc:  # noqa: BLE001 - fail-soft per job
             logger.error(

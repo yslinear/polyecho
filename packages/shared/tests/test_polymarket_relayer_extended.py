@@ -17,7 +17,6 @@ import json
 import sys
 import types
 from typing import Any
-from unittest.mock import patch
 
 import httpx
 import pytest
@@ -603,10 +602,5 @@ class TestNoSig0OrSig2Regression:
             wallet_mode="magic",
             derived=True,
         )
-        # Live-lock must be on for the chokepoint not to override.
-        with patch.dict("os.environ", {"POLYECHO_LIVE_TRADING": "1"}):
-            from polyecho.shared.config import get_settings
-
-            get_settings.cache_clear()
-            with pytest.raises(RelayerNotConfiguredError):
-                run(client.redeem(spec, binding=binding))
+        with pytest.raises(RelayerNotConfiguredError):
+            run(client.redeem(spec, binding=binding))

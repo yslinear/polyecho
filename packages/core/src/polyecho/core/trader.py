@@ -10,13 +10,11 @@ Security contract (PRD §4.2, §7.2):
 * It opens NO network ports; control flows through Postgres.
 * Logs never contain private keys / API secrets / signatures.
 
-HARD invariant: the engine NEVER places a real order or redeem unless
-``is_live_enabled()`` is True (default OFF).  The dry-run path computes
-the full :class:`~polyecho.shared.copytrading.Decision`, records the
-intent as a ``CopySkip`` + structured log with
-:attr:`SkipReason.LIVE_LOCKED`, and calls **no** SDK.  All real
-placement/redeem goes through ``PolymarketClient`` / ``BaseRedeemClient``
-(which call ``assert_live_allowed`` — that chokepoint is never bypassed).
+Automated copy-trade flows dispatch directly to ``PolymarketClient`` /
+``BaseRedeemClient`` once a risk-PASSED decision is produced.  Per-op
+operator confirmation lives at the web layer (``dangerous-action`` +
+account-import passphrase); the trader-core engine is not behind a
+global trading lock.
 
 ``Decision`` is re-exported **verbatim** from the frozen Wave-1 contract
 (``polyecho.shared.copytrading``) so the engine builds on exactly that
@@ -61,7 +59,6 @@ from polyecho.shared.copytrading import (
     SkipReason,
     TradeSide,
     WalletBinding,
-    is_live_enabled,
 )
 from polyecho.shared.datasource import get_datasource
 from polyecho.shared.datasource.protocol import DataSource
@@ -276,9 +273,8 @@ class TraderCore:
         # Task 2: periodic integration probe (supervised loop ONLY).  This
         # runs `run_all_probes` + `write_integration_status` on a slow
         # cadence so the Dashboard's integration-status row stays fresh.
-        # It is STRICTLY off the order/redeem path, never calls
-        # ``assert_live_allowed``, and is spawned as a detached background
-        # task (not awaited by the trade loop).  ``asyncio`` keeps only a
+        # It is STRICTLY off the order/redeem path and is spawned as a
+        # detached background task (not awaited by the trade loop).  ``asyncio`` keeps only a
         # *weak* reference to a created task, so we hold a strong ref here
         # to stop it being GC'd mid-flight (context7 /python/cpython —
         # "Task Reference Management").  Sub-floor / non-finite configs are
@@ -912,18 +908,14 @@ class TraderCore:
                 sell_match=result.sell_match,
             )
         else:
-            # P1-3: a dry-run order is NOT a real fill — it must NOT mutate
-            # the shared FifoLedger.  Adding a phantom BuyLot here inflated
-            # ``open_position_count`` / portfolio-exposure counters (the
-            # gate reads ``self._ledger.open_lots``) and risked FIFO-
-            # matching a real SELL against a phantom BUY after a live flip.
-            # Only the live ``result.placed`` branch above (a real fill)
-            # touches the ledger; PnL/limits accounting stays correct for
-            # the live path.  We just log the LIVE_LOCKED intent as a skip.
+            # Order was not placed (retries exhausted / non-COPY) — record
+            # the skip reason from the executor.  No ledger mutation since
+            # only real fills (``result.placed`` branch above) touch the
+            # shared FifoLedger.
             await self._record_skip(
                 evaluated,
-                result.skip_reason or SkipReason.LIVE_LOCKED,
-                result.detail or "dry-run: not placed",
+                result.skip_reason or SkipReason.DATA_UNAVAILABLE,
+                result.detail or "order not placed",
             )
 
     # ------------------------------------------------------------------
@@ -935,7 +927,7 @@ class TraderCore:
 
         Runs both detection producers once into the queue, drains it
         through the full pipeline, then a single reconcile + redeem pass.
-        Returns the per-run :class:`_Stats`.  Places nothing (live lock).
+        Returns the per-run :class:`_Stats`.
         """
         await self._emit_bot_restart_once()
         # P1-5: startup/cycle heartbeat — write at the START of the pass so
@@ -994,7 +986,6 @@ class TraderCore:
                 "copied": self.stats.copied,
                 "skipped": self.stats.skipped,
                 "placed": self.stats.placed,
-                "live_enabled": is_live_enabled(),
                 "copy_latency_samples": _samples,
                 "copy_latency_ms_avg": _avg_ms,
                 "copy_latency_ms_max": _max_ms,
@@ -1021,10 +1012,9 @@ class TraderCore:
           exceptions) — return a reason string (non-zero).
 
         Any other shape — including a pass that detected trades and only
-        produced *skips* (e.g. all LIVE_LOCKED in the default dry-run, or
-        legitimate risk rejects) — is a HEALTHY pass: return ``None``
-        (exit 0).  Skips are the expected default-off outcome and must
-        NOT be treated as failure.
+        produced *skips* (e.g. legitimate risk rejects / filter
+        rejections) — is a HEALTHY pass: return ``None`` (exit 0).
+        Skips are expected and must NOT be treated as failure.
         """
         if not self._follows:
             return None  # nothing configured ⇒ valid idle pass (exit 0)
@@ -1126,9 +1116,9 @@ class TraderCore:
         Task 1 migration: the canonical row is now written through the
         FROZEN shared helper :func:`polyecho.shared.health.write_heartbeat`
         (``kind="trader"``) so the persisted shape is exactly
-        ``{ts, phase, datasource, live_trading, counters{}}`` (counters
-        nested).  This is kept **semantically identical** to the legacy
-        per-tick/startup heartbeat — same trigger points, same numbers.
+        ``{ts, phase, datasource, counters{}}`` (counters nested).  This
+        is kept **semantically identical** to the legacy per-tick/startup
+        heartbeat — same trigger points, same numbers.
 
         Back-compat is preserved without a flag-day: the F0 reader already
         folds core's legacy *top-level* counters into ``counters{}``, so
@@ -1140,10 +1130,9 @@ class TraderCore:
         Every leg is best-effort and time-/exception-bounded — a heartbeat
         write (legacy hook OR the canonical shared helper, including the
         shared-import itself) must NEVER crash or stall the trading loop,
-        and it never touches the live-lock or the order/redeem path.
+        and it never touches the order/redeem path.
         """
         ts = datetime.now(tz=UTC).isoformat()
-        live = is_live_enabled()
         # Canonical counters block (the nested F0 shape).
         counters: dict[str, Any] = {
             "detected": self.stats.detected,
@@ -1161,7 +1150,6 @@ class TraderCore:
             "ts": ts,
             "phase": phase,
             "datasource": self._settings.datasource,
-            "live_trading": live,
             **counters,
         }
         self.last_heartbeat = info
@@ -1187,7 +1175,6 @@ class TraderCore:
                 "trader",
                 phase=phase,
                 datasource=self._settings.datasource,
-                live_trading=live,
                 counters=counters,
                 on_error=lambda exc: logger.warning(
                     "trader_heartbeat_canonical_write_failed_continuing",
@@ -1222,7 +1209,6 @@ class TraderCore:
             severity=Severity.INFO,
             payload={
                 "datasource": self._settings.datasource,
-                "live_trading": is_live_enabled(),
             },
             push=PushPayload(
                 title="跟單引擎已啟動",
@@ -1374,9 +1360,11 @@ class TraderCore:
         """Poll + execute web-confirmed danger-tier actions (PRD §5.7).
 
         Delegates to the injected :class:`PendingActionExecutor` whose
-        order placement routes through the shared :class:`OrderExecutor`
-        chokepoint (``assert_live_allowed``) — default-OFF places nothing.
-        On each close it emits POSITION_CLOSED / STOP_LOSS as appropriate.
+        order placement routes through the shared :class:`OrderExecutor`.
+        Web operators have already confirmed each pending action via
+        ``dangerous-action`` (CONFIRM_PHRASE + danger passphrase) before
+        the worker picks it up.  On each close it emits POSITION_CLOSED /
+        STOP_LOSS as appropriate.
         """
         if self._pending_executor is None:
             return 0
@@ -1415,8 +1403,8 @@ class TraderCore:
         under the ``polymarket_ws_user`` / ``polymarket_ws_market`` keys
         — the frozen health contract has no WS probe and the dashboard
         renders ``integration.probes`` generically.  It still touches no
-        engine state, no ``FifoLedger``, no order/redeem path, and NEVER
-        ``assert_live_allowed`` (it is read → write-status only).
+        engine state, no ``FifoLedger``, no order/redeem path (it is
+        read → write-status only).
         """
         try:
             async with asyncio.timeout(INTEGRATION_PROBE_TIMEOUT_SECONDS):
@@ -1479,7 +1467,7 @@ class TraderCore:
         Fixture mode performs one bounded ``run_once`` pass then idles
         (restart-safe; reconcile is the durable backfill).  The live WS /
         RPC streams are the Phase-4 W2 deliverable behind the same
-        interface and only ever exercised with ``POLYECHO_LIVE_TRADING``.
+        interface.
 
         Task 2: the periodic integration probe is attached HERE (the
         always-on supervised engine) as a detached sibling task — it runs
@@ -1530,10 +1518,10 @@ class TraderCore:
 
         Contract preservation:
 
-        * **Live-lock / order-redeem path untouched** — this only writes a
-          liveness row; it never calls ``assert_live_allowed`` and does not
-          touch the ledger, queue, or any SDK.  Live WS/RPC mode does not
-          reach here (live stream tasks attach in ``run`` instead).
+        * **Order/redeem path untouched** — this only writes a liveness
+          row; it does not touch the ledger, queue, or any SDK.  Live
+          WS/RPC mode does not reach here (live stream tasks attach in
+          ``run`` instead).
         * **Fail-soft** — :meth:`_write_heartbeat` swallows every heartbeat
           failure (including an absent shared package) and only lets
           :class:`asyncio.CancelledError` propagate, so a heartbeat problem

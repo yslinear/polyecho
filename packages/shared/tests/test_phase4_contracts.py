@@ -12,13 +12,10 @@ Scope (all deterministic, no network / no real DB):
 * ``resolve_wallet`` per mode — EOA exactness, MAGIC CREATE2 determinism,
   MAGIC operator-funder preference, SAFE via injected RPC, explicit funder
   for POLY_1271, fail-closed on unknown mode / missing 1271 funder.
-* Live-lock: default-OFF raises ``LiveTradingLockedError``; flips with the
-  env var; ``is_live_enabled`` reflects config.
-* ``Settings`` parses ``POLYECHO_LIVE_TRADING`` / ``POLYECHO_AUTO_REDEEM``.
+* ``Settings`` parses ``POLYECHO_AUTO_REDEEM``.
 * ``SkipReason`` taxonomy completeness + StrEnum string identity.
 * ``constants`` module exposes the brief §9 addresses verbatim.
-* Redeem helpers: ``collateral_for`` (pUSD vs WCOL) + ``index_set_for``;
-  ``BaseRedeemClient`` is live-lock-guarded.
+* Redeem helpers: ``collateral_for`` (pUSD vs WCOL) + ``index_set_for``.
 """
 
 from __future__ import annotations
@@ -36,7 +33,6 @@ from polyecho.shared.copytrading import (
     Decision,
     DecisionOutcome,
     EvaluatedCopy,
-    LiveTradingLockedError,
     RedeemJobSpec,
     RedeemJobStatus,
     RedeemResult,
@@ -44,8 +40,6 @@ from polyecho.shared.copytrading import (
     SkipReason,
     TradeSide,
     WalletBinding,
-    assert_live_allowed,
-    is_live_enabled,
 )
 from polyecho.shared.models import CopySkip, RedeemJob
 from polyecho.shared.models.account import Account
@@ -292,73 +286,23 @@ class TestResolveWallet:
 
 
 # ---------------------------------------------------------------------------
-# Live-lock chokepoint (default OFF — the HARD lock)
-# ---------------------------------------------------------------------------
-class TestLiveLock:
-    def test_default_is_locked_and_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
-        from polyecho.shared.config import get_settings
-
-        get_settings.cache_clear()
-        assert is_live_enabled() is False
-        with pytest.raises(LiveTradingLockedError, match="LOCKED"):
-            assert_live_allowed("place_order")
-
-    def test_enabled_when_env_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("POLYECHO_LIVE_TRADING", "true")
-        from polyecho.shared.config import get_settings
-
-        get_settings.cache_clear()
-        assert is_live_enabled() is True
-        assert_live_allowed("place_order")  # must NOT raise
-
-    def test_action_name_in_message(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
-        from polyecho.shared.config import get_settings
-
-        get_settings.cache_clear()
-        with pytest.raises(LiveTradingLockedError, match="redeem"):
-            assert_live_allowed("redeem")
-
-    def test_place_order_wrapper_is_guarded(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
-        from polyecho.shared.config import get_settings
-        from polyecho.shared.polymarket.client import PolymarketClient
-
-        get_settings.cache_clear()
-        c = PolymarketClient.__new__(PolymarketClient)  # skip ClobClient ctor
-        with pytest.raises(LiveTradingLockedError):
-            run(
-                c.place_order(
-                    token_id="t", side="BUY", price=0.5, size=1.0
-                )
-            )
-
-
-# ---------------------------------------------------------------------------
-# Config parses the two new flags
+# Config parses the auto-redeem flag
 # ---------------------------------------------------------------------------
 class TestConfigFlags:
     def test_flags_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for v in ("POLYECHO_LIVE_TRADING", "POLYECHO_AUTO_REDEEM"):
-            monkeypatch.delenv(v, raising=False)
+        monkeypatch.delenv("POLYECHO_AUTO_REDEEM", raising=False)
         from polyecho.shared.config import get_settings
 
         get_settings.cache_clear()
         s = get_settings()
-        assert s.live_trading is False
         assert s.auto_redeem is False
 
     def test_flags_parse_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("POLYECHO_LIVE_TRADING", "1")
         monkeypatch.setenv("POLYECHO_AUTO_REDEEM", "yes")
         from polyecho.shared.config import get_settings
 
         get_settings.cache_clear()
         s = get_settings()
-        assert s.live_trading is True
         assert s.auto_redeem is True
 
 
@@ -424,7 +368,7 @@ class TestConstants:
 
 
 # ---------------------------------------------------------------------------
-# Redeem helpers + live-lock-guarded base client
+# Redeem helpers
 # ---------------------------------------------------------------------------
 class TestRedeem:
     def test_collateral_for_neg_risk_vs_normal(self) -> None:
@@ -440,13 +384,9 @@ class TestRedeem:
         with pytest.raises(ValueError):
             index_set_for(-1)
 
-    def test_base_redeem_client_is_live_locked(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
-        from polyecho.shared.config import get_settings
-
-        get_settings.cache_clear()
+    def test_base_redeem_dispatches_to_do_hooks(self) -> None:
+        """``BaseRedeemClient.redeem`` / ``unwrap_collateral`` now dispatch
+        straight to the abstract ``_do_*`` hooks (no live-lock gate)."""
         spec = RedeemJobSpec(
             account_id=uuid.uuid4(),
             condition_id="0xc",
@@ -458,9 +398,12 @@ class TestRedeem:
             signature_type=1, funder="0xabc", wallet_mode="magic", derived=True
         )
         client = BaseRedeemClient()
-        with pytest.raises(LiveTradingLockedError):
+        # The base ``_do_*`` hooks raise NotImplementedError (subclass
+        # contract) — we assert the dispatch reaches them rather than the
+        # deleted live-lock chokepoint.
+        with pytest.raises(NotImplementedError):
             run(client.redeem(spec, binding=binding))
-        with pytest.raises(LiveTradingLockedError):
+        with pytest.raises(NotImplementedError):
             run(client.unwrap_collateral(binding=binding, amount=10))
 
 

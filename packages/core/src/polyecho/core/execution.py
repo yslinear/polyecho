@@ -3,20 +3,13 @@ polyecho.core.execution
 ========================
 Order execution + FIFO sell-match (PolyHermes brief §3/§5, PRD §5.5).
 
-HARD invariant (the Phase-4 money lock):
-
-    The engine NEVER places a real order unless ``is_live_enabled()`` is
-    True.  Default = dry-run: the full :class:`Decision` is computed, the
-    intended order is logged + recorded as a ``CopySkip`` /
-    structured-log line with :attr:`SkipReason.LIVE_LOCKED`, and the live
-    SDK is **not** called.
-
-All real placement goes through
-:class:`~polyecho.shared.polymarket.client.PolymarketClient.place_order`,
-which itself calls ``assert_live_allowed`` first — that chokepoint is
-never bypassed.  This module additionally short-circuits on
-``is_live_enabled()`` so the default path performs **zero** placement
-work (the unit tests assert this).
+Per-op operator confirmation lives at the web layer
+(``dangerous-action`` + account-import passphrase).  This module
+dispatches risk-PASSED COPY decisions directly to
+:class:`~polyecho.shared.polymarket.client.PolymarketClient.place_order`
+when a ``client_factory`` is configured; without a configured factory
+the executor records the intended order as a skip (e.g. the fixture /
+audit-only deployment with no signing keys wired in).
 
 FIFO sell-match (brief §3): on a SELL, shares are matched against
 unmatched BUY lots keyed ``(account, condition, outcome)`` oldest-first,
@@ -39,7 +32,6 @@ from polyecho.shared.copytrading import (
     EvaluatedCopy,
     SkipReason,
     TradeSide,
-    is_live_enabled,
 )
 from polyecho.shared.polymarket.client import PolymarketClient
 
@@ -116,14 +108,8 @@ class FifoLedger:
     ) -> SellMatch:
         """FIFO-match *sell_size* against oldest open BUY lots (brief §3).
 
-        R8: ``mutate`` MUST be ``False`` in dry-run.  P1-3 only fixed the
-        BUY-add path; ``match_sell`` was still mutating
-        ``BuyLot.matched_qty`` even when the live lock was OFF, so a
-        dry-run SELL silently consumed the live FIFO ledger (corrupting
-        realised-PnL accounting the moment live trading was later
-        enabled).  When ``mutate is False`` the SellMatch is computed
-        READ-ONLY (the lots are never touched) purely for the dry-run log
-        / preview; the durable ledger is advanced only on the live path.
+        ``mutate`` controls whether ``BuyLot.matched_qty`` is advanced;
+        callers pass ``False`` when computing a read-only preview.
         """
         remaining = sell_size
         matched: list[tuple[str, Decimal]] = []
@@ -151,9 +137,9 @@ class FifoLedger:
 class ExecutionResult:
     """Outcome of one execution attempt.
 
-    ``placed`` is ``True`` only when a live order was actually submitted;
-    in the default dry-run it is ``False`` and ``skip_reason`` is
-    :attr:`SkipReason.LIVE_LOCKED` (the live-lock proof the tests assert).
+    ``placed`` is ``True`` when the live SDK ``place_order`` returned a
+    response; ``False`` indicates the decision was non-COPY or all retry
+    attempts failed.
     """
 
     placed: bool
@@ -165,12 +151,11 @@ class ExecutionResult:
 
 
 class OrderExecutor:
-    """Places orders on PASS — live-locked by default (brief HARD invariant).
+    """Places orders on PASS via :class:`PolymarketClient`.
 
     Args:
-        client_factory: ``(EvaluatedCopy) -> PolymarketClient`` built only
-                        when a live placement is about to happen (never in
-                        dry-run, so no key material is touched by default).
+        client_factory: ``(EvaluatedCopy) -> PolymarketClient`` invoked
+                        before each placement.
         ledger:         The :class:`FifoLedger` for SELL matching.
         max_retries:    ≤ 2 re-sign retries on transient failure (brief §3).
     """
@@ -196,11 +181,7 @@ class OrderExecutor:
         *,
         size_override: Decimal | None = None,
     ) -> ExecutionResult:
-        """Execute (or dry-run-log) a risk-PASSED COPY decision.
-
-        The default (live lock OFF) path computes everything, logs the
-        intended order with ``SkipReason.LIVE_LOCKED`` and returns
-        ``placed=False`` **without** building a client or calling any SDK.
+        """Execute a risk-PASSED COPY decision.
 
         ``size_override`` is the risk-gate's ``adjusted_size`` (P1-1): when
         the :class:`~polyecho.core.risk.LayeredRiskGate` normalised/clamped
@@ -229,13 +210,10 @@ class OrderExecutor:
             evaluated.raw.get("outcome") or decision.token_id or evaluated.condition_id
         )
 
-        # FIFO sell-match is computed in BOTH modes (the dry-run log shows
-        # the would-be realised PnL), but R8: it MUST NOT consume the live
-        # FIFO ledger when the live lock is OFF — a dry-run SELL that
-        # mutated ``BuyLot.matched_qty`` corrupts the durable accounting
-        # the instant live trading is later enabled.  ``mutate`` is gated
-        # on ``is_live_enabled()`` exactly like the BUY-add path (P1-3),
-        # so dry-run is fully read-only over the ledger.
+        # FIFO sell-match advances the durable BUY-lot ledger so every
+        # placed SELL is reflected in realised-PnL accounting.  Audit-
+        # only deployments (no ``client_factory``) compute the match as
+        # READ-ONLY so a dry-run SELL never corrupts the live ledger.
         sell_match: SellMatch | None = None
         if decision.side is TradeSide.SELL:
             sell_match = self._ledger.match_sell(
@@ -244,13 +222,13 @@ class OrderExecutor:
                 outcome=outcome_name,
                 sell_size=size,
                 sell_price=price,
-                mutate=is_live_enabled(),
+                mutate=self._client_factory is not None,
             )
 
-        # --- THE HARD LIVE LOCK (default OFF ⇒ place nothing) ------------
-        if not is_live_enabled():
+        if self._client_factory is None:
+            # Audit-only path: log the intended order but place nothing.
             logger.info(
-                "order_intent_dry_run",
+                "order_intent_audit_only",
                 extra={
                     "leader": evaluated.leader_address,
                     "tx_hash": evaluated.tx_hash,
@@ -268,20 +246,13 @@ class OrderExecutor:
                 decision=decision,
                 skip_reason=SkipReason.LIVE_LOCKED,
                 detail=(
-                    "live trading is OFF (POLYECHO_LIVE_TRADING is not "
-                    "'true') — intended order recorded for audit, no funds "
-                    "moved. Set POLYECHO_LIVE_TRADING=true to enable."
+                    "no client_factory configured — intended order "
+                    "recorded for audit, no order placed"
                 ),
                 sell_match=sell_match,
             )
-
-        # --- LIVE PATH (only reached when POLYECHO_LIVE_TRADING=true) ----
-        if self._client_factory is None:  # pragma: no cover - live-only
-            raise RuntimeError(
-                "live trading enabled but no client_factory configured"
-            )
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries + 1):  # pragma: no cover - live-only
+        for attempt in range(self._max_retries + 1):
             try:
                 client = await self._client_factory(evaluated)
                 resp = await client.place_order(
@@ -306,7 +277,7 @@ class OrderExecutor:
                     "order_place_retry",
                     extra={"attempt": attempt + 1, "error": str(exc)},
                 )
-        return ExecutionResult(  # pragma: no cover - live-only
+        return ExecutionResult(
             placed=False,
             decision=decision,
             skip_reason=SkipReason.DATA_UNAVAILABLE,

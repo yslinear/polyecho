@@ -43,9 +43,10 @@ Trigger / call / execution semantics (brief §9 / polyhermes-analysis §9):
     ``type:"WALLET"`` with ``depositWalletParams``.  Without injected
     ``extended_relayer_creds`` the path still fails closed.
 
-The live-lock chokepoint is :func:`assert_live_allowed` called FIRST in
-the public :meth:`BaseRedeemClient.redeem` / :meth:`unwrap_collateral`, so
-a misconfigured deployment fails closed before any irreversible call.
+Per-op operator confirmation lives at the web layer
+(``dangerous-action`` + account-import passphrase); the public
+:meth:`BaseRedeemClient.redeem` / :meth:`unwrap_collateral` dispatch
+directly to the concrete EOA / relayer paths.
 
 Dependency note (Wave C-redeem)
 -------------------------------
@@ -63,8 +64,7 @@ Dependency note (Wave C-redeem)
   :mod:`polyecho.shared.polymarket.relayer` so this module stays
   import-side-effect-free.  Hosts without the SDK see a clear
   :class:`RelayerNotAvailableError` on first use; sig 2 then fails
-  closed at the live-lock chokepoint instead of submitting a guessed
-  payload.
+  closed at the relayer seam instead of submitting a guessed payload.
 """
 
 from __future__ import annotations
@@ -85,7 +85,6 @@ from polyecho.shared.copytrading import (
     RedeemJobStatus,
     RedeemResult,
     WalletBinding,
-    assert_live_allowed,
 )
 
 __all__ = [
@@ -297,15 +296,14 @@ class RedeemClient(Protocol):
 
 
 class BaseRedeemClient:
-    """Abstract base wiring the live-lock chokepoint (brief §9).
+    """Abstract base for the redeem path (brief §9).
 
-    The public methods call :func:`assert_live_allowed` FIRST so a
-    misconfigured deployment fails closed before any irreversible call.
     :class:`Web3RedeemClient` overrides the ``_do_*`` hooks with the real
     EOA web3 path *and* the relayer seam for sig 2 SAFE (Phase-4 P3); on
     this base class the gasless seam stays abstract and fails closed
     with :class:`RelayerNotConfiguredError` so a misconfigured deployment
-    can never silently fall through.
+    can never silently fall through.  Per-op operator confirmation lives
+    at the web layer (``dangerous-action`` + account-import passphrase).
     """
 
     #: Brief §9 constants surfaced for subclasses (no inline hardcoding).
@@ -315,15 +313,13 @@ class BaseRedeemClient:
     async def redeem(
         self, spec: RedeemJobSpec, *, binding: WalletBinding
     ) -> RedeemResult:
-        """Redeem one resolved position (live-lock guarded; brief §9)."""
-        assert_live_allowed("redeem")
+        """Redeem one resolved position (brief §9)."""
         return await self._do_redeem(spec, binding=binding)
 
     async def unwrap_collateral(
         self, *, binding: WalletBinding, amount: int
     ) -> RedeemResult:
-        """Unwrap WCOL → pUSD after a NegRisk redeem (live-lock guarded)."""
-        assert_live_allowed("unwrap_collateral")
+        """Unwrap WCOL → pUSD after a NegRisk redeem."""
         return await self._do_unwrap(binding=binding, amount=amount)
 
     async def _do_redeem(
@@ -428,7 +424,7 @@ class Web3RedeemClient(BaseRedeemClient):
       EIP-712 hash with the operator's signing key and POSTs to
       ``relayer-v2.polymarket.com/submit`` with builder-program HMAC
       headers).  Without an injected relayer, sig 2 fails closed
-      (:class:`RelayerNotConfiguredError`) at the live-lock chokepoint.
+      (:class:`RelayerNotConfiguredError`).
     * **MAGIC (sig 1) / POLY_1271 (sig 3)** — CONCRETE via
       :mod:`polyecho.shared.polymarket.relayer_extended` (hand-rolled per
       ``docs/reference/polymarket-sig1-sig3-redeem-wire.md``; verified
@@ -436,7 +432,7 @@ class Web3RedeemClient(BaseRedeemClient):
       2026-05-20).  When ``extended_relayer_creds`` is injected the
       dispatch posts the appropriate ``type:"PROXY"`` / ``type:"WALLET"``
       submit body; without those credentials sig 1 / sig 3 still fail
-      closed at the chokepoint (:class:`RelayerNotConfiguredError`).
+      closed (:class:`RelayerNotConfiguredError`).
 
     The collateral branch is the brief's highest-risk detail and is
     derived ONLY from :attr:`RedeemJobSpec.is_neg_risk` via
@@ -788,14 +784,11 @@ class Web3RedeemClient(BaseRedeemClient):
         Brief §9: USDC/collateral ``approve`` once at account setup so
         redeem never needs a per-call approval.  Idempotent — checks the
         current ``allowance`` first and returns ``None`` (no tx) if already
-        at/above the max.  Live-lock guarded by the caller (account-setup
-        path) which MUST call :func:`assert_live_allowed` before this; the
-        guard is asserted here too (defence-in-depth) so a stray call can
-        never approve when the lock is off.
+        at/above the max.  Per-op operator confirmation lives at the web
+        layer (account-import passphrase).
 
         EOA only — gasless approval is part of the relayer seam (TODO).
         """
-        assert_live_allowed("approve_collateral")
         if binding.signature_type != _SIG_EOA:
             raise RelayerNotConfiguredError(
                 "Collateral approval for non-EOA wallets goes through the "

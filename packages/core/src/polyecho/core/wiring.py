@@ -20,23 +20,20 @@ rewriting the engine:
   reconcile is genuinely restart-safe.
 * :func:`build_redeem_worker` — the real :class:`RedeemWorker` wired with
   its DB-backed :class:`RedeemablePoller` + :class:`DbJobUpserter` + the
-  EOA :class:`Web3RedeemClient` backend, **behind the unchanged double
-  live-lock** (it short-circuits unless BOTH ``POLYECHO_LIVE_TRADING`` and
-  ``POLYECHO_AUTO_REDEEM``; with locks off it does zero on-chain / zero DB
-  job side-effects beyond a logged dry-run, exactly as its own tests
-  assert).  MAGIC/SAFE/POLY_1271 stay the abstract
-  ``RelayerNotConfiguredError`` path (untouched).
+  EOA :class:`Web3RedeemClient` backend, gated on
+  ``POLYECHO_AUTO_REDEEM`` (with the flag off the worker does zero
+  on-chain / zero DB job side-effects beyond a logged dry-run).
+  MAGIC/SAFE/POLY_1271 stay the abstract ``RelayerNotConfiguredError``
+  path (untouched).
 * :func:`run_supervised` — drives startup ``onchain_reconcile.run_reconcile``
-  (read-only, lock-independent), the engine's own supervised pass, the
-  real RedeemWorker, then the daily reconcile cadence — all best-effort.
+  (read-only), the engine's own supervised pass, the real RedeemWorker,
+  then the daily reconcile cadence — all best-effort.
 
-**Fail-safe contract (money-path safety is paramount):** every factory
-and the loop are best-effort — a wiring or collaborator error is logged
-and swallowed; it must NEVER crash the supervised loop and must NEVER
-bypass the lock.  The default (locks off, nothing provisioned) stays a
-clean dry-run that places / moves / persists nothing on-chain.  The
-``--once`` exit-code contract is untouched (this module is only reached
-on the supervised path; ``--once`` still calls ``core.run_once()``).
+**Fail-safe contract:** every factory and the loop are best-effort — a
+wiring or collaborator error is logged and swallowed; it must NEVER
+crash the supervised loop.  The ``--once`` exit-code contract is
+untouched (this module is only reached on the supervised path;
+``--once`` still calls ``core.run_once()``).
 """
 
 from __future__ import annotations
@@ -399,7 +396,7 @@ def _make_key_resolver() -> Any:
 def build_redeem_worker(
     follows: Sequence[Any],
 ) -> RedeemWorker:
-    """Build the REAL :class:`RedeemWorker` behind the unchanged double lock.
+    """Build the REAL :class:`RedeemWorker` gated on ``auto_redeem``.
 
     Wires the concrete DB-backed collaborators:
 
@@ -410,14 +407,11 @@ def build_redeem_worker(
       machine on ``(account, condition, outcome)``.
     * EOA :class:`Web3RedeemClient` over :class:`_AsyncWeb3Backend`.
 
-    The worker enforces the DOUBLE live-lock itself (``poll_once`` logs a
-    ``LIVE_LOCKED`` dry-run and submits NOTHING unless BOTH
-    ``is_live_enabled()`` AND ``auto_redeem``); even past that
-    ``BaseRedeemClient.redeem`` calls ``assert_live_allowed`` FIRST.  We
-    do not change any of that — we only construct the real collaborators.
-    With locks off the poller/upserter still run but every outcome is
-    PENDING / LIVE_LOCKED with zero on-chain calls, exactly as
-    ``test_default_lock_off_zero_onchain_and_idempotent`` asserts.
+    The worker gates the on-chain dispatch on ``auto_redeem``
+    (``poll_once`` logs a dry-run and submits NOTHING unless
+    ``self._auto_redeem`` is True).  With ``auto_redeem`` off the
+    poller/upserter still run but every outcome is PENDING with zero
+    on-chain calls.
     """
     from polyecho.core.redeem import RedeemCandidate
     from polyecho.shared.datasource import get_datasource

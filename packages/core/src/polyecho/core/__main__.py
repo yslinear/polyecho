@@ -2,33 +2,29 @@
 
 Modes:
 
-* ``--once``  — a single dry-run fixture pass.  This is the CI-smoke
+* ``--once``  — a single fixture pass.  This is the CI-smoke
   path: it builds the engine, runs one bounded
-  detection→evaluate→risk→(dry-run)execute→reconcile→redeem pass against
-  the bundled fixture datasource, places NOTHING (the hard live lock is
-  off by default), then exits.
+  detection→evaluate→risk→execute→reconcile→redeem pass against
+  the bundled fixture datasource, then exits.
 
   **Exit-code contract (P1-12)** — so CI smoke can detect a wholly-broken
   pipeline, ``--once`` no longer always returns 0:
 
   * ``0`` — a healthy or legitimately idle pass: either no follows are
     configured (nothing to do), OR follows exist and trades were
-    detected (even if every one was skipped — e.g. all ``LIVE_LOCKED``
-    in the default dry-run, or legitimate risk rejects; skips are the
-    expected default-off outcome, never a failure).
+    detected (even if every one was skipped — e.g. legitimate risk /
+    filter rejects; skips are expected, never a failure).
   * ``2`` — a *degenerate* pass: follows ARE configured but **zero**
     trades were detected across both detection paths + reconcile (the
     pipeline is broken — datasource/fixture/wiring), OR every detected
     trade errored.  See :meth:`TraderCore.degenerate_once_pass`.
 * default     — the supervised loop (``polyecho.core.wiring.run_supervised``):
-  a startup on-chain reconcile (read-only, lock-independent), the
-  engine's own bounded pass (heartbeat + reconcile-cursor writers
-  injected ⇒ every cycle persists liveness + the restart-safe cursor),
-  then a parked TaskGroup running the REAL DB-backed RedeemWorker —
-  behind the UNCHANGED double live-lock (``POLYECHO_LIVE_TRADING`` AND
-  ``POLYECHO_AUTO_REDEEM``, both default OFF ⇒ logged dry-run, zero
-  on-chain) — plus the daily on-chain reconcile cadence.  In fixture
-  mode with locks off it places / moves / redeems NOTHING.
+  a startup on-chain reconcile (read-only), the engine's own bounded
+  pass (heartbeat + reconcile-cursor writers injected ⇒ every cycle
+  persists liveness + the restart-safe cursor), then a parked TaskGroup
+  running the REAL DB-backed RedeemWorker — gated on
+  ``POLYECHO_AUTO_REDEEM`` (default OFF ⇒ logged dry-run, zero
+  on-chain) — plus the daily on-chain reconcile cadence.
 
 Structured JSON logging is configured first; private keys / secrets are
 never logged (``polyecho.shared.logging`` redacts them defence-in-depth).
@@ -64,7 +60,6 @@ async def main(argv: list[str] | None = None) -> int:
         extra={
             "mode": "once" if once else "supervised",
             "datasource": settings.datasource,
-            "live_trading": settings.live_trading,
         },
     )
     # C-wire: inject the REAL DB-backed liveness + reconcile-cursor
@@ -114,11 +109,11 @@ async def main(argv: list[str] | None = None) -> int:
         return 0
 
     # C-wire: the supervised path now ALSO drives a startup on-chain
-    # reconcile (read-only, lock-independent) and the REAL DB-backed
-    # RedeemWorker (behind the UNCHANGED double live-lock — locks off ⇒
-    # logged dry-run, zero on-chain) + the daily reconcile cadence.  The
-    # engine itself is untouched; ``run_supervised`` runs ``core.run_once``
-    # then parks alongside the redeem + reconcile tasks.
+    # reconcile (read-only) and the REAL DB-backed RedeemWorker (gated
+    # on ``POLYECHO_AUTO_REDEEM`` — flag off ⇒ logged dry-run, zero
+    # on-chain) + the daily reconcile cadence.  The engine itself is
+    # untouched; ``run_supervised`` runs ``core.run_once`` then parks
+    # alongside the redeem + reconcile tasks.
     await run_supervised(core)
     return 0
 

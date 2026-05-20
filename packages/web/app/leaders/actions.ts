@@ -10,11 +10,9 @@
  * paused_at so trader-core's reconcile loop honours the pause.
  *
  * Out of scope by design (PRD §5.7 操作分級):
- *  - DANGEROUS ops (manual sell, emergency liquidation) — CLI + countdown.
- *  - HIGH-DANGER ops (withdrawals, key edits, enabling live trading) —
- *    CLI ONLY. The web NEVER offers a live-trading enable/disable control;
- *    the binding switch is the host env POLYECHO_LIVE_TRADING read by
- *    trader-core. This module deliberately exposes no such action.
+ *  - DANGEROUS ops (manual sell, emergency liquidation) — operator
+ *    confirmation happens via the web ``dangerous-action`` flow.
+ *  - HIGH-DANGER ops (withdrawals, key edits) — CLI ONLY.
  *
  * Drizzle import/style mirrors app/discovery/actions.ts. No redirect — the
  * client island toasts + router.refresh()es so the table re-reads.

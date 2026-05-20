@@ -18,14 +18,12 @@ HARD invariants preserved
   passphrase (``is_danger_passphrase_provisioned() is False`` ⇒ no
   confirmed row can be legitimate) or when the row is past its
   ``expires_at`` TTL.  Refused rows are logged once and **not** marked
-  processed (left for an operator to investigate).  This is an
-  *additional* gate, never a replacement for the live-lock chokepoint.
+  processed (left for an operator to investigate).
 * Every order placement routes through the existing
   :class:`~polyecho.core.execution.OrderExecutor`, whose live path calls
   :class:`~polyecho.shared.polymarket.client.PolymarketClient.place_order`
-  → ``assert_live_allowed`` (the single Phase-4 chokepoint).  With the
-  HARD live lock OFF (default) it logs the intended order and places
-  **nothing** — identical to the copy-trade dry-run path.
+  directly.  Per-op operator confirmation lives at the web layer
+  (``dangerous-action`` CONFIRM_PHRASE + danger passphrase).
 * **Idempotent**: a processed row is marked terminal via a
   ``params['_core_processed_at']`` JSON marker (no new
   :class:`PendingActionStatus` enum value is invented — the contract's
@@ -186,9 +184,8 @@ class PendingActionExecutor:
         Returns a list of ``(action_id, [ExecutionResult, ...])`` — one
         :class:`ExecutionResult` per order the action placed (a
         MANUAL_SELL yields one; an EMERGENCY_LIQUIDATE yields one per open
-        position).  With the live lock OFF every result has
-        ``placed=False`` / ``skip_reason=LIVE_LOCKED`` (proof the
-        chokepoint gated it).
+        position).  Each web-confirmed action has already been operator-
+        approved via ``dangerous-action`` before reaching this worker.
         """
         try:
             rows = await self._rows_source()
@@ -404,8 +401,8 @@ class PendingActionExecutor:
         price: Decimal,
         binding: WalletBinding,
     ) -> ExecutionResult:
-        """Build a SELL :class:`EvaluatedCopy` and run it through the
-        shared :class:`OrderExecutor` so ``assert_live_allowed`` gates it.
+        """Build a SELL :class:`EvaluatedCopy` and dispatch it through
+        the shared :class:`OrderExecutor`.
         """
         decision = Decision(
             outcome=DecisionOutcome.COPY,
@@ -425,9 +422,8 @@ class PendingActionExecutor:
             decision=decision,
             raw={"outcome": outcome, "source": "pending_action"},
         )
-        # OrderExecutor.execute() short-circuits on the HARD live lock
-        # (default OFF ⇒ places nothing); the live path calls
-        # PolymarketClient.place_order → assert_live_allowed.
+        # OrderExecutor.execute() dispatches directly to
+        # PolymarketClient.place_order.
         return await self._executor.execute(evaluated)
 
     async def _emit_close(

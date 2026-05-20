@@ -4,18 +4,17 @@ tests/test_polymarket_client_trading.py
 Phase-4 W2 — :class:`polyecho.shared.polymarket.client.PolymarketClient`'s
 trading chokepoint methods ``place_order`` / ``cancel_order`` must:
 
-1. **Fail closed** when ``POLYECHO_LIVE_TRADING`` is off — the HARD lock
-   (``assert_live_allowed`` raises :class:`LiveTradingLockedError`) is
-   checked *before* any irreversible work, so a misconfigured deploy
-   never moves funds.
-2. **Delegate to the SDK** when the lock is open — pass the order args
-   through ``py_clob_client_v2.ClobClient.create_and_post_order(
+1. **Delegate to the SDK** — pass the order args through
+   ``py_clob_client_v2.ClobClient.create_and_post_order(
    order_args, options, order_type)`` / ``cancel_order(OrderPayload)``
    verbatim, with **no** hand-rolled EIP-712 / HMAC / rounding
    (brief §2/§8/§9 — the SDK owns signing).
-3. Validate the ``order_type`` string *before* the live gate so a typo
-   surfaces as :class:`ValueError` without touching the network or
-   burning the live check.
+2. Validate the ``order_type`` string *before* any network work so a
+   typo surfaces as :class:`ValueError` without touching the SDK.
+
+Per-op operator confirmation lives at the web layer (``dangerous-action``
++ account-import passphrase); the SDK wrapper is no longer behind a
+global trading lock.
 
 The ``ClobClient`` is replaced with a recording stub; no SDK / network
 runs.
@@ -28,7 +27,6 @@ from typing import Any
 import pytest
 
 from polyecho.shared.config import get_settings
-from polyecho.shared.copytrading import LiveTradingLockedError
 
 
 class _RecordingClob:
@@ -40,7 +38,7 @@ class _RecordingClob:
         type(self).instances.append(self)
         self.create_calls: list[tuple[Any, Any, Any]] = []
         self.cancel_calls: list[Any] = []
-        # Default canned return — exercised when the live gate is open.
+        # Default canned return — exercised when the wrapper delegates.
         self.create_return: dict[str, Any] = {
             "orderID": "0xORDER",
             "status": "matched",
@@ -101,62 +99,18 @@ def _make_client(signature_type: int = 0) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Live-lock fail-closed (the HARD lock — default OFF)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_place_order_fail_closed_when_live_lock_off(
-    monkeypatch: pytest.MonkeyPatch, _clob: type[_RecordingClob]
-) -> None:
-    """Live lock OFF ⇒ place_order raises ``LiveTradingLockedError``
-    and the SDK ``create_and_post_order`` is **never** called (no
-    irreversible work before the gate)."""
-    monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
-    get_settings.cache_clear()
-
-    client = _make_client()
-    with pytest.raises(LiveTradingLockedError):
-        await client.place_order(
-            token_id="0xTOKEN", side="BUY", price=0.5, size=10.0
-        )
-
-    sdk = _RecordingClob.instances[-1]
-    assert sdk.create_calls == []  # SDK never touched
-
-
-@pytest.mark.asyncio
-async def test_cancel_order_fail_closed_when_live_lock_off(
-    monkeypatch: pytest.MonkeyPatch, _clob: type[_RecordingClob]
-) -> None:
-    """Live lock OFF ⇒ cancel_order also fails closed."""
-    monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
-    get_settings.cache_clear()
-
-    client = _make_client()
-    with pytest.raises(LiveTradingLockedError):
-        await client.cancel_order("0xORDER")
-
-    sdk = _RecordingClob.instances[-1]
-    assert sdk.cancel_calls == []
-
-
-# ---------------------------------------------------------------------------
-# Delegation to py-clob-client-v2 when the live lock is open
+# Delegation to py-clob-client-v2
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_place_order_delegates_to_sdk_with_options(
-    monkeypatch: pytest.MonkeyPatch, _clob: type[_RecordingClob]
+    _clob: type[_RecordingClob],
 ) -> None:
-    """Live lock ON ⇒ place_order forwards verbatim to
+    """``place_order`` forwards verbatim to
     ``ClobClient.create_and_post_order(order_args, options, order_type)``
     with per-market ``tick_size`` + ``neg_risk`` in ``options`` (brief
     §2 — static tick was the PolyHermes gap)."""
-    monkeypatch.setenv("POLYECHO_LIVE_TRADING", "true")
-    get_settings.cache_clear()
-
     client = _make_client()
     result = await client.place_order(
         token_id="0xTOKEN",
@@ -193,13 +147,10 @@ async def test_place_order_delegates_to_sdk_with_options(
 
 @pytest.mark.asyncio
 async def test_place_order_defaults_match_brief_defaults(
-    monkeypatch: pytest.MonkeyPatch, _clob: type[_RecordingClob]
+    _clob: type[_RecordingClob],
 ) -> None:
     """Default ``order_type=FOK`` (brief §2 taker default), default
     ``tick_size="0.01"``, default ``neg_risk=False``."""
-    monkeypatch.setenv("POLYECHO_LIVE_TRADING", "true")
-    get_settings.cache_clear()
-
     client = _make_client()
     await client.place_order(
         token_id="0xTOKEN", side="SELL", price=0.6, size=1.0
@@ -214,16 +165,11 @@ async def test_place_order_defaults_match_brief_defaults(
 
 
 @pytest.mark.asyncio
-async def test_place_order_rejects_unknown_order_type_before_live_gate(
-    monkeypatch: pytest.MonkeyPatch, _clob: type[_RecordingClob]
+async def test_place_order_rejects_unknown_order_type(
+    _clob: type[_RecordingClob],
 ) -> None:
-    """A typo in ``order_type`` must raise ``ValueError`` *before* the
-    live gate is consulted (defence-in-depth — a typo isn't a live-money
-    decision).  We assert this by leaving the live lock OFF and checking
-    we get ``ValueError``, not ``LiveTradingLockedError``."""
-    monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
-    get_settings.cache_clear()
-
+    """A typo in ``order_type`` raises :class:`ValueError` *before* any
+    SDK call (a typo is a programming bug, not a money decision)."""
     client = _make_client()
     with pytest.raises(ValueError, match="Unknown order_type"):
         await client.place_order(
@@ -240,13 +186,10 @@ async def test_place_order_rejects_unknown_order_type_before_live_gate(
 
 @pytest.mark.asyncio
 async def test_cancel_order_delegates_to_sdk_with_orderpayload(
-    monkeypatch: pytest.MonkeyPatch, _clob: type[_RecordingClob]
+    _clob: type[_RecordingClob],
 ) -> None:
-    """Live lock ON ⇒ cancel_order forwards verbatim to
+    """``cancel_order`` forwards verbatim to
     ``ClobClient.cancel_order(OrderPayload(orderID=...))``."""
-    monkeypatch.setenv("POLYECHO_LIVE_TRADING", "true")
-    get_settings.cache_clear()
-
     client = _make_client()
     result = await client.cancel_order("0xORDER_42")
 
@@ -266,7 +209,6 @@ async def test_cancel_order_delegates_to_sdk_with_orderpayload(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("signature_type", [0, 1, 2, 3])
 async def test_place_order_delegates_for_all_signature_types(
-    monkeypatch: pytest.MonkeyPatch,
     _clob: type[_RecordingClob],
     signature_type: int,
 ) -> None:
@@ -274,9 +216,6 @@ async def test_place_order_delegates_for_all_signature_types(
     routing lives inside the SDK's hasher.  All four wallet modes
     (0/EOA, 1/POLY_PROXY, 2/POLY_GNOSIS_SAFE, 3/POLY_1271) must reach
     the same ``create_and_post_order`` call site with identical args."""
-    monkeypatch.setenv("POLYECHO_LIVE_TRADING", "true")
-    get_settings.cache_clear()
-
     client = _make_client(signature_type=signature_type)
     await client.place_order(
         token_id="0xTOKEN", side="BUY", price=0.5, size=1.0

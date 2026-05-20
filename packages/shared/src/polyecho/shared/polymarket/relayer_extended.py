@@ -40,9 +40,10 @@ Design constraints (mirror ``relayer.py``)
   5-failure-open shape as :mod:`polyecho.shared.datasource.live` and
   :mod:`polyecho.shared.polymarket.relayer`, for operator-uniform
   mental-model.
-* **Chokepoint** — this module performs the I/O; ``assert_live_allowed``
-  is called by the caller (``Web3RedeemClient.redeem`` /
-  ``unwrap_collateral``), so a misconfigured deployment never reaches a
+* **Operator confirmation** — this module performs the I/O; per-op
+  operator confirmation lives at the web layer (``dangerous-action`` +
+  account-import passphrase) and the relayer credentials must be
+  explicitly injected, so a misconfigured deployment cannot reach a
   ``/submit`` POST.
 """
 
@@ -626,8 +627,8 @@ async def redeem_proxy(
     """Gasless ``CTF.redeemPositions`` via sig-1 (POLY_PROXY) flow.
 
     Returns the relayer ``transaction_hash``.  Steps mirror brief §sig-1
-    1–7 verbatim.  Caller (``Web3RedeemClient``) is responsible for
-    ``assert_live_allowed`` BEFORE this call.
+    1–7 verbatim.  Per-op operator confirmation lives at the web layer
+    (``dangerous-action`` + account-import passphrase).
 
     Args:
         eoa:          The signer EOA (NOT the proxy).

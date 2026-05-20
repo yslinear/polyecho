@@ -35,9 +35,6 @@ x-python-defaults: &python-defaults
   # copy_fill events that could surface as real-looking notifications.
   # fixture mode is now EXPLICIT opt-in — CI / local tests start the stack
   # with `POLYECHO_DATASOURCE=fixture docker compose up`.
-  # POLYECHO_LIVE_TRADING is the §5 G5 trading lock; default `off` means
-  # trader-core observes + writes audit events but issues NO real orders.
-  # Flip to `on` only after an end-to-end dry-run sign-off.
   environment:
     POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:${POSTGRES_PASSWORD}@db:5432/polyecho}
     # POLYECHO_DB_URL_DRIZZLE is the SAME database, just a different DSN
@@ -49,7 +46,6 @@ x-python-defaults: &python-defaults
     # on `get_settings()` before doing anything.
     POLYECHO_DB_URL_DRIZZLE: ${POLYECHO_DB_URL_DRIZZLE:-postgresql://polyecho:${POSTGRES_PASSWORD}@db:5432/polyecho}
     POLYECHO_DATASOURCE: ${POLYECHO_DATASOURCE:-live}
-    POLYECHO_LIVE_TRADING: ${POLYECHO_LIVE_TRADING:-off}
   # Ordering: db healthy → migrate completed-successfully → apps.
   # Every app service waits for the one-shot `migrate` job so a clean
   # `docker compose up` on an EMPTY volume yields a fully-populated schema

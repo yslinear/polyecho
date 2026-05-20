@@ -23,11 +23,8 @@ What lives here (and only here)
 * :class:`RedeemResult`      — outcome of a redeem attempt.
 * :class:`CopyEvaluator`     — the ``evaluate_copy``-shaped Protocol.
 * :class:`RiskGate`          — the pre-trade gate Protocol (brief §4).
-* :func:`is_live_enabled`    — read the HARD live lock.
-* :func:`assert_live_allowed`— the single chokepoint that RAISES unless
-                               ``settings.live_trading`` is True.
 
-No network / DB / SDK I/O on import.  Pure types + the live-lock guard.
+No network / DB / SDK I/O on import.  Pure types only.
 """
 
 from __future__ import annotations
@@ -53,9 +50,6 @@ __all__ = [
     "RedeemResult",
     "CopyEvaluator",
     "RiskGate",
-    "LiveTradingLockedError",
-    "is_live_enabled",
-    "assert_live_allowed",
 ]
 
 
@@ -101,7 +95,8 @@ class SkipReason(StrEnum):
     #: Fail-closed: a required position/orderbook/market fetch failed
     #: (brief §4 — "fail-closed: a fetch failure ⇒ reject").
     DATA_UNAVAILABLE = "data_unavailable"
-    #: The HARD live lock is OFF — no live order/redeem may be placed.
+    #: The operator-controlled ``auto_redeem`` toggle is OFF — the redeem
+    #: was upserted for audit but no on-chain call was made.
     LIVE_LOCKED = "live_locked"
 
 
@@ -331,55 +326,6 @@ class RiskGate(Protocol):
     """
 
     async def check(self, evaluated: EvaluatedCopy) -> RiskResult: ...
-
-
-# ---------------------------------------------------------------------------
-# Live-money chokepoint (the single HARD lock — brief: default OFF)
-# ---------------------------------------------------------------------------
-class LiveTradingLockedError(RuntimeError):
-    """Raised by :func:`assert_live_allowed` when live trading is OFF.
-
-    This is the *only* exception that gates real order / redeem placement.
-    Wave-2's order and redeem executors MUST call
-    :func:`assert_live_allowed` immediately before any irreversible
-    on-chain / CLOB call, so a misconfigured deployment fails closed.
-    """
-
-
-def is_live_enabled() -> bool:
-    """Return ``True`` iff live trading is explicitly enabled.
-
-    Reads :attr:`Settings.live_trading` (env ``POLYECHO_LIVE_TRADING``),
-    which defaults to ``False`` (the HARD lock).  Imported lazily so this
-    module stays import-side-effect-free and tests can monkeypatch env +
-    ``get_settings.cache_clear()``.
-    """
-    from polyecho.shared.config import get_settings
-
-    return bool(get_settings().live_trading)
-
-
-def assert_live_allowed(action: str) -> None:
-    """Raise unless live trading is enabled — the single chokepoint.
-
-    Every irreversible money path (CLOB order placement, on-chain /
-    relayer redeem & unwrap) MUST call this *first*.  Default is OFF, so an
-    unconfigured or accidentally-deployed instance can never move funds.
-
-    Args:
-        action: Short identifier of the gated action (e.g.
-                ``"place_order"``, ``"redeem"``) — included verbatim in
-                the raised message for the audit trail.
-
-    Raises:
-        LiveTradingLockedError: If ``settings.live_trading`` is not True.
-    """
-    if not is_live_enabled():
-        raise LiveTradingLockedError(
-            f"Live trading is LOCKED (POLYECHO_LIVE_TRADING is off): "
-            f"refusing action {action!r}. This is the Phase-4 hard "
-            f"safety lock; it must be explicitly enabled to move funds."
-        )
 
 
 # Importable type aliases used by Sequence-typed callers (kept for Wave-2

@@ -262,7 +262,7 @@ class UserChannelListener:
         In fixture mode this performs one replay pass then idles (the
         supervised loop is restart-safe; reconcile backfills any gap).  The
         live WS subscription is the Phase-4 W2 deliverable behind the same
-        interface and only ever exercised with ``POLYECHO_LIVE_TRADING``.
+        interface.
         """
         if not self._live:
             await self.run_once()

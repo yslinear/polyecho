@@ -196,26 +196,15 @@ class Settings(BaseSettings):
     # 不再有任何產生假資料的邏輯.
 
     # ------------------------------------------------------------------
-    # Live trading — Phase-4 HARD safety lock (brief §9; default OFF)
+    # Auto-redeem toggle (brief §9; default OFF — per-op confirmation
+    # lives at the web layer)
     # ------------------------------------------------------------------
-    live_trading: bool = Field(
-        default=False,
-        description=(
-            "MASTER live-money lock (env POLYECHO_LIVE_TRADING). When "
-            "False (the default), polyecho.shared.copytrading."
-            "assert_live_allowed() RAISES before any CLOB order / on-chain "
-            "redeem — the single chokepoint Wave-2's order & redeem "
-            "placement MUST call. Never enable unless you intend to move "
-            "real funds. DANGER: enabling this places live orders."
-        ),
-    )
     auto_redeem: bool = Field(
         default=False,
         description=(
             "Enable automatic claim-winnings / redeem (env "
-            "POLYECHO_AUTO_REDEEM). When True AND live_trading is True, "
-            "the redeem worker acts on the data-api `redeemable` flag "
-            "(brief §9). Default OFF; still gated by the live lock."
+            "POLYECHO_AUTO_REDEEM). When True the redeem worker acts on "
+            "the data-api `redeemable` flag (brief §9). Default OFF."
         ),
     )
 

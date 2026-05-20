@@ -63,13 +63,12 @@ def _resolve_datasource() -> str:
 
 
 def _resolve_live_trading() -> bool:
-    """Best-effort master live-trading flag (defaults to the safe False)."""
-    try:
-        from polyecho.shared.config import get_settings
+    """Legacy shim — the global trading lock was removed.
 
-        return bool(get_settings().live_trading)
-    except Exception:  # noqa: BLE001 - liveness is strictly best-effort
-        return False
+    Returns ``False`` so the heartbeat payload keeps the same shape; the
+    field is now informational only.
+    """
+    return False
 
 
 async def write_backtest_heartbeat(
