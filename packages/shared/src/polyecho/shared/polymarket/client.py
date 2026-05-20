@@ -64,12 +64,30 @@ import contextlib
 import os
 import threading
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
-from py_clob_client_v2 import ApiCreds, ClobClient  # type: ignore[import-untyped]
+from py_clob_client_v2 import (  # type: ignore[import-untyped]
+    ApiCreds,
+    ClobClient,
+    OrderArgs,
+    OrderPayload,
+    OrderType,
+    PartialCreateOrderOptions,
+)
 
 from polyecho.shared.config import get_settings
 from polyecho.shared.copytrading import assert_live_allowed
+
+#: Map our public ``order_type`` strings → SDK ``OrderType`` constants.
+#: Brief §2: copy-trades default to FOK (taker); GTC/FAK/GTD are accepted
+#: passthroughs.  Unknown strings raise ``ValueError`` *before* the live
+#: gate so a typo never reaches the network.
+_ORDER_TYPE_MAP: dict[str, str] = {
+    "FOK": OrderType.FOK,
+    "FAK": OrderType.FAK,
+    "GTC": OrderType.GTC,
+    "GTD": OrderType.GTD,
+}
 
 #: The proxy env vars py-clob-client-v2's underlying HTTP layer honours.
 #: http(s) only — see polyecho.shared.http for the SOCKS limitation note.
@@ -380,16 +398,48 @@ class PolymarketClient:
         Raises:
             LiveTradingLockedError: If ``POLYECHO_LIVE_TRADING`` is off
                                     (the HARD lock — checked FIRST).
-            NotImplementedError:    Phase-4 W2 deliverable (the live SDK
-                                    call site).
+            ValueError:             If ``order_type`` is not one of
+                                    ``"FOK" / "FAK" / "GTC" / "GTD"`` —
+                                    raised *before* the live gate so a
+                                    typo never reaches the network.
         """
+        # Validate the order_type string up-front, BEFORE the live gate.
+        # A typo here is a programming bug, not a live-money decision;
+        # surface it loudly without burning the live-trading lock check.
+        try:
+            sdk_order_type = _ORDER_TYPE_MAP[order_type]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unknown order_type {order_type!r}; expected one of "
+                f"{sorted(_ORDER_TYPE_MAP)}"
+            ) from exc
+
         # The single live-money chokepoint — MUST be first, before any
-        # irreversible work (brief: default-OFF hard lock).
+        # irreversible work (brief: default-OFF hard lock).  Any
+        # irreversible side-effect below this line is gated.
         assert_live_allowed("place_order")
-        raise NotImplementedError(
-            "Phase-4 W2: ClobClient.create_and_post_order(order_args, "
-            "options={neg_risk, tick_size}, order_type) — SDK owns "
-            "EIP-712/HMAC/rounding (brief §2/§9)"
+
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=side,
+        )
+        # Per-market neg_risk + tick_size travel through ``options``
+        # (brief §2 — static tick was the PolyHermes gap).  The SDK owns
+        # EIP-712 hashing, HMAC signing, and price/size rounding.
+        options = PartialCreateOrderOptions(
+            tick_size=tick_size,
+            neg_risk=neg_risk,
+        )
+        return cast(
+            "dict[str, Any]",
+            await self._run_sync(
+                self._client.create_and_post_order,
+                order_args,
+                options,
+                sdk_order_type,
+            ),
         )
 
     async def cancel_order(self, order_id: str) -> dict[str, Any]:
@@ -404,11 +454,15 @@ class PolymarketClient:
 
         Raises:
             LiveTradingLockedError: If ``POLYECHO_LIVE_TRADING`` is off.
-            NotImplementedError:    Phase-4 W2 deliverable.
         """
+        # Live-money chokepoint — first, before the SDK call.
         assert_live_allowed("cancel_order")
-        raise NotImplementedError(
-            "Phase-4 W2: ClobClient.cancel_order(order_id)"
+        return cast(
+            "dict[str, Any]",
+            await self._run_sync(
+                self._client.cancel_order,
+                OrderPayload(orderID=order_id),
+            ),
         )
 
     # ------------------------------------------------------------------
