@@ -29,7 +29,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v4
 
       - name: Install uv
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4
@@ -133,7 +133,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v4
 
       - name: Apply baseline migration
         run: |
@@ -201,7 +201,7 @@ jobs:
     name: Web (pnpm lint + build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v4
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
@@ -243,13 +243,13 @@ jobs:
     name: Docker (build all images)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v4
 
       - name: Set up Docker Buildx
         # build-push-action needs the docker-container driver (default with
         # this action) for cache export — the plain `docker` driver does not
         # support `--cache-to`, which is what previously broke this job.
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v3
 
       - name: Validate docker-compose config
         run: docker compose -f infra/docker-compose.yml config --quiet
@@ -258,7 +258,7 @@ jobs:
       # buildx driver and persists layers across runs without manual rotation.
       # `scope` keeps each image's cache isolated so they don't clobber.
       - name: Build python/core image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v6
         with:
           context: .
           file: infra/docker/Dockerfile.python
@@ -270,7 +270,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=core
 
       - name: Build python/discovery image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v6
         with:
           context: .
           file: infra/docker/Dockerfile.python
@@ -282,7 +282,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=discovery
 
       - name: Build python/push image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v6
         with:
           context: .
           file: infra/docker/Dockerfile.python
@@ -294,7 +294,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=push
 
       - name: Build cli image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v6
         with:
           context: .
           file: infra/docker/Dockerfile.cli
@@ -305,7 +305,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=cli
 
       - name: Build web image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v6
         with:
           context: .
           file: infra/docker/Dockerfile.web
@@ -343,10 +343,10 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v3
 
       - name: Apply baseline migration (so DB-touching workers have schema)
         run: |
@@ -356,7 +356,7 @@ jobs:
       # Rebuild with load:true — layers come from the warm gha cache the
       # `docker` job just wrote, so this is a cache hit, not a fresh build.
       - name: Load python/core image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v6
         with:
           context: .
           file: infra/docker/Dockerfile.python
@@ -368,7 +368,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=core
 
       - name: Load python/discovery image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v6
         with:
           context: .
           file: infra/docker/Dockerfile.python
@@ -380,7 +380,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=discovery
 
       - name: Load python/push image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v6
         with:
           context: .
           file: infra/docker/Dockerfile.python
@@ -392,7 +392,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=push
 
       - name: Load python/backtest image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v6
         with:
           context: .
           file: infra/docker/Dockerfile.python
@@ -404,7 +404,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=backtest
 
       - name: Load cli image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v6
         with:
           context: .
           file: infra/docker/Dockerfile.cli
@@ -415,7 +415,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=cli
 
       - name: Load web image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v6
         with:
           context: .
           file: infra/docker/Dockerfile.web
