@@ -19,22 +19,29 @@ Trigger / call / execution semantics (brief §9 / polyhermes-analysis §9):
   * **EOA (sig 0)** — CONCRETE: ``web3.py`` v7 build → ``eth_account``
     sign → send raw → wait receipt.  This is the only mode made fully
     real (verified against web3.py v7 docs + Polymarket CTF examples).
-  * **MAGIC (sig 1)** — Builder-Relayer PROXY (EIP-191 personal_sign):
-    ABSTRACT — :meth:`BaseRedeemClient._do_redeem` dispatches to
-    :meth:`_relay_redeem`, default raises a clear "relayer not configured"
-    error.  The official ``py-builder-relayer-client`` (v0.0.1, PyPI;
-    verified 2026-05-20) does **not** expose a PROXY/EIP-191 dispatch —
-    its ``RelayClient.execute`` only consumes ``list[SafeTransaction]``
-    (TransactionType.SAFE).  Sig 1 therefore stays fail-closed; we do
-    NOT hand-roll a guessed personal_sign payload.
+  * **MAGIC (sig 1)** — Builder-Relayer PROXY (eth_sign / EIP-191):
+    CONCRETE via :mod:`polyecho.shared.polymarket.relayer_extended`
+    (hand-rolled per the brief; verified against
+    ``Polymarket/builder-relayer-client`` TS reference, 2026-05-20).
+    The dispatch wraps ``CTF.redeemPositions`` inside
+    ``ProxyFactory.proxy([(to, type=1 Call, data, value=0)])``, computes
+    the ``rlx:`` struct hash, ``eth_sign``-s it, and POSTs
+    ``type:"PROXY"`` to ``/submit``.  Without injected
+    ``extended_relayer_creds`` the path still fails closed.
   * **SAFE (sig 2)** — Builder-Relayer SafeTx (EIP-712): CONCRETE via
     :mod:`polyecho.shared.polymarket.relayer.PolymarketRelayerClient`
     (Phase-4 P3 wave); inject a configured relayer into
     :class:`Web3RedeemClient` and ``_relay_redeem`` / ``_relay_unwrap``
     delegate to it.  Without an injected relayer (or without builder
     API credentials), sig 2 still fails closed.
-  * **POLY_1271 (sig 3)** — no PolyHermes blueprint and no SDK surface
-    in py-builder-relayer-client: stays fail-closed.
+  * **POLY_1271 (sig 3)** — Deposit-Wallet EIP-712 ``Batch``: CONCRETE
+    via :mod:`polyecho.shared.polymarket.relayer_extended` (verified
+    against ``builder-relayer-client/src/builder/deposit-wallet.ts``,
+    2026-05-20).  The dispatch deploys the deposit-wallet clone via
+    ``type:"WALLET-CREATE"`` if needed, EIP-712 signs the ``Batch`` typed
+    data (domain ``DepositWallet/1/137/<walletAddress>``), and POSTs
+    ``type:"WALLET"`` with ``depositWalletParams``.  Without injected
+    ``extended_relayer_creds`` the path still fails closed.
 
 The live-lock chokepoint is :func:`assert_live_allowed` called FIRST in
 the public :meth:`BaseRedeemClient.redeem` / :meth:`unwrap_collateral`, so
@@ -180,14 +187,25 @@ ERC20_APPROVE_ABI: tuple[dict[str, Any], ...] = (
 
 
 class RelayerNotConfiguredError(RuntimeError):
-    """Raised when a gasless redeem is requested but no Builder-Relayer
-    client is wired into :class:`Web3RedeemClient`, or when the requested
-    ``signature_type`` has no SDK surface (1 = MAGIC, 3 = POLY_1271).
+    """Raised when a gasless redeem is requested but **no** relayer
+    credentials / clients are wired into :class:`Web3RedeemClient`.
+
+    All four signature types are now supported in code:
+
+    * sig 0 (EOA) — concrete on-chain path; never raises this.
+    * sig 1 (MAGIC / POLY_PROXY) — concrete via
+      :mod:`polyecho.shared.polymarket.relayer_extended`; raises only when
+      no :class:`ExtendedRelayerCredentials` are supplied.
+    * sig 2 (SAFE) — concrete via
+      :mod:`polyecho.shared.polymarket.relayer`; raises only when no
+      :class:`PolymarketRelayerClient` is injected.
+    * sig 3 (POLY_1271 / Deposit-Wallet) — concrete via
+      :mod:`polyecho.shared.polymarket.relayer_extended`; raises only when
+      no :class:`ExtendedRelayerCredentials` are supplied.
 
     This is a *correctness* guard: it fails closed with a clear message
-    rather than submitting a wrong transaction.  EOA (sig 0) never
-    raises this — it is the concrete on-chain path.  SAFE (sig 2)
-    raises only when no :class:`PolymarketRelayerClient` is injected.
+    rather than submitting a wrong transaction when the operator forgot
+    to configure builder credentials.
     """
 
 
@@ -362,12 +380,34 @@ class BaseRedeemClient:
         )
 
 
+def _eoa_from_key(private_key: str) -> str:
+    """Recover the EOA address that owns *private_key*.
+
+    Used by sig 1 / sig 3 relayer paths where the wire format requires the
+    signer EOA (NOT the proxy / deposit-wallet funder).  Imported lazily
+    so this module stays eth_account-free at import time (eth_account is
+    a transitive of web3.py already pinned in core/shared deps).
+    """
+    from eth_account import Account
+
+    addr: str = Account.from_key(private_key).address
+    return addr.lower()
+
+
 # Wallet signature_type that has a concrete on-chain path (brief §9).
 _SIG_EOA = 0
+#: MAGIC / POLY_PROXY (sig 1) — concrete via relayer_extended.py
+#: (hand-rolled per ``docs/reference/polymarket-sig1-sig3-redeem-wire.md``,
+#: verified against TS ``Polymarket/builder-relayer-client``; 2026-05-20).
+_SIG_MAGIC = 1
 #: SAFE (sig 2) — only non-EOA sig with a concrete relayer SDK surface
 #: (py-builder-relayer-client.RelayClient.execute consumes
 #: ``list[SafeTransaction]``, TransactionType.SAFE).  Verified 2026-05-20.
 _SIG_SAFE = 2
+#: POLY_1271 / Deposit-Wallet (sig 3) — concrete via relayer_extended.py
+#: (Solady ERC-1967 CREATE2 + EIP-712 ``Batch`` typed-data; verified
+#: against TS ``builder-relayer-client/src/builder/deposit-wallet.ts``).
+_SIG_POLY_1271 = 3
 
 
 class Web3RedeemClient(BaseRedeemClient):
@@ -389,12 +429,14 @@ class Web3RedeemClient(BaseRedeemClient):
       ``relayer-v2.polymarket.com/submit`` with builder-program HMAC
       headers).  Without an injected relayer, sig 2 fails closed
       (:class:`RelayerNotConfiguredError`) at the live-lock chokepoint.
-    * **MAGIC (sig 1) / POLY_1271 (sig 3)** — NO SDK surface in
-      py-builder-relayer-client v0.0.1 (only SafeTransaction submit is
-      exposed).  These dispatch to :meth:`_relay_redeem` /
-      :meth:`_relay_unwrap` and always fail closed with
-      :class:`RelayerNotConfiguredError`; we refuse to invent the
-      EIP-191 / 1271 wire format.
+    * **MAGIC (sig 1) / POLY_1271 (sig 3)** — CONCRETE via
+      :mod:`polyecho.shared.polymarket.relayer_extended` (hand-rolled per
+      ``docs/reference/polymarket-sig1-sig3-redeem-wire.md``; verified
+      against the Polymarket TS ``builder-relayer-client`` reference,
+      2026-05-20).  When ``extended_relayer_creds`` is injected the
+      dispatch posts the appropriate ``type:"PROXY"`` / ``type:"WALLET"``
+      submit body; without those credentials sig 1 / sig 3 still fail
+      closed at the chokepoint (:class:`RelayerNotConfiguredError`).
 
     The collateral branch is the brief's highest-risk detail and is
     derived ONLY from :attr:`RedeemJobSpec.is_neg_risk` via
@@ -422,44 +464,225 @@ class Web3RedeemClient(BaseRedeemClient):
         private_key_resolver: PrivateKeyResolver,
         chain_id: int = POLYGON_CHAIN_ID,
         relayer: Any | None = None,
+        extended_relayer_creds: Any | None = None,
+        extended_relayer_base_url: str | None = None,
     ) -> None:
         self._web3 = web3
         self._resolve_key = private_key_resolver
         self._chain_id = chain_id
         self._relayer = relayer
+        # ``extended_relayer_creds`` — optional
+        # :class:`relayer_extended.ExtendedRelayerCredentials` enabling the
+        # concrete sig 1 (MAGIC) + sig 3 (POLY_1271) paths.  Without it,
+        # sig 1 / sig 3 still fail-closed at the chokepoint (just like sig
+        # 2 without the SAFE relayer).
+        self._ext_creds = extended_relayer_creds
+        self._ext_base_url = extended_relayer_base_url
 
-    # -- Relayer (sig 2 SAFE) concrete path -----------------------------
+    # -- Relayer concrete path ------------------------------------------
+    # verified 2026-05-20: concrete via relayer_extended.py for sig 1 / 3
+    # (per docs/reference/polymarket-sig1-sig3-redeem-wire.md) and via
+    # relayer.py for sig 2 (P3 wave SDK delegation).
     async def _relay_redeem(
         self, spec: RedeemJobSpec, *, binding: WalletBinding
     ) -> RedeemResult:
-        """Dispatch SAFE (sig 2) to the injected PolymarketRelayerClient.
+        """Dispatch sig 1 / 2 / 3 to the correct relayer surface.
 
-        Sig 1 (MAGIC) and sig 3 (POLY_1271) have no SDK surface and stay
-        fail-closed via the base-class behaviour.
+        Falls back to the base-class fail-closed seam only when the
+        relevant credentials/relayer have not been injected.
         """
-        if (
-            binding.signature_type != _SIG_SAFE
-            or self._relayer is None
-        ):
-            return await super()._relay_redeem(spec, binding=binding)
-        # Lazy import keeps this module relayer-free at import time.
-        from polyecho.shared.polymarket.relayer import relay_redeem
+        if binding.signature_type == _SIG_SAFE and self._relayer is not None:
+            from polyecho.shared.polymarket.relayer import relay_redeem
 
-        return await relay_redeem(self._relayer, spec, binding=binding)
+            return await relay_redeem(self._relayer, spec, binding=binding)
+
+        if (
+            binding.signature_type == _SIG_MAGIC
+            and self._ext_creds is not None
+        ):
+            return await self._relay_redeem_sig1(spec, binding=binding)
+
+        if (
+            binding.signature_type == _SIG_POLY_1271
+            and self._ext_creds is not None
+        ):
+            return await self._relay_redeem_sig3(spec, binding=binding)
+
+        return await super()._relay_redeem(spec, binding=binding)
 
     async def _relay_unwrap(
         self, *, binding: WalletBinding, amount: int
     ) -> RedeemResult:
-        """Dispatch SAFE (sig 2) WCOL unwrap to the injected relayer."""
-        if (
-            binding.signature_type != _SIG_SAFE
-            or self._relayer is None
-        ):
-            return await super()._relay_unwrap(binding=binding, amount=amount)
-        from polyecho.shared.polymarket.relayer import relay_unwrap
+        """Dispatch sig 1 / 2 / 3 WCOL unwrap to the correct relayer."""
+        if binding.signature_type == _SIG_SAFE and self._relayer is not None:
+            from polyecho.shared.polymarket.relayer import relay_unwrap
 
-        return await relay_unwrap(
-            self._relayer, binding=binding, amount=amount
+            return await relay_unwrap(
+                self._relayer, binding=binding, amount=amount
+            )
+
+        if (
+            binding.signature_type == _SIG_MAGIC
+            and self._ext_creds is not None
+        ):
+            return await self._relay_unwrap_sig1(
+                binding=binding, amount=amount
+            )
+
+        if (
+            binding.signature_type == _SIG_POLY_1271
+            and self._ext_creds is not None
+        ):
+            return await self._relay_unwrap_sig3(
+                binding=binding, amount=amount
+            )
+
+        return await super()._relay_unwrap(binding=binding, amount=amount)
+
+    # -- sig 1 (MAGIC) helpers ------------------------------------------
+    async def _relay_redeem_sig1(
+        self, spec: RedeemJobSpec, *, binding: WalletBinding
+    ) -> RedeemResult:
+        from polyecho.shared.polymarket.relayer_extended import (
+            ExtendedRelayerCredentials,
+            RelayerSubmissionError,
+            redeem_proxy,
+        )
+
+        assert isinstance(self._ext_creds, ExtendedRelayerCredentials)
+        key = await self._resolve_key(binding)
+        try:
+            tx_hash = await redeem_proxy(
+                eoa=_eoa_from_key(key),
+                private_key=key,
+                proxy_funder=binding.funder,
+                condition_id=spec.condition_id,
+                is_neg_risk=spec.is_neg_risk,
+                index_sets=[spec.index_set],
+                creds=self._ext_creds,
+                base_url=self._ext_base_url,
+            )
+        except RelayerSubmissionError as exc:
+            return RedeemResult(
+                status=RedeemJobStatus.FAILED,
+                detail=f"sig 1 redeem via relayer_extended failed: {exc!r}",
+            )
+        return RedeemResult(
+            status=RedeemJobStatus.CONFIRMED,
+            tx_hash=tx_hash,
+            detail=(
+                f"redeemPositions via Builder-Relayer (sig 1 PROXY; "
+                f"collateral={'WCOL' if spec.is_neg_risk else 'pUSD'})"
+            ),
+        )
+
+    async def _relay_unwrap_sig1(
+        self, *, binding: WalletBinding, amount: int
+    ) -> RedeemResult:
+        from polyecho.shared.polymarket.relayer_extended import (
+            ExtendedRelayerCredentials,
+            RelayerSubmissionError,
+            relay_unwrap_proxy,
+        )
+
+        assert isinstance(self._ext_creds, ExtendedRelayerCredentials)
+        if amount <= 0:
+            return RedeemResult(
+                status=RedeemJobStatus.CONFIRMED,
+                detail="sig 1 unwrap skipped: WCOL balance is 0",
+            )
+        key = await self._resolve_key(binding)
+        try:
+            tx_hash = await relay_unwrap_proxy(
+                eoa=_eoa_from_key(key),
+                private_key=key,
+                proxy_funder=binding.funder,
+                amount=amount,
+                creds=self._ext_creds,
+                base_url=self._ext_base_url,
+            )
+        except RelayerSubmissionError as exc:
+            return RedeemResult(
+                status=RedeemJobStatus.FAILED,
+                detail=f"sig 1 unwrap via relayer_extended failed: {exc!r}",
+            )
+        return RedeemResult(
+            status=RedeemJobStatus.CONFIRMED,
+            tx_hash=tx_hash,
+            detail=f"WCOL.unwrap via Builder-Relayer (sig 1 PROXY, amount={amount})",
+        )
+
+    # -- sig 3 (POLY_1271 / Deposit-Wallet) helpers ---------------------
+    async def _relay_redeem_sig3(
+        self, spec: RedeemJobSpec, *, binding: WalletBinding
+    ) -> RedeemResult:
+        from polyecho.shared.polymarket.relayer_extended import (
+            ExtendedRelayerCredentials,
+            RelayerSubmissionError,
+            redeem_deposit_wallet,
+        )
+
+        assert isinstance(self._ext_creds, ExtendedRelayerCredentials)
+        key = await self._resolve_key(binding)
+        try:
+            tx_hash = await redeem_deposit_wallet(
+                eoa=_eoa_from_key(key),
+                private_key=key,
+                deposit_funder=binding.funder,
+                condition_id=spec.condition_id,
+                is_neg_risk=spec.is_neg_risk,
+                index_sets=[spec.index_set],
+                creds=self._ext_creds,
+                base_url=self._ext_base_url,
+            )
+        except RelayerSubmissionError as exc:
+            return RedeemResult(
+                status=RedeemJobStatus.FAILED,
+                detail=f"sig 3 redeem via relayer_extended failed: {exc!r}",
+            )
+        return RedeemResult(
+            status=RedeemJobStatus.CONFIRMED,
+            tx_hash=tx_hash,
+            detail=(
+                f"redeemPositions via Builder-Relayer (sig 3 Deposit-Wallet; "
+                f"collateral={'WCOL' if spec.is_neg_risk else 'pUSD'})"
+            ),
+        )
+
+    async def _relay_unwrap_sig3(
+        self, *, binding: WalletBinding, amount: int
+    ) -> RedeemResult:
+        from polyecho.shared.polymarket.relayer_extended import (
+            ExtendedRelayerCredentials,
+            RelayerSubmissionError,
+            relay_unwrap_deposit_wallet,
+        )
+
+        assert isinstance(self._ext_creds, ExtendedRelayerCredentials)
+        if amount <= 0:
+            return RedeemResult(
+                status=RedeemJobStatus.CONFIRMED,
+                detail="sig 3 unwrap skipped: WCOL balance is 0",
+            )
+        key = await self._resolve_key(binding)
+        try:
+            tx_hash = await relay_unwrap_deposit_wallet(
+                eoa=_eoa_from_key(key),
+                private_key=key,
+                deposit_funder=binding.funder,
+                amount=amount,
+                creds=self._ext_creds,
+                base_url=self._ext_base_url,
+            )
+        except RelayerSubmissionError as exc:
+            return RedeemResult(
+                status=RedeemJobStatus.FAILED,
+                detail=f"sig 3 unwrap via relayer_extended failed: {exc!r}",
+            )
+        return RedeemResult(
+            status=RedeemJobStatus.CONFIRMED,
+            tx_hash=tx_hash,
+            detail=f"WCOL.unwrap via Builder-Relayer (sig 3 Deposit-Wallet, amount={amount})",
         )
 
     # -- EOA concrete path ----------------------------------------------

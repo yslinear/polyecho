@@ -52,18 +52,20 @@ POSITION = "0xposition400000000000000000000000000000004"
 
 
 def _w(eoa: str) -> dict[int, str]:
-    """``derive_wallets`` with the now-``None`` type-2/3 entries dropped.
+    """``derive_wallets`` with the now-``None`` type-2 entry dropped.
 
-    P0-5: types 2/3 are ``None`` (no offline derivation).  Detection tests
-    only ever map the derivable candidates (types 0/1), so this narrows the
-    mapping to ``dict[int, str]`` for mypy --strict while still asserting
-    the contract (type-1 must be a real address)."""
+    Type-2 (SAFE) is ``None`` (no offline derivation — RPC only).  Types
+    0/1/3 are all derivable offline (brief §sig-3 added type-3 Solady
+    ERC-1967 CREATE2).  This narrows the mapping to ``dict[int, str]``
+    for mypy --strict while still asserting the derivable contract."""
     raw = derive_wallets(eoa)
-    t1 = raw[1]
-    assert t1 is not None  # type-1 is the verified CREATE2 address
     t0 = raw[0]
     assert t0 is not None  # type-0 is always the EOA
-    return {0: t0, 1: t1}
+    t1 = raw[1]
+    assert t1 is not None  # type-1 is the verified CREATE2 address
+    t3 = raw[3]
+    assert t3 is not None  # type-3 is the verified Solady ERC-1967 CREATE2
+    return {0: t0, 1: t1, 3: t3}
 
 
 # ---------------------------------------------------------------------------
@@ -91,15 +93,29 @@ class TestDeriveWallets:
         assert len(addr) == 42
         int(addr, 16)  # parses as hex
 
-    def test_type2_and_type3_are_none_no_fabrication(self) -> None:
-        """P0-5: SAFE has no offline derivation (RPC only); POLY_1271
-        always needs an explicit funder.  Both must be ``None`` rather
-        than a guessed (wrong) address."""
+    def test_type2_is_none_no_fabrication(self) -> None:
+        """P0-5: SAFE has no offline derivation (RPC only).  Must be
+        ``None`` rather than a guessed (wrong) address.  Type 3 is now
+        derived offline via the verified Solady ERC-1967 scheme
+        (brief §sig-3) and is covered separately below.
+        """
         w = derive_wallets(_EOA)
         assert w[2] is None
         assert w[SignatureType.POLY_GNOSIS_SAFE] is None
-        assert w[3] is None
-        assert w[SignatureType.POLY_1271] is None
+
+    def test_type3_is_deposit_wallet_derivation(self) -> None:
+        """sig 3 funder is now derived offline via the verified Solady
+        ERC-1967 CREATE2 scheme (mirrors ``Polymarket/builder-relayer-
+        client/src/builder/deposit-wallet.ts``, brief §sig-3)."""
+        w = derive_wallets(_EOA)
+        addr = w[SignatureType.POLY_1271]
+        assert addr is not None
+        assert addr == w[3]
+        assert addr.startswith("0x") and len(addr) == 42
+        assert addr == addr.lower()
+        # Must differ from EOA + Magic proxy (different schemes).
+        assert addr != w[SignatureType.EOA]
+        assert addr != w[SignatureType.POLY_PROXY]
 
     def test_deterministic(self) -> None:
         assert derive_wallets(_EOA) == derive_wallets(_EOA)
@@ -228,9 +244,12 @@ class _BrokenDS:
 
 
 class TestDetectRanking:
-    """P0-5: types 2/3 derive to ``None`` and contribute zero-evidence
-    rows (empty address, never queried).  Detection ranking is exercised
-    via the type-1 candidate (the only non-EOA derivable address)."""
+    """P0-5: type 2 derives to ``None`` (no offline scheme; RPC only) so
+    it contributes a zero-evidence empty-address row.  Type 3 now derives
+    offline (brief §sig-3 Solady ERC-1967 CREATE2) so it IS queried —
+    detection ranking is still typically driven by type 1 in fixtures
+    (the only non-EOA candidate with seeded positions/activity).
+    """
 
     def test_recommends_type_with_positions(self) -> None:
         """Map the type-1 (Magic proxy) candidate onto the SWING archetype
@@ -246,10 +265,14 @@ class TestDetectRanking:
         ev1 = result.evidence_for(1)
         assert ev1.position_count > 0
         assert result.confidence in {"high", "medium"}
-        # Types 2/3 are never queried — zero-evidence, empty address.
+        # Type 2 is never queried (no offline derivation) — zero-evidence,
+        # empty address row.  Type 3 IS now derived offline (Deposit-Wallet
+        # CREATE2, brief §sig-3) so it IS queried; with no fixture for that
+        # address it lands as a non-empty-address, score=0 row.
         assert result.evidence_for(2).address == ""
         assert result.evidence_for(2).score == 0
-        assert result.evidence_for(3).address == ""
+        assert result.evidence_for(3).address == w[3]
+        assert result.evidence_for(3).score == 0
 
     def test_positions_beat_activity(self) -> None:
         """type 0 (EOA) → only activity (SCALPER, huge volume); type 1 →

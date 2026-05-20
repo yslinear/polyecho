@@ -183,9 +183,13 @@ SIGNATURE_TYPE_DESCRIPTIONS: dict[int, str] = {
 # ``None`` for type-2/type-3, signalling "needs explicit funder / RPC"
 # rather than emitting a wrong address.
 #
-# Type-3 (POLY_1271) has no reference at all and ALWAYS requires an explicit
-# operator-supplied funder (``wallet.resolve_wallet`` fails closed) — never
-# derived; :func:`derive_wallets` returns ``None`` for it too.
+# Type-3 (POLY_1271 / Deposit-Wallet) IS derived offline via the verified
+# Solady-ERC-1967 CREATE2 scheme that mirrors
+# ``Polymarket/builder-relayer-client``'s ``src/builder/deposit-wallet.ts``
+# (brief §sig-3) — see :func:`polyecho.shared.polymarket.wallet.
+# deposit_wallet_address`.  The derived address is a *convenience* used by
+# detection / display; :func:`wallet.resolve_wallet` still prefers an
+# operator-supplied funder when one is set.
 
 # Polymarket collateral on Polygon — USDC.e — for the optional balance probe.
 # Widely-published Polygon USDC.e; the contract-addresses doc page was not
@@ -230,6 +234,21 @@ def _poly_proxy_address(eoa_lower: str) -> str:
     return magic_proxy_address(eoa_lower)
 
 
+def _deposit_wallet_address(eoa_lower: str) -> str:
+    """Type-3 (POLY_1271 / Deposit-Wallet) funder — verified Solady ERC-1967
+    CREATE2 scheme (mirrors TS ``builder-relayer-client/src/builder/
+    deposit-wallet.ts``).
+
+    Delegates to :func:`polyecho.shared.polymarket.wallet.deposit_wallet_address`
+    so ``accounts`` and ``wallet`` share a SINGLE implementation.  Same
+    lazy-import rationale as :func:`_poly_proxy_address` (avoids the
+    ``wallet`` → ``accounts`` import cycle).
+    """
+    from polyecho.shared.polymarket.wallet import deposit_wallet_address
+
+    return deposit_wallet_address(eoa_lower)
+
+
 def derive_wallets(eoa: str) -> dict[int, str | None]:
     """Derive the candidate funder addresses for *eoa* (P0-5).
 
@@ -246,26 +265,28 @@ def derive_wallets(eoa: str) -> dict[int, str | None]:
       derivation; it is resolved via the Safe factory RPC
       ``computeProxyAddress(eoa)`` (``wallet.resolve_wallet`` SAFE path).
       ``accounts`` deliberately does NOT fabricate it.
-    * **3 POLY_1271** — ``None``.  Always requires an explicit
-      operator-supplied funder (never derived; ``wallet.resolve_wallet``
-      fails closed).
+    * **3 POLY_1271** — Solady ERC-1967 CREATE2 Deposit-Wallet via the
+      verified :func:`polyecho.shared.polymarket.wallet.deposit_wallet_address`
+      (TS source: ``Polymarket/builder-relayer-client``
+      ``src/builder/deposit-wallet.ts``; brief §sig-3).  The derived value
+      remains a *convenience* — :func:`wallet.resolve_wallet` still prefers
+      an operator-supplied funder where one exists.
 
     Args:
         eoa: The externally-owned account / signer address (``0x…``).
 
     Returns:
-        ``{0: eoa, 1: magic_proxy, 2: None, 3: None}`` — addresses
+        ``{0: eoa, 1: magic_proxy, 2: None, 3: deposit_wallet}`` — addresses
         lowercased; ``None`` where offline derivation is not trustworthy.
 
     Raises:
         ValueError: If *eoa* is not a valid EVM address.
 
     .. note::
-       Only type 0 (exact) and type 1 (verified CREATE2, brief §9) yield an
-       address.  Detection ranks whatever addresses are present by observed
-       on-chain evidence; types 2/3 contribute no candidate (they need RPC /
-       explicit funder), which is correct — emitting a guessed address would
-       be worse than emitting none.
+       Types 0/1/3 are derived offline (verified schemes); type 2 needs an
+       RPC ``computeProxyAddress`` so it stays ``None`` here and is resolved
+       by :func:`wallet.resolve_wallet` SAFE path.  Detection ranks whatever
+       addresses are present by observed on-chain evidence.
     """
     eoa_lower = _normalize_eoa(eoa)
     return {
@@ -273,7 +294,7 @@ def derive_wallets(eoa: str) -> dict[int, str | None]:
         SignatureType.POLY_PROXY: _poly_proxy_address(eoa_lower),
         # No trustworthy offline derivation — see docstring (P0-5).
         SignatureType.POLY_GNOSIS_SAFE: None,
-        SignatureType.POLY_1271: None,
+        SignatureType.POLY_1271: _deposit_wallet_address(eoa_lower),
     }
 
 

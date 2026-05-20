@@ -40,6 +40,10 @@ from eth_utils.crypto import keccak
 
 from polyecho.shared.accounts import SignatureType
 from polyecho.shared.constants import (
+    DEPOSIT_WALLET_FACTORY,
+    DEPOSIT_WALLET_IMPLEMENTATION,
+    ERC1967_INIT_CODE_CONST1,
+    ERC1967_INIT_CODE_CONST2,
     MAGIC_PROXY_FACTORY,
     MAGIC_PROXY_INIT_CODE_HASH,
     SAFE_PROXY_FACTORY,
@@ -53,6 +57,7 @@ __all__ = [
     "SafeProxyResolver",
     "resolve_wallet",
     "magic_proxy_address",
+    "deposit_wallet_address",
     "SAFE_PROXY_FACTORY_ABI",
     "make_safe_proxy_resolver",
 ]
@@ -126,6 +131,77 @@ def magic_proxy_address(eoa: str) -> str:
     factory_bytes = bytes.fromhex(to_checksum_address(MAGIC_PROXY_FACTORY)[2:])
     init_hash = bytes.fromhex(MAGIC_PROXY_INIT_CODE_HASH[2:])
     pre = b"\xff" + factory_bytes + keccak(eoa_bytes) + init_hash
+    return to_checksum_address(keccak(pre)[-20:]).lower()
+
+
+def deposit_wallet_address(eoa: str) -> str:
+    """Type-3 (POLY_1271 / Deposit-Wallet) funder via Solady ERC-1967 CREATE2.
+
+    Mirrors ``Polymarket/builder-relayer-client``
+    ``src/builder/deposit-wallet.ts`` (TS reference) byte-for-byte:
+
+        walletId    = bytes32(left-pad EOA to 32)
+        args        = abi.encode(address factory, bytes32 walletId)
+        salt        = keccak256(args)
+        bytecodeHash = keccak256(
+            bytes10(0x61003d3d8160233d3973 | (n << 56))   # n = byte-len(args)
+         || implementation(20)
+         || 0x6009
+         || ERC1967_INIT_CODE_CONST2 (verbatim)
+         || ERC1967_INIT_CODE_CONST1 (verbatim)
+         || args
+        )
+        deposit_wallet = create2(factory, salt, bytecodeHash)
+
+    The ``0x6009`` separator and the two ``ERC1967_INIT_CODE_CONST*`` blobs
+    are literal Solady (v0.1.26) bytecode constants — they must be copied
+    verbatim from the TS source; any bit-flip changes the produced address.
+    A parity regression test pins this output for a known EOA.
+
+    Args:
+        eoa: The signer EOA (``0x…``).
+
+    Returns:
+        Lowercased ``0x…`` Deposit-Wallet address.
+
+    .. note:: Brief §sig-3 / standing rule: derivation is a convenience to
+       *verify* an operator-supplied funder, not to trust blindly.  Callers
+       should still re-derive and compare before posting to ``/submit``.
+    """
+    # Lazy import: ``eth_abi`` is a transitive of web3.py and we keep this
+    # module web3-free at import time (consistent with the rest of the file).
+    from eth_abi import encode  # type: ignore[attr-defined]
+
+    eoa_l = _norm(eoa)
+    eoa_bytes = bytes.fromhex(to_checksum_address(eoa_l)[2:])
+    wallet_id = b"\x00" * 12 + eoa_bytes  # bytes32 left-padded
+    assert len(wallet_id) == 32
+
+    factory_str = to_checksum_address(DEPOSIT_WALLET_FACTORY)
+    factory_bytes = bytes.fromhex(factory_str[2:])
+    impl_bytes = bytes.fromhex(to_checksum_address(DEPOSIT_WALLET_IMPLEMENTATION)[2:])
+
+    # NOTE: abi.encode (NOT encodePacked) — two 32-byte words.
+    args: bytes = encode(["address", "bytes32"], [factory_str, wallet_id])
+    assert len(args) == 64  # two 32-byte words
+
+    salt = keccak(args)
+
+    # n = byte-length of args (=64 here).  The TS source computes
+    # ``BigInt((args.length - 2) / 2)`` against a hex string, which equals
+    # the byte count of args.  ``<< 56`` shifts n into the high byte of the
+    # 10-byte prefix word.
+    n = len(args)
+    prefix = (0x61003D3D8160233D3973 | (n << 56)).to_bytes(10, "big")
+
+    const2_bytes = bytes.fromhex(ERC1967_INIT_CODE_CONST2[2:])
+    const1_bytes = bytes.fromhex(ERC1967_INIT_CODE_CONST1[2:])
+    sep = b"\x60\x09"  # 0x6009 literal
+
+    init_code = prefix + impl_bytes + sep + const2_bytes + const1_bytes + args
+    bytecode_hash = keccak(init_code)
+
+    pre = b"\xff" + factory_bytes + salt + bytecode_hash
     return to_checksum_address(keccak(pre)[-20:]).lower()
 
 

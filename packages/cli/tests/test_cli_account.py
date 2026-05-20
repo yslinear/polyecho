@@ -132,12 +132,16 @@ class _SwingDS:
 
 class TestAccountDetect:
     def test_detect_renders_table_and_recommendation(self) -> None:
-        # P0-5: derive_wallets returns {0: eoa, 1: magic_proxy, 2: None,
-        # 3: None}.  type-2/3 have NO trustworthy offline derivation, so
-        # the only derivable non-EOA candidate is type-1 (verified CREATE2).
-        # The fixture maps SWING onto type-1, so type-1 must be recommended.
+        # P0-5 / P6: derive_wallets returns {0: eoa, 1: magic_proxy,
+        # 2: None, 3: deposit_wallet}.  type-2 still has NO trustworthy
+        # offline derivation; type-3 now has the verified Solady ERC-1967
+        # CREATE2 deposit-wallet derivation.  The fixture maps SWING onto
+        # type-1, so type-1 must be recommended.
         w = derive_wallets(_EOA)
-        assert w[2] is None and w[3] is None  # contract: no fabricated addrs
+        # Contract: sig 2 still has no fabricated addr; sig 3 NOW has the
+        # verified Solady deposit-wallet derivation.
+        assert w[2] is None
+        assert w[3] is not None
         t1 = w[1]
         assert t1 is not None  # type-1 is the verified CREATE2 candidate
         ds = _SwingDS(t1)
@@ -155,9 +159,13 @@ class TestAccountDetect:
         # type-1 (the only derivable non-EOA candidate, fed SWING data) wins.
         assert "Type 1" in out
         assert _EOA_LOWER in out
-        # type-2/3 must render the safe zh-TW hint, NOT a fabricated address
-        # and NOT a crash.
+        # type-2 (POLY_GNOSIS_SAFE) still has no trustworthy offline
+        # derivation → the safe zh-TW hint is rendered, NOT a fabricated
+        # address and NOT a crash.
         assert "需顯式提供 funder" in out
+        # type-3 (POLY_1271) now renders the verified deposit-wallet
+        # derived address instead of the hint.
+        assert w[3] in out
 
     def test_detect_no_data_reports_none(self) -> None:
         ds = FixtureDataSource()  # nothing maps
@@ -237,10 +245,15 @@ class TestAccountImport:
         # Never reached the DB write — no fabricated row persisted.
         assert "session" not in scope._captured
 
-    def test_import_type3_without_funder_refuses(self) -> None:
-        """P0-5: type-3 (POLY_1271) likewise has no derivation and must
-        fail-closed without an explicit --funder."""
-        assert derive_wallets(_EOA)[3] is None
+    def test_import_type3_without_funder_uses_derived(self) -> None:
+        """P6: type-3 (POLY_1271) now has the verified Solady ERC-1967
+        CREATE2 deposit-wallet derivation, symmetric to sig 1.  With NO
+        --funder we MUST fall back to the derived address (NOT refuse),
+        surface an informational panel so the operator can cross-check
+        against polymarket.com/settings, and persist the derived value."""
+        assert derive_wallets(_EOA)[3] is not None
+        derived = derive_wallets(_EOA)[3]
+
         scope = _make_session_scope(scalar_result=None)
         with patch("polyecho.shared.db.session_scope", scope):
             result = runner.invoke(
@@ -248,8 +261,84 @@ class TestAccountImport:
                 ["account", "import", _EOA, "-t", "3"],
                 input=f"{_PASSPHRASE}\n{_PASSPHRASE}\n{_PRIVATE_KEY}\n",
             )
-        assert result.exit_code != 0
-        assert "session" not in scope._captured
+
+        # Success — sig 3 default path is auto-derived, not refuse.
+        assert result.exit_code == 0, result.output
+        assert "created" in result.output
+        # Informational panel surfaced.
+        assert "自動推導 deposit wallet" in result.output
+        # The DB write went through with the derived funder.
+        session = scope._captured["session"]
+        session.add.assert_called_once()
+        added = session.add.call_args[0][0]
+        assert added.signature_type == 3
+        assert added.funder_address == derived
+        assert added.status == "ready"
+        # Secrets never leaked.
+        assert _PRIVATE_KEY not in result.output
+        assert _PASSPHRASE not in result.output
+
+    def test_import_type3_with_explicit_funder_mismatch_warns(self) -> None:
+        """P6 (symmetric to sig 1): type-3 + explicit --funder that DOES NOT
+        match the Solady deposit-wallet CREATE2 derivation must surface a
+        yellow warning Panel but STILL persist the OPERATOR's value
+        (warn-only; v2 docs allow multiple deposit wallets per operator)."""
+        derived = derive_wallets(_EOA)[3]
+        assert derived is not None
+        # An obviously-different funder so the cross-check must trip.
+        bogus_funder = "0x" + "BB" * 20
+        assert bogus_funder.lower() != derived.lower()
+
+        scope = _make_session_scope(scalar_result=None)
+        with patch("polyecho.shared.db.session_scope", scope):
+            result = runner.invoke(
+                app,
+                [
+                    "account", "import", _EOA,
+                    "-t", "3",
+                    "--funder", bogus_funder,
+                ],
+                input=f"{_PASSPHRASE}\n{_PASSPHRASE}\n{_PRIVATE_KEY}\n",
+            )
+
+        assert result.exit_code == 0, result.output
+        # Warning surfaced.
+        assert "Deposit-Wallet" in result.output
+        assert "不符" in result.output
+        # Still persisted (warn-only — operator override honoured).
+        assert "created" in result.output
+        session = scope._captured["session"]
+        session.add.assert_called_once()
+        added = session.add.call_args[0][0]
+        # The OPERATOR's funder is what landed, not the derived one.
+        assert added.funder_address == bogus_funder.lower()
+        assert added.signature_type == 3
+        # Secrets never leaked.
+        assert _PRIVATE_KEY not in result.output
+        assert _PASSPHRASE not in result.output
+
+    def test_import_type3_with_explicit_funder_match_silent(self) -> None:
+        """P6 (negative): sig-3 with --funder equal to the deposit-wallet
+        CREATE2 derivation must NOT surface the mismatch warning.  The
+        auto-derivation info panel must ALSO not appear (--funder is
+        explicit, so there is nothing to "auto" announce)."""
+        derived = derive_wallets(_EOA)[3]
+        assert derived is not None
+
+        scope = _make_session_scope(scalar_result=None)
+        with patch("polyecho.shared.db.session_scope", scope):
+            result = runner.invoke(
+                app,
+                ["account", "import", _EOA, "-t", "3", "--funder", derived],
+                input=f"{_PASSPHRASE}\n{_PASSPHRASE}\n{_PRIVATE_KEY}\n",
+            )
+        assert result.exit_code == 0, result.output
+        assert "Deposit-Wallet CREATE2 cross-check warning" not in result.output
+        assert "自動推導 deposit wallet" not in result.output
+        assert "created" in result.output
+        added = scope._captured["session"].add.call_args[0][0]
+        assert added.funder_address == derived
+        assert added.signature_type == 3
 
     def test_import_type2_invalid_funder_rejected(self) -> None:
         """An explicit but malformed --funder is rejected before any DB

@@ -36,7 +36,13 @@ test = [
 # imports the SDK lazily and fails closed with RelayerNotAvailableError
 # if the package is missing.
 relayer = [
+  # sig 2 SAFE (TransactionType.SAFE) via the official client.
   "py-builder-relayer-client>=0.0.1",
+  # sig 1 (POLY_PROXY) + sig 3 (POLY_1271 / Deposit-Wallet) gasless
+  # redeem: ``polyecho.shared.polymarket.relayer_extended`` consumes the
+  # builder HMAC signing surface from py-builder-signing-sdk (POLY_BUILDER_*
+  # headers) — same orthogonal-to-tx-type pattern the brief calls out.
+  "py-builder-signing-sdk>=0.0.1",
 ]
 
 [build-system]

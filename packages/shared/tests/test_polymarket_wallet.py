@@ -29,6 +29,8 @@ from polyecho.shared.polymarket.wallet import (
     SAFE_PROXY_FACTORY_ABI,
     AccountLike,
     WalletMode,
+    deposit_wallet_address,
+    magic_proxy_address,
     make_safe_proxy_resolver,
     resolve_wallet,
 )
@@ -212,3 +214,57 @@ class TestSafeIntegrationWithResolveWallet:
         """No resolver + no explicit funder ⇒ fail-closed (unchanged)."""
         with pytest.raises(ValueError, match="fail-closed"):
             run(resolve_wallet(cast(AccountLike, _SafeAccount())))
+
+
+# ---------------------------------------------------------------------------
+# Deposit-Wallet (sig 3 / POLY_1271) CREATE2 parity — Solady ERC-1967 clone
+# ---------------------------------------------------------------------------
+class TestDepositWalletDerivation:
+    """Pin :func:`deposit_wallet_address` byte-for-byte.
+
+    The address is a CREATE2 over ``DEPOSIT_WALLET_FACTORY`` of a Solady
+    (v0.1.26) ERC-1967 minimal-proxy clone whose init code embeds two
+    32-byte Solady literals + the 2-byte ``0x6009`` separator.  Any
+    single bit-flip in those literals or in the abi.encode of
+    ``(factory, walletId)`` changes the produced address — so this test
+    is the primary safety-net for the sig-3 wire path.
+
+    Expected value (``0xfaea0f08159fcf2f573fe24e9e989b0d48f7651b`` for
+    EOA ``0x1111…1111``) was computed by the PolyEcho Python derivation
+    against the verbatim brief / TS byte literals on 2026-05-20.  A
+    production deposit-wallet sniffed from PolygonScan should ALSO match
+    this scheme; if it does not, this test will tripwire the operator
+    *before* a real /submit is posted.  See
+    ``docs/reference/polymarket-sig1-sig3-redeem-wire.md`` for the full
+    byte-literal derivation and the TS source link.
+    """
+
+    # Deterministic test EOA — easy to reproduce in any environment.
+    _TEST_EOA = "0x1111111111111111111111111111111111111111"
+    _EXPECTED_DEPOSIT_WALLET = "0xfaea0f08159fcf2f573fe24e9e989b0d48f7651b"
+
+    def test_deposit_wallet_address_parity(self) -> None:
+        addr = deposit_wallet_address(self._TEST_EOA)
+        assert addr == self._EXPECTED_DEPOSIT_WALLET
+
+    def test_deposit_wallet_rejects_garbage_eoa(self) -> None:
+        with pytest.raises(ValueError, match="valid EVM address"):
+            deposit_wallet_address("not-an-address")
+
+    def test_deposit_wallet_is_deterministic(self) -> None:
+        # CREATE2 must be deterministic.  Two calls for the same EOA
+        # MUST return the same lowercased address.
+        a = deposit_wallet_address(self._TEST_EOA)
+        b = deposit_wallet_address(self._TEST_EOA.lower())
+        assert a == b == self._EXPECTED_DEPOSIT_WALLET
+
+    def test_magic_proxy_byte_stable_for_same_eoa(self) -> None:
+        """Sig-1 (Magic) derivation regression — current brief constants
+        must yield a stable byte-identical output for the same test EOA,
+        so any future tweak to ``MAGIC_PROXY_FACTORY`` /
+        ``MAGIC_PROXY_INIT_CODE_HASH`` is caught.
+        """
+        # Locked Python output for EOA 0x1111…1111 using the verified
+        # brief §9 constants (factory + initCodeHash).
+        expected = "0xf537a2b3159593a425e2fa8f5ba3bd3080d4a18a"
+        assert magic_proxy_address(self._TEST_EOA) == expected

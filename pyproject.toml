@@ -87,6 +87,17 @@ ignore_missing_imports = true
 module = ["py_vapid", "py_vapid.*"]
 ignore_missing_imports = true
 
+# `py_builder_relayer_client` and `py_builder_signing_sdk` are declared as
+# the SHARED package's optional [relayer] extra. CI / byte-mirror docker
+# (`uv sync --frozen --dev`) does NOT install extras, so these imports are
+# unresolvable at type-check time. They are consumed exclusively inside
+# lazy try/except ImportError blocks in shared.polymarket.relayer and
+# shared.polymarket.relayer_extended which raise RelayerNotAvailableError
+# (fail-closed) when missing. Same narrowly-scoped pattern as pandas/py_vapid.
+[[tool.mypy.overrides]]
+module = ["py_builder_relayer_client.*", "py_builder_signing_sdk.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["packages"]

@@ -280,7 +280,10 @@ def import_key(
     from polyecho.shared.crypto import encrypt_private_key
     from polyecho.shared.db import session_scope
     from polyecho.shared.models import Account
-    from polyecho.shared.polymarket.wallet import magic_proxy_address
+    from polyecho.shared.polymarket.wallet import (
+        deposit_wallet_address,
+        magic_proxy_address,
+    )
 
     try:
         wallets = derive_wallets(eoa)
@@ -299,48 +302,80 @@ def import_key(
             "this should be impossible; refusing to import."
         )
 
-    # P0-5: consume the verified derive_wallets contract.
-    #   type 0/1 → verified derived funder (exact / brief §9 CREATE2).
-    #   type 2/3 → derive_wallets returns None (no trustworthy offline
+    # P0-5 / P6: consume the verified derive_wallets contract.
+    #   type 0   → EOA-is-funder (always exact).
+    #   type 1   → verified CREATE2 Magic-proxy derivation.
+    #   type 3   → verified Solady ERC-1967 CREATE2 Deposit-wallet derivation
+    #              (P6: the funder is deterministic per EOA per Polymarket
+    #              v2 docs; same "derived is a sensible default, explicit
+    #              still wins" stance as sig 1).
+    #   type 2   → derive_wallets returns None (no trustworthy offline
     #              derivation); operator MUST supply an on-chain-verified
     #              --funder.  We refuse loudly rather than persist a
     #              fabricated address (runbook §2.3).
     derived = wallets[signature_type]
     if derived is not None:
-        # Types 0/1: prefer the verified derived value.
+        # Types 0/1/3: prefer the verified derived value as the default.
         funder_addr = derived
-        # P2: CREATE2 cross-check (sig 1 only, when operator EXPLICITLY
-        # supplied --funder). The operator may have legitimate reasons to
-        # override (a customised proxy, a recovered account, etc.) — we
-        # WARN, never BLOCK. For sig 0 the EOA-is-funder identity is
-        # mathematical, so no operator funder makes sense → ignore silently.
+        # P2 / P6: CREATE2 cross-check (sig 1 + sig 3, when operator
+        # EXPLICITLY supplied --funder). The operator may have legitimate
+        # reasons to override (customised proxy, multiple deposit wallets,
+        # recovered account, etc.) — we WARN, never BLOCK. Per Polymarket
+        # v2 docs the deposit wallet (sig 3) is deterministic per EOA, but
+        # operators may legitimately use multiple deposit wallets, so the
+        # mismatch is a yellow warning, not a refusal.
+        # For sig 0 the EOA-is-funder identity is mathematical, so no
+        # operator funder makes sense → ignore silently.
         explicit_funder = funder.strip()
         if (
-            signature_type == 1
+            signature_type in (1, 3)
             and explicit_funder
             and is_address(explicit_funder)
         ):
             explicit_lower = explicit_funder.lower()
+            derive_fn = (
+                magic_proxy_address if signature_type == 1 else deposit_wallet_address
+            )
+            scheme_label = "CREATE2" if signature_type == 1 else "Deposit-Wallet CREATE2"
             try:
-                derived_check = magic_proxy_address(eoa_lower)
+                derived_check: str | None = derive_fn(eoa_lower)
             except ValueError:
                 derived_check = None
             if derived_check is not None and explicit_lower != derived_check.lower():
                 _console.print(
                     Panel(
-                        f"[yellow]⚠ 你提供的 --funder 與 CREATE2 推導不符。[/yellow]\n"
+                        f"[yellow]⚠ 你提供的 --funder 與 {scheme_label} 推導不符。[/yellow]\n"
                         f"提供的 funder : [bold]{explicit_lower}[/bold]\n"
-                        f"CREATE2 推導  : [bold]{derived_check.lower()}[/bold]\n\n"
-                        "可能是有意的（例如自訂代理 / 已遷移帳戶），\n"
+                        f"{scheme_label} 推導 : "
+                        f"[bold]{derived_check.lower()}[/bold]\n\n"
+                        "可能是有意的（例如自訂代理 / 已遷移帳戶 / 多個 deposit wallet），\n"
                         "若你不確定，請對照 polymarket.com/settings 顯示的 funder。\n"
                         "[dim]系統不阻擋此次匯入 — 仍將以你提供的 funder 寫入。[/dim]",
-                        title="[yellow]CREATE2 cross-check warning[/yellow]",
+                        title=f"[yellow]{scheme_label} cross-check warning[/yellow]",
                         border_style="yellow",
                     )
                 )
                 # Honour operator intent: persist the explicit value, not
                 # the derived one (warn-only stance).
                 funder_addr = explicit_lower
+        elif signature_type == 3 and not explicit_funder:
+            # P6: sig 3 with NO --funder — silently fall back to the
+            # verified Solady CREATE2 deposit-wallet derivation, with an
+            # informational panel so the operator can cross-check against
+            # polymarket.com/settings.  This is the symmetric sig-1
+            # behaviour ("derived is a sensible default") that the v2
+            # docs explicitly endorse for deposit-wallet-per-EOA.
+            _console.print(
+                Panel(
+                    f"[cyan]ⓘ 自動推導 deposit wallet:[/cyan] "
+                    f"[bold]{derived}[/bold]\n"
+                    "Polymarket v2 文件建議比對 polymarket.com/settings 顯示的\n"
+                    "deposit wallet — 若不符，請以 `--funder` 覆寫（同 sig 1 的精神）。\n"
+                    "[dim]系統不阻擋 — 仍將以推導值寫入。[/dim]",
+                    title="[cyan]Deposit-Wallet auto-derivation[/cyan]",
+                    border_style="cyan",
+                )
+            )
     else:
         explicit = funder.strip()
         if not explicit:

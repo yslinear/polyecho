@@ -1658,6 +1658,7 @@ dependencies = [
 [package.optional-dependencies]
 relayer = [
     { name = "py-builder-relayer-client" },
+    { name = "py-builder-signing-sdk" },
 ]
 test = [
     { name = "httpx" },
@@ -1672,6 +1673,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27" },
     { name = "py-builder-relayer-client", marker = "extra == 'relayer'", specifier = ">=0.0.1" },
+    { name = "py-builder-signing-sdk", marker = "extra == 'relayer'", specifier = ">=0.0.1" },
     { name = "py-clob-client-v2", specifier = "==1.0.1" },
     { name = "py-vapid", specifier = ">=1.9" },
     { name = "pydantic", specifier = ">=2" },

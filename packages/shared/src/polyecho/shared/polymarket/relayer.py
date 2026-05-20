@@ -307,12 +307,8 @@ class PolymarketRelayerClient:
         try:
             # Lazy import: this module must be importable even on hosts
             # that have not installed the optional relayer SDK.
-            from py_builder_relayer_client.client import (  # type: ignore[import-not-found]
-                RelayClient,
-            )
-            from py_builder_signing_sdk.config import (  # type: ignore[import-not-found]
-                BuilderConfig,
-            )
+            from py_builder_relayer_client.client import RelayClient
+            from py_builder_signing_sdk.config import BuilderConfig
         except ImportError as exc:  # pragma: no cover - depends on env
             raise RelayerNotAvailableError(
                 "py-builder-relayer-client is not installed.  Install "
@@ -373,9 +369,7 @@ class PolymarketRelayerClient:
         immediately — retrying is futile and would burn the circuit on
         an upstream-healthy condition.
         """
-        from py_builder_relayer_client.exceptions import (  # type: ignore[import-not-found]
-            RelayerApiException,
-        )
+        from py_builder_relayer_client.exceptions import RelayerApiException
 
         self._check_circuit()
         last_exc: Exception | None = None
@@ -474,10 +468,7 @@ class PolymarketRelayerClient:
             and (when ``wait_for_confirmation``) ``state`` + raw
             ``transaction`` payload from the relayer.
         """
-        from py_builder_relayer_client.models import (  # type: ignore[import-not-found]
-            OperationType,
-            SafeTransaction,
-        )
+        from py_builder_relayer_client.models import OperationType, SafeTransaction
 
         client = self._ensure_client()
         safe_tx = SafeTransaction(

@@ -96,6 +96,63 @@ MAGIC_PROXY_INIT_CODE_HASH: Final[str] = (
 SAFE_PROXY_FACTORY: Final[str] = "0xaacFeEa03eb1561C4e67d661e40682Bd20E3541b"
 
 # ---------------------------------------------------------------------------
+# Deposit-Wallet (signature_type 3, POLY_1271) — Polymarket "Deposit Wallet"
+# ---------------------------------------------------------------------------
+# Provenance: ``Polymarket/builder-relayer-client`` (TS reference), ``src/
+# config/index.ts`` + ``src/builder/deposit-wallet.ts``.  The wallet contract
+# is a Solady (v0.1.26) ERC-1967 minimal-proxy clone deployed via CREATE2 by
+# DEPOSIT_WALLET_FACTORY, pointing at DEPOSIT_WALLET_IMPLEMENTATION.  See
+# ``docs/reference/polymarket-sig1-sig3-redeem-wire.md`` for the full
+# byte-literal derivation.
+
+#: Deposit-Wallet factory.  Brief §sig-3 (CREATE2 deployer for ERC-1967
+#: minimal-proxy clones).
+DEPOSIT_WALLET_FACTORY: Final[str] = (
+    "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07"
+)
+
+#: Deposit-Wallet implementation that every per-EOA clone delegates to.
+#: Brief §sig-3.
+DEPOSIT_WALLET_IMPLEMENTATION: Final[str] = (
+    "0x58CA52ebe0DadfdF531Cde7062e76746de4Db1eB"
+)
+
+#: Builder-Relayer ``RelayHub`` address — required in the sig 1 (PROXY)
+#: ``rlx:`` struct-hash pre-image (the trailing 20-byte field).  Brief §sig-1
+#: ("RelayHub 0xD216153c06E857cD7f72665E0aF1d7D82172F494").
+RELAY_HUB: Final[str] = "0xD216153c06E857cD7f72665E0aF1d7D82172F494"
+
+# ---------------------------------------------------------------------------
+# Solady v0.1.26 ERC-1967 minimal-proxy clone init-code byte literals
+# ---------------------------------------------------------------------------
+# Provenance: VERBATIM from ``Polymarket/builder-relayer-client``
+# ``src/builder/deposit-wallet.ts`` which itself mirrors Solady ``LibClone.
+# initCodeHashERC1967`` (v0.1.26).  Any single bit-flip here changes the
+# generated CREATE2 address — DO NOT edit these constants without re-running
+# the deposit-wallet parity test.
+#
+# Layout (concatenated to form the init code, then keccak256'd):
+#   bytes10(0x61003d3d8160233d3973 | (n << 56))   # n = byte-len of args
+#   bytes20(implementation)
+#   bytes2(0x6009)
+#   bytes32(ERC1967_CONST2)
+#   bytes32(ERC1967_CONST1)
+#   bytes (args = abi.encode(address factory, bytes32 walletId))
+#
+# These are pure data; no Python-side computation can replace the constants
+# because they encode Solady's proxy-resolver/upgrade-slot bytecode.
+
+#: bytes32 — Solady ERC-1967 init-code constant #2 (verbatim).
+ERC1967_INIT_CODE_CONST2: Final[str] = (
+    "0x5155f3363d3d373d3d363d7f360894a13ba1a3210667c828492db98dca3e2076"
+)
+
+#: bytes32 — Solady ERC-1967 init-code constant #1 (verbatim).
+ERC1967_INIT_CODE_CONST1: Final[str] = (
+    "0xcc3735a920a3ca505d382bbc545af43d6000803e6038573d6000fd5b3d6000f3"
+)
+
+# ---------------------------------------------------------------------------
 # Endpoints (brief §1/§3/§9 — centralised, like PolyHermes PolymarketConstants)
 # ---------------------------------------------------------------------------
 #: Polymarket CLOB REST base.  Brief §2 (CLOB-direct trading).
@@ -139,6 +196,11 @@ __all__ = [
     "MAGIC_PROXY_FACTORY",
     "MAGIC_PROXY_INIT_CODE_HASH",
     "SAFE_PROXY_FACTORY",
+    "DEPOSIT_WALLET_FACTORY",
+    "DEPOSIT_WALLET_IMPLEMENTATION",
+    "RELAY_HUB",
+    "ERC1967_INIT_CODE_CONST1",
+    "ERC1967_INIT_CODE_CONST2",
     "CLOB_BASE_URL",
     "GAMMA_BASE_URL",
     "DATA_API_BASE_URL",
