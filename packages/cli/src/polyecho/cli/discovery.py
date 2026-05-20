@@ -190,3 +190,123 @@ def promote(
             border_style="green",
         )
     )
+
+
+@app.command(name="score-wallet")
+def score_wallet(
+    wallet: str = typer.Argument(
+        ..., help="EVM address (0x + 40 hex) to force-evaluate."
+    ),
+    name: str | None = typer.Option(
+        None, "--name", help="Optional display_name to upsert if not set."
+    ),
+    source: str = typer.Option(
+        "external_seed",
+        "--source",
+        help="Provenance tag merged into candidate_leaders.sources.",
+    ),
+) -> None:
+    """Force-evaluate ONE wallet via the full discovery pipeline.
+
+    The scheduled worker is leaderboard-driven — Phase-1 only touches
+    the top-200 PnL leaderboard and Phase-2 detail-scores a budgeted
+    subset of THAT set.  A wallet inserted manually (e.g. a niche
+    smart-money seed not in the current top-200) therefore never
+    receives the full evaluation.  This command bypasses the
+    budget gate for one wallet and runs the SAME per-wallet pipeline the
+    worker uses internally: fetch activity + positions → frequency
+    stats → strategy + risk flags → profit / replicability / total
+    scores → UPSERT ``candidate_leaders``.
+
+    Refuses to run under ``POLYECHO_DATASOURCE=fixture`` — discovery
+    persistence is unconditionally closed there (no synthetic data ever
+    reaches the operator DB; no opt-in to bypass).
+    """
+    import re
+
+    from sqlalchemy import select
+
+    from polyecho.discovery._lifecycle import datasource_lifecycle
+    from polyecho.discovery.worker import (
+        DiscoveryWorker,
+        set_persistence_enabled,
+    )
+    from polyecho.shared.datasource import (
+        FixtureDataSource,
+        get_datasource,
+    )
+    from polyecho.shared.db import session_scope
+    from polyecho.shared.models import CandidateLeader
+
+    _EVM_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+    w = wallet.strip()
+    if not _EVM_RE.match(w):
+        _console.print(
+            f"[red]Invalid EVM address[/red]: {w}\n"
+            "[dim]Expected 0x followed by exactly 40 hex chars.[/dim]"
+        )
+        raise typer.Exit(code=2)
+    w_norm = w.lower()
+
+    async def _evaluate_and_read() -> CandidateLeader | None:
+        async with datasource_lifecycle(get_datasource()) as ds:
+            if isinstance(ds, FixtureDataSource):
+                _console.print(
+                    "[red]Refusing in fixture datasource mode[/red] — "
+                    "discovery persistence is unconditionally closed for "
+                    "fixture (no synthetic data ever reaches the operator "
+                    "DB). Set POLYECHO_DATASOURCE=live and retry."
+                )
+                raise typer.Exit(code=2)
+            # Live path: ensure the worker's persistence gate is open
+            # (defensive — the gate defaults open; this guards against a
+            # prior test/process toggling it shut in the same interpreter).
+            set_persistence_enabled(True)
+            worker = DiscoveryWorker(ds)
+            await worker._process_wallet(
+                w_norm, source, display_name=name
+            )
+
+        async with session_scope() as session:
+            return (
+                await session.execute(
+                    select(CandidateLeader).where(
+                        CandidateLeader.wallet_address == w_norm
+                    )
+                )
+            ).scalar_one_or_none()
+
+    try:
+        row = asyncio.run(_evaluate_and_read())
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - clean CLI error surface
+        _console.print(f"[red]score-wallet failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if row is None:
+        _console.print(
+            Panel(
+                f"[yellow]No row persisted for {w_norm}[/yellow]\n"
+                "[dim]The per-wallet fetch likely failed (data-api / proxy "
+                "issue, or the address has no Polymarket activity). Check "
+                "`polyecho doctor` and retry.[/dim]",
+                title="[dim]polyecho discovery score-wallet[/dim]",
+                border_style="yellow",
+            )
+        )
+        raise typer.Exit(code=1)
+
+    _console.print(
+        Panel(
+            f"[bold green]Scored[/bold green] {w_norm}\n"
+            f"  total_score         = {row.total_score}\n"
+            f"  profit_score        = {row.profit_score}\n"
+            f"  replicability_score = {row.replicability_score}\n"
+            f"  strategy_type       = {row.strategy_type}\n"
+            f"  risk_flags          = {list(row.risk_flags or [])}\n"
+            f"  sources             = {list(row.sources or [])}",
+            title="[dim]polyecho discovery score-wallet[/dim]",
+            border_style="green",
+        )
+    )

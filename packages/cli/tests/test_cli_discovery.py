@@ -160,6 +160,155 @@ class TestDiscoveryPromote:
         assert _WALLET.lower() in result.output
 
 
+# ---------------------------------------------------------------------------
+# score-wallet  — force-eval one wallet through the full per-wallet pipeline
+# ---------------------------------------------------------------------------
+class TestDiscoveryScoreWallet:
+    """The scheduled worker is leaderboard-driven; a manually-seeded niche
+    wallet never enters its Phase-2 detail set. `score-wallet` bypasses
+    the budget gate for ONE wallet and writes the result back via the
+    same upsert path the worker uses."""
+
+    # The module-level _WALLET is 39 hex (used by promote tests, which
+    # don't enforce 0x+40hex). score-wallet explicitly validates the EVM
+    # shape, so the score-wallet tests need a real 40-hex address.
+    _VALID = "0x" + "ab" * 20
+
+    def _patches(
+        self, *, is_fixture: bool, row: Any
+    ) -> tuple[Any, AsyncMock, Any]:
+        # Live or fixture datasource (the command branches on isinstance).
+        if is_fixture:
+            from polyecho.shared.datasource.fixture import FixtureDataSource
+            ds_obj: Any = FixtureDataSource()
+        else:
+            ds_obj = MagicMock(name="LiveDataSource-fake")
+
+        @asynccontextmanager
+        async def fake_lifecycle(ds: Any) -> AsyncGenerator[Any, None]:
+            yield ds
+
+        worker_instance = MagicMock()
+        worker_instance._process_wallet = AsyncMock(return_value=None)
+        worker_cls = MagicMock(return_value=worker_instance)
+
+        scope = _make_scope(scalar_one=row)
+        return (
+            (ds_obj, worker_instance._process_wallet, scope),
+            worker_cls,
+            fake_lifecycle,
+        )
+
+    def test_score_wallet_happy_path(self) -> None:
+        row = MagicMock(
+            total_score=42.0,
+            profit_score=60.0,
+            replicability_score=70.0,
+            strategy_type="Swing",
+            risk_flags=["new_account"],
+            sources=["external_seed"],
+        )
+        (ds, process_wallet, scope), worker_cls, lifecycle = self._patches(
+            is_fixture=False, row=row
+        )
+        with (
+            patch(
+                "polyecho.discovery.worker.DiscoveryWorker", worker_cls
+            ),
+            patch(
+                "polyecho.discovery._lifecycle.datasource_lifecycle",
+                lifecycle,
+            ),
+            patch(
+                "polyecho.shared.datasource.get_datasource",
+                return_value=ds,
+            ),
+            patch(
+                "polyecho.discovery.worker.set_persistence_enabled"
+            ),
+            patch("polyecho.shared.db.session_scope", scope),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "discovery", "score-wallet", self._VALID,
+                    "--name", "Theo4",
+                    "--source", "external_seed",
+                ],
+                env={"COLUMNS": "200"},
+            )
+        assert result.exit_code == 0, result.output
+        process_wallet.assert_awaited_once()
+        # Signature: _process_wallet(wallet, source, *, display_name, start=None)
+        args = process_wallet.call_args.args
+        kwargs = process_wallet.call_args.kwargs
+        assert args[0] == self._VALID.lower()
+        assert args[1] == "external_seed"
+        assert kwargs.get("display_name") == "Theo4"
+        assert "Scored" in result.output
+        assert "42.0" in result.output
+
+    def test_score_wallet_invalid_address(self) -> None:
+        result = runner.invoke(
+            app,
+            ["discovery", "score-wallet", "not-an-address"],
+            env={"COLUMNS": "200"},
+        )
+        assert result.exit_code == 2
+        assert "Invalid EVM address" in result.output
+
+    def test_score_wallet_refuses_fixture_mode(self) -> None:
+        (ds, _process, _scope), worker_cls, lifecycle = self._patches(
+            is_fixture=True, row=None
+        )
+        with (
+            patch(
+                "polyecho.discovery._lifecycle.datasource_lifecycle",
+                lifecycle,
+            ),
+            patch(
+                "polyecho.shared.datasource.get_datasource",
+                return_value=ds,
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                ["discovery", "score-wallet", self._VALID],
+                env={"COLUMNS": "200"},
+            )
+        assert result.exit_code == 2
+        assert "fixture" in result.output.lower()
+
+    def test_score_wallet_no_row_persisted_exits_nonzero(self) -> None:
+        (ds, _process, scope), worker_cls, lifecycle = self._patches(
+            is_fixture=False, row=None
+        )
+        with (
+            patch(
+                "polyecho.discovery.worker.DiscoveryWorker", worker_cls
+            ),
+            patch(
+                "polyecho.discovery._lifecycle.datasource_lifecycle",
+                lifecycle,
+            ),
+            patch(
+                "polyecho.shared.datasource.get_datasource",
+                return_value=ds,
+            ),
+            patch(
+                "polyecho.discovery.worker.set_persistence_enabled"
+            ),
+            patch("polyecho.shared.db.session_scope", scope),
+        ):
+            result = runner.invoke(
+                app,
+                ["discovery", "score-wallet", self._VALID],
+                env={"COLUMNS": "200"},
+            )
+        assert result.exit_code != 0
+        assert "No row persisted" in result.output
+
+
 @pytest.mark.parametrize(
     "args",
     [
@@ -167,6 +316,7 @@ class TestDiscoveryPromote:
         ["discovery", "run", "--help"],
         ["discovery", "schedule", "--help"],
         ["discovery", "promote", "--help"],
+        ["discovery", "score-wallet", "--help"],
     ],
     ids=lambda a: " ".join(a),
 )
