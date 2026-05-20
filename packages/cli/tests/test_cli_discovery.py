@@ -279,6 +279,40 @@ class TestDiscoveryScoreWallet:
         assert result.exit_code == 2
         assert "fixture" in result.output.lower()
 
+    def test_score_wallet_row_exists_but_unscored_exits_nonzero(self) -> None:
+        """A thin-row exists from a prior upsert but _process_wallet's
+        fetch failed (e.g. data-api / proxy transient). total_score is
+        still NULL — must NOT mis-print 'Scored', must exit non-zero."""
+        thin = MagicMock(total_score=None)
+        (ds, _process, scope), worker_cls, lifecycle = self._patches(
+            is_fixture=False, row=thin
+        )
+        with (
+            patch(
+                "polyecho.discovery.worker.DiscoveryWorker", worker_cls
+            ),
+            patch(
+                "polyecho.discovery._lifecycle.datasource_lifecycle",
+                lifecycle,
+            ),
+            patch(
+                "polyecho.shared.datasource.get_datasource",
+                return_value=ds,
+            ),
+            patch(
+                "polyecho.discovery.worker.set_persistence_enabled"
+            ),
+            patch("polyecho.shared.db.session_scope", scope),
+        ):
+            result = runner.invoke(
+                app,
+                ["discovery", "score-wallet", self._VALID],
+                env={"COLUMNS": "200"},
+            )
+        assert result.exit_code != 0
+        assert "Row exists but NOT scored" in result.output
+        assert "Scored " not in result.output  # space matters
+
     def test_score_wallet_no_row_persisted_exits_nonzero(self) -> None:
         (ds, _process, scope), worker_cls, lifecycle = self._patches(
             is_fixture=False, row=None

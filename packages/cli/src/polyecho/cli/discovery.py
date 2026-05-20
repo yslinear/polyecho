@@ -297,6 +297,31 @@ def score_wallet(
         )
         raise typer.Exit(code=1)
 
+    # The row may already exist from a prior thin upsert (e.g. an external-
+    # seed UPSERT writing display_name + sources before any scoring). In
+    # that case ``_process_wallet`` runs but the per-wallet activity /
+    # positions fetch can fail (transient data-api / proxy issue, circuit
+    # breaker tripping during the run, or the wallet simply has no recent
+    # Polymarket trades) — the scoring fields stay NULL. Without this guard
+    # the CLI would mis-report "Scored" on a row that was never actually
+    # scored this run. Surface the gap honestly + non-zero exit so the
+    # operator knows to retry.
+    if row.total_score is None:
+        _console.print(
+            Panel(
+                f"[yellow]Row exists but NOT scored[/yellow] for {w_norm}\n"
+                "[dim]The per-wallet activity / positions fetch failed "
+                "during this run (transient data-api / proxy issue, or "
+                "the upstream circuit breaker tripped). The row is in "
+                "the pool as a thin candidate; retry later — a fresh cli "
+                "run, or the next scheduled discovery cycle, will attempt "
+                "the fetch again.[/dim]",
+                title="[dim]polyecho discovery score-wallet[/dim]",
+                border_style="yellow",
+            )
+        )
+        raise typer.Exit(code=1)
+
     _console.print(
         Panel(
             f"[bold green]Scored[/bold green] {w_norm}\n"
