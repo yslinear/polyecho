@@ -118,7 +118,7 @@ export const discovery = {
     /** Inline placeholder used by null name / strategy / last-active cells. */
     notSet: "未設定",
     /** Search box. */
-    searchPlaceholder: "搜尋 wallet 或名稱…",
+    searchPlaceholder: "0x… 或 Leader 名稱",
     searchAria: "依 wallet 或顯示名稱搜尋",
     /** Faceted filter dropdown titles. */
     filters: {
@@ -136,8 +136,8 @@ export const discovery = {
       profit: "獲利區間",
       replicability: "可複製性區間",
       total: "總分區間",
-      min: "最小",
-      max: "最大",
+      min: "0",
+      max: "100",
       /** Accessible name for the dual-thumb range Slider.
        *  {{title}} = the range filter title above. */
       sliderAria: "{{title}}（0–100 雙向拉桿）",
@@ -174,6 +174,14 @@ export const discovery = {
       new_account: "新帳號",
       low_liquidity: "低流動性",
       high_concentration: "高度集中",
+    },
+    /** candidate_leaders.sources tags (the 3 discovery sources;
+     *  packages/discovery worker.py). Underlying value stays the raw
+     *  code; UNMAPPED degrades to the raw verbatim. */
+    sourceLabel: {
+      leaderboard: "排行榜",
+      hot_market: "熱門市場",
+      large_new_positions: "大額新部位",
     },
     /** Status facet option labels (value stays the raw enum). */
     statusOptions: {
@@ -213,17 +221,17 @@ export const discovery = {
     /** Sonner toasts fired by row actions. */
     toast: {
       backtestQueued: "Backtest 已排入佇列（90 天 · Balanced）",
-      backtestFailed: "Backtest 排入佇列失敗",
+      backtestFailed: "Backtest 排入佇列失敗，請稍候重試。",
       /** {{label}} = the lower-cased action label (translated above). */
       leaderMarked: "Leader 已標記為{{label}}",
-      leaderFailed: "更新 Leader 失敗",
+      leaderFailed: "更新 Leader 狀態失敗，請稍候重試。",
     },
     /** Empty states. */
     empty: {
       filteredTitle: "沒有符合篩選條件的 Leader。",
       filteredHint: "清除篩選條件即可看到完整候選名單。",
       clearFilters: "清除篩選",
-      noDataTitle: "尚無候選者，請執行 discovery 掃描。",
+      noDataTitle: "尚無候選者，請在 trader-core 主機執行 polyecho discovery scan。",
       noDataHint: "discovery 掃描找到 smart-money wallet 後，名單即會填入。",
     },
     /** Pagination footer. */

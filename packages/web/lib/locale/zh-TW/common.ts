@@ -23,10 +23,12 @@ export const common = {
   /** Generic fallback for an unmapped enum value (used by lib/format.ts
    *  signatureTypeLabel). 未知 = "unknown". */
   unknown: "未知",
-  /** Visually-hidden chrome a11y copy we own (root-layout skip-link).
-   *  shadcn/ui primitive sr-only text stays upstream-verbatim. */
+  /** Visually-hidden chrome a11y copy we own (root-layout skip-link +
+   *  the persistent sidebar-toggle in the top header). shadcn/ui primitive
+   *  sr-only text stays upstream-verbatim. */
   a11y: {
     skipToContent: "跳至主要內容",
+    toggleSidebar: "切換導覽側欄",
   },
   /** Generic chart island empty-state (shared DataChart wrapper). */
   chart: {

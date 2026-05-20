@@ -58,11 +58,13 @@ export const alertsSettings = {
       /** {{phrase}} = the verbatim confirm phrase (literal, not translated). */
       errConfirmPhrase: "請完整輸入「{{phrase}}」以確認此危險操作。",
       errNoPassphrase: "請輸入危險操作通行碼。",
-      errConfirmFailed: "確認失敗，請檢查資料庫連線。",
+      errConfirmFailed: "確認失敗，未送出任何操作。請稍候重試；若持續失敗，請檢查 trader-core 與資料庫狀態。",
       passphraseLabel: "危險操作通行碼",
       passphrasePlaceholder: "輸入通行碼",
+      passphraseHint:
+        "需先由 CLI set-danger-passphrase 佈建；伺服器以常數時間比對雜湊，錯誤時不寫入任何資料。",
       confirmAria: "確認並執行此危險操作",
-      confirming: "送出中…",
+      confirming: "確認中…",
       confirmSubmit: "確認並執行",
     },
   },
@@ -77,12 +79,12 @@ export const alertsSettings = {
       errSocks: "不支援 SOCKS，請改用 http(s)。",
       errScheme: "Proxy URL 必須以 http:// 或 https:// 開頭。",
       errInvalidUrl: "請輸入有效的 http(s) URL，例如 http://127.0.0.1:8080",
-      errSaveFailed: "無法儲存 proxy，請檢查資料庫連線。",
+      errSaveFailed: "Proxy 儲存失敗，目前仍沿用舊設定。請稍候重試。",
       urlLabel: "Proxy URL",
       urlPlaceholder: "http://127.0.0.1:8080  (留空 = 直接連線)",
       formHelp:
         "在 Polymarket 受地區封鎖時需要設定（PRD §8.1），僅支援 http(s)。下一次 Polymarket 請求即生效，無需重啟。",
-      saving: "儲存中…",
+      saving: "儲存 proxy 中…",
       save: "儲存 proxy",
       currentDirect: "目前：直接連線",
       /** {{at}} = formatted timestamp (already formatted). UTC kept verbatim. */
@@ -98,7 +100,7 @@ export const alertsSettings = {
       conservative: "保守 / 旅行模式",
       /** {{mode}} = resolved mode label (normal / conservative). */
       current: "目前：{{mode}}",
-      errUpdateFailed: "無法更新風險模式，請檢查資料庫連線。",
+      errUpdateFailed: "風險模式切換失敗，目前模式維持不變。請稍候重試。",
     },
     push: {
       heading: "推播通知",

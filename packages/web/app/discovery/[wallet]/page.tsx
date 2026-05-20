@@ -85,6 +85,22 @@ function statusLabel(status: string): string {
   return out === `discovery.detail.statusLabel.${status}` ? status : out;
 }
 
+// Same degrade-to-raw pattern for the three raw-enum tag families that
+// also surface on this detail page (the listing table localises these
+// via the same dictionaries; the detail page was rendering raw English).
+function strategyTagLabel(s: string): string {
+  const out = t(`discovery.table.strategy.${s}` as I18nKey);
+  return out === `discovery.table.strategy.${s}` ? s : out;
+}
+function riskFlagLabel(f: string): string {
+  const out = t(`discovery.table.riskFlag.${f}` as I18nKey);
+  return out === `discovery.table.riskFlag.${f}` ? f : out;
+}
+function sourceLabel(src: string): string {
+  const out = t(`discovery.table.sourceLabel.${src}` as I18nKey);
+  return out === `discovery.table.sourceLabel.${src}` ? src : out;
+}
+
 // A stat key whose value should read with gain/loss semantics.
 function isPnlKey(key: string): boolean {
   return /pnl|profit|return|roi|net/i.test(key);
@@ -275,7 +291,7 @@ export default async function LeaderDetailPage({ params }: PageProps) {
                     {(leader.sources ?? []).length > 0 ? (
                       (leader.sources ?? []).map((s) => (
                         <Badge key={s} variant="outline" className="text-xs">
-                          {s}
+                          {sourceLabel(s)}
                         </Badge>
                       ))
                     ) : (
@@ -291,7 +307,7 @@ export default async function LeaderDetailPage({ params }: PageProps) {
                   </dt>
                   <dd className="mt-1">
                     {leader.strategy_type ? (
-                      leader.strategy_type
+                      strategyTagLabel(leader.strategy_type)
                     ) : (
                       <span className="text-muted-foreground">
                         {t("discovery.detail.notSet")}
@@ -363,7 +379,7 @@ export default async function LeaderDetailPage({ params }: PageProps) {
                         variant="destructive"
                         className="text-xs"
                       >
-                        {f}
+                        {riskFlagLabel(f)}
                       </Badge>
                     ))
                   ) : (

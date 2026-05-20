@@ -424,6 +424,9 @@ export function ImportAccountForm() {
             className="font-mono text-sm"
             onChange={(e) => setPrivateKey(e.target.value)}
           />
+          <p className="text-xs text-muted-foreground">
+            {t("tables.accounts.import.privateKeyHint")}
+          </p>
         </div>
 
         {/* 7. 私鑰加密密語 */}
@@ -439,10 +442,14 @@ export function ImportAccountForm() {
             type="password"
             value={encPass}
             autoComplete="off"
+            spellCheck={false}
             placeholder={t("tables.accounts.import.encPassPlaceholder")}
             className="text-sm"
             onChange={(e) => setEncPass(e.target.value)}
           />
+          <p className="text-xs text-muted-foreground">
+            {t("tables.accounts.import.encPassHint")}
+          </p>
         </div>
 
         {/* 8. 危險操作確認密碼 */}
@@ -458,10 +465,14 @@ export function ImportAccountForm() {
             type="password"
             value={dangerPass}
             autoComplete="off"
+            spellCheck={false}
             placeholder={t("tables.accounts.import.dangerPassPlaceholder")}
             className="max-w-md text-sm"
             onChange={(e) => setDangerPass(e.target.value)}
           />
+          <p className="text-xs text-muted-foreground">
+            {t("tables.accounts.import.dangerPassHint")}
+          </p>
         </div>
       </div>
 

@@ -79,7 +79,13 @@ function RowAction({ row }: { row: LeaderRow }) {
       onClick={onToggle}
     >
       <Icon className="mr-1 h-3.5 w-3.5" aria-hidden="true" />
-      {isActive ? t("tables.leaders.pause") : t("tables.leaders.resume")}
+      {pending
+        ? isActive
+          ? t("tables.leaders.pausing")
+          : t("tables.leaders.resuming")
+        : isActive
+          ? t("tables.leaders.pause")
+          : t("tables.leaders.resume")}
     </Button>
   );
 }

@@ -76,12 +76,12 @@ export const backtest = {
   form: {
     /** Zod 驗證訊息。 */
     validation: {
-      walletInvalid: "請輸入有效的 wallet 位址",
-      walletPrefix: "必須以 0x 開頭",
-      dateFormat: "YYYY-MM-DD",
-      capitalMin: "最低 $10",
-      sizingRequired: "請擇一填寫 copy_ratio 或 fixed_size_usd",
-      dateOrder: "start_date 必須早於 end_date",
+      walletInvalid: "Wallet 位址格式無效（需為 0x 加 40 個十六進位字元）。",
+      walletPrefix: "必須以 0x 開頭。",
+      dateFormat: "請輸入 YYYY-MM-DD 格式日期。",
+      capitalMin: "起始本金至少為 $10。",
+      sizingRequired: "請擇一填寫 copy_ratio 或 fixed_size_usd（兩者不可同時填寫）。",
+      dateOrder: "結束日期必須晚於起始日期。",
     },
     sections: {
       leaderDates: {
@@ -104,8 +104,8 @@ export const backtest = {
     fields: {
       leaderAddress: {
         label: "Leader 位址",
-        placeholder: "0x…",
-        help: "要 backtest 的 leader wallet 位址",
+        placeholder: "0x… 40 個十六進位字元",
+        help: "要 backtest 的 leader wallet 位址。",
       },
       startDate: { label: "起始日期" },
       endDate: { label: "結束日期" },
@@ -151,8 +151,8 @@ export const backtest = {
     },
     submitHint: "送出此任務佇列。worker 會在稍後接手處理。",
     submit: "送出 Backtest",
-    submitting: "送出中…",
+    submitting: "排入佇列中…",
     toastQueued: "Backtest 已排入佇列，即將跳轉…",
-    toastError: "Backtest 送入佇列失敗",
+    toastError: "Backtest 排入佇列失敗，請稍候重試。",
   },
 } as const;

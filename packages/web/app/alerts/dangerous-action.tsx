@@ -249,12 +249,16 @@ export function DangerousActionInline() {
               type="password"
               value={passphrase}
               autoComplete="off"
+              spellCheck={false}
               placeholder={t(
                 "alertsSettings.alerts.danger.passphrasePlaceholder"
               )}
               className="h-9 font-mono text-sm"
               onChange={(e) => setPassphrase(e.target.value)}
             />
+            <p className="text-xs text-muted-foreground">
+              {t("alertsSettings.alerts.danger.passphraseHint")}
+            </p>
           </div>
         </div>
       </div>

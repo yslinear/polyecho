@@ -92,7 +92,7 @@ export default async function RootLayout({
             <header className="flex min-h-12 shrink-0 items-center gap-3 border-b bg-background/95 px-4 pt-[env(safe-area-inset-top)] supports-[backdrop-filter]:bg-background/80">
               <SidebarTrigger
                 className="-ml-1 size-9 md:size-7 focus-visible:ring-2 focus-visible:ring-ring"
-                aria-label="Toggle navigation sidebar"
+                aria-label={t("common.a11y.toggleSidebar")}
               />
               <div className="flex-1" />
               {/* Global 全域暫停/恢復 — PRD §5.8 one-click safe write. */}

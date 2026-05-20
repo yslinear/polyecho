@@ -34,7 +34,7 @@ export const tables = {
     title: "交易",
     subtitleEmpty: "trader-core 執行的每一筆跟單交易都會記錄在這裡。",
     subtitleCount: "已記錄 {{count}} 筆跟單交易。",
-    emptyTitle: "尚無跟單交易記錄。當 trader-core 為已跟隨的 Leader 執行一筆跟單後，就會出現在這裡。",
+    emptyTitle: "尚無跟單交易記錄。請先到 Leaders 頁跟隨一位 Leader；當 trader-core 為其執行一筆跟單後，就會出現在這裡。",
     col: {
       opened: "開倉時間",
       leader: "Leader",
@@ -45,7 +45,7 @@ export const tables = {
       fill: "成交",
       pnl: "PnL",
     },
-    searchPlaceholder: "依 market 篩選…",
+    searchPlaceholder: "輸入 market 名稱或關鍵字",
     filter: {
       fillStatus: "成交狀態",
       filled: "已成交",
@@ -58,7 +58,7 @@ export const tables = {
     title: "持倉",
     subtitleEmpty: "未平倉的跟單持倉會即時顯示在這裡。",
     subtitleCount: "{{count}} 筆未平倉持倉。",
-    emptyTitle: "無未平倉持倉。當 trader-core 為已跟隨的 Leader 開立一筆跟單後，就會出現在這裡。",
+    emptyTitle: "無未平倉持倉。請先到 Leaders 頁跟隨一位 Leader；當 trader-core 為其開立一筆跟單後，就會出現在這裡。",
     col: {
       market: "Market",
       leader: "Leader",
@@ -71,7 +71,7 @@ export const tables = {
       pnl: "PnL",
       opened: "開倉時間",
     },
-    searchPlaceholder: "依 market 篩選…",
+    searchPlaceholder: "輸入 market 名稱或關鍵字",
     filter: {
       fillStatus: "成交狀態",
       filled: "已成交",
@@ -111,31 +111,37 @@ export const tables = {
       nameLabel: "帳戶名稱（選填）",
       namePlaceholder: "預設為 EOA 位址",
       eoaLabel: "EOA 位址",
-      eoaPlaceholder: "0x… 簽章者位址",
+      eoaPlaceholder: "0x… 40 個十六進位字元",
       sigTypeLabel: "簽章類型",
       sigType0: "0 · EOA（funder 即簽章者）",
       sigType1: "1 · POLY_PROXY（需顯式 funder）",
       sigType2: "2 · POLY_GNOSIS_SAFE（需顯式 funder）",
       sigType3: "3 · POLY_1271（需顯式 funder）",
       funderLabel: "Funder 位址",
-      funderPlaceholder: "0x… 經鏈上驗證的 funder",
+      funderPlaceholder: "0x… 40 個十六進位字元",
       funderHintType0: "type 0：funder 自動等於 EOA，無需填寫。",
       funderHintOther:
         "type 1/2/3：請填入經鏈上驗證的 funder 位址。type 1 的 CREATE2 推導僅 CLI 端有可信實作，本頁不臆測。",
       privateKeyLabel: "私鑰",
-      privateKeyPlaceholder: "0x… 64 個十六進位字元（永不顯示）",
+      privateKeyPlaceholder: "0x… 64 個十六進位字元",
+      privateKeyHint:
+        "提交後以 AES-256-GCM 加密儲存，永不顯示或記錄；密文與 crypto.py v1 完全相容。",
+      encPassHint:
+        "trader-core 解密私鑰時使用的密語；伺服器不留存明文。請與 CLI 端佈建的值一致。",
+      dangerPassHint:
+        "需先由 CLI set-danger-passphrase 佈建。伺服器以常數時間比對雜湊；錯誤時不寫入任何資料。",
       encPassLabel: "私鑰加密密語",
-      encPassPlaceholder: "trader-core 解密所需的密語",
+      encPassPlaceholder: "輸入密語",
       dangerPassLabel: "危險操作確認密碼",
-      dangerPassPlaceholder: "由 CLI set-danger-passphrase 佈建",
+      dangerPassPlaceholder: "輸入危險操作密碼",
       submit: "加密並匯入",
       submitting: "匯入中…",
       errEoa: "EOA 位址格式無效（需為 0x 加 40 個十六進位字元）。",
       errPrivateKey: "私鑰格式無效（需為 64 個十六進位字元，可選 0x 前綴）。",
       errEncPass: "請輸入私鑰加密密語。",
       errDangerPass: "請輸入危險操作確認密碼。",
-      errFunder: "type 1/2/3 需填入經鏈上驗證的 funder 位址。",
-      errFailed: "匯入失敗，請重試。",
+      errFunder: "Funder 位址格式無效（需為 0x 加 40 個十六進位字元）。",
+      errFailed: "匯入失敗，未寫入任何資料。請稍候重試。",
       /** Signature type is deliberately one of the LAST steps — an
        *  informed choice after the operator has seen the balances. */
       sigTypeHint:
@@ -178,11 +184,13 @@ export const tables = {
     },
     pause: "暫停",
     resume: "恢復",
+    pausing: "暫停中…",
+    resuming: "恢復中…",
     pauseAria: "暫停跟單 {{address}}",
     resumeAria: "恢復跟單 {{address}}",
     pausedToast: "已暫停 Leader。trader-core 將停止對其跟單。",
     resumedToast: "已恢復 Leader。下一筆 Leader 交易將繼續跟單。",
-    updateError: "更新跟單狀態失敗",
+    updateError: "更新跟單狀態失敗，請稍候重試。",
     skips: {
       heading: "近期略過",
       subtitleEmpty:
