@@ -14,13 +14,25 @@ Verified SDK shape (context7, 2026-05-17)
   ``asyncio.to_thread`` so callers can ``await`` them without blocking the
   event loop.
 
-Method stubs
+Surface area
 ------------
-All methods raise ``NotImplementedError("Phase N")`` with a docstring
-describing the expected behaviour and signature.  Phase 1 = Discovery,
-Phase 4 = Live trading.
+This wrapper is the **trading** chokepoint only:
 
-Usage (Phase 1+)::
+* ``place_order`` / ``cancel_order`` — Phase-4 W2 deliverables (still
+  ``NotImplementedError``; gated by ``assert_live_allowed`` so they fail
+  closed when the HARD live lock is off).
+
+The four read-only methods (``get_leaderboard``, ``get_user_activity``,
+``get_positions``, ``get_orderbook``) are **retired stubs**: every
+production read path uses :class:`polyecho.shared.datasource.live.LiveDataSource`
+(retry + circuit breaker + DTOs) for the Data-API endpoints, and
+``orderbook_for`` callable injection (see ``polyecho.core.trader``) for
+the CLOB orderbook.  The stubs are kept here only because the public
+class is widely imported (proxy-env test, Phase-4 contract test, README,
+core/execution.py).  Calling any of the four raises ``RuntimeError``
+with a pointer to the canonical alternative.
+
+Usage::
 
     from polyecho.shared.polymarket.client import PolymarketClient
     from polyecho.shared.config import get_settings
@@ -36,7 +48,13 @@ Usage (Phase 1+)::
         },
         private_key="0xPrivKey",   # never logged
     )
-    leaderboard = await client.get_leaderboard()
+    # Trading (Phase 4):
+    await client.place_order(token_id="...", side="BUY", price=0.5, size=10)
+
+    # Reads — DO NOT use this client; use LiveDataSource instead:
+    from polyecho.shared.datasource.live import LiveDataSource
+    async with LiveDataSource() as ds:
+        leaders = await ds.get_leaderboard(limit=200)
 """
 
 from __future__ import annotations
@@ -180,8 +198,34 @@ class PolymarketClient:
             )
 
     # ------------------------------------------------------------------
-    # Public — Discovery / read-only (Phase 1)
+    # Retired read-only stubs (P0-1)
     # ------------------------------------------------------------------
+    # These four method signatures are kept ONLY because they are part of
+    # the published PolymarketClient surface (proxy-env test, README,
+    # Phase-4 contract test).  Production reads do NOT route through this
+    # client:
+    #
+    #   * Data-API reads (leaderboard, activity, positions) go through
+    #     polyecho.shared.datasource.live.LiveDataSource — which already
+    #     has retry, a circuit breaker, internal pagination, proxy
+    #     routing via make_async_client_resolved, and returns typed
+    #     DTOs (LeaderboardEntry / ActivityRecord / PositionRecord).
+    #     Re-implementing here would duplicate that pipeline with a
+    #     weaker (list[dict[str, Any]]) return type.
+    #
+    #   * The CLOB orderbook is supplied to the trading path via
+    #     polyecho.core.trader.Trader's ``orderbook_for`` callable
+    #     injection — not a method on this client.
+    #
+    # Any caller that lands on one of these stubs is a wiring bug.
+    # Surface that loudly with a RuntimeError naming the canonical
+    # alternative; do NOT raise NotImplementedError (which historically
+    # read as "Phase 1 TODO, just hasn't been written yet").
+
+    _RETIRED_READ_HINT = (
+        "PolymarketClient.{method}() is intentionally not implemented. "
+        "{alt}"
+    )
 
     async def get_leaderboard(
         self,
@@ -189,24 +233,29 @@ class PolymarketClient:
         window: str = "1m",
         limit: int = 200,
     ) -> list[dict[str, Any]]:
-        """Fetch the Polymarket trader leaderboard.
+        """Retired stub — use ``LiveDataSource.get_leaderboard`` instead.
 
         Args:
-            window: Time window for ranking — ``"1d"``, ``"1w"``, ``"1m"``,
-                    ``"all"``.
-            limit:  Maximum number of entries to return (up to 200).
-
-        Returns:
-            List of dicts with trader ranking data.  Shape mirrors the
-            ``GET /leaderboard`` response from the Polymarket Data API
-            (see PRD §11.1 → Leaderboard API).
+            window: (Unused — kept for signature stability.)
+            limit:  (Unused — kept for signature stability.)
 
         Raises:
-            NotImplementedError: Phase 1 deliverable.
+            RuntimeError: Always.  Use
+                :class:`polyecho.shared.datasource.live.LiveDataSource`.
         """
-        # TODO(verify): confirm endpoint path and query param names against
-        #               Polymarket Data API docs (distinct from CLOB API).
-        raise NotImplementedError("Phase 1: implement get_leaderboard via Data API")
+        del window, limit  # mark args as intentionally unused
+        raise RuntimeError(
+            self._RETIRED_READ_HINT.format(
+                method="get_leaderboard",
+                alt=(
+                    "Use `async with LiveDataSource() as ds: "
+                    "await ds.get_leaderboard(...)` "
+                    "(polyecho.shared.datasource.live.LiveDataSource) — "
+                    "returns typed LeaderboardEntry DTOs with retry / "
+                    "circuit-breaker / proxy."
+                ),
+            )
+        )
 
     async def get_user_activity(
         self,
@@ -215,56 +264,78 @@ class PolymarketClient:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """Fetch on-chain trade activity for *wallet_address*.
-
-        Args:
-            wallet_address: The trader's wallet (EOA or proxy) address.
-            limit:          Page size.
-            offset:         Pagination offset.
-
-        Returns:
-            List of trade activity dicts (market, side, size, price, timestamp).
+        """Retired stub — use ``LiveDataSource.get_user_activity`` instead.
 
         Raises:
-            NotImplementedError: Phase 1 deliverable.
+            RuntimeError: Always.  Use
+                :class:`polyecho.shared.datasource.live.LiveDataSource`.
         """
-        raise NotImplementedError("Phase 1: implement get_user_activity via Data API")
+        del wallet_address, limit, offset  # intentionally unused
+        raise RuntimeError(
+            self._RETIRED_READ_HINT.format(
+                method="get_user_activity",
+                alt=(
+                    "Use `async with LiveDataSource() as ds: "
+                    "await ds.get_user_activity(wallet, ...)` "
+                    "(polyecho.shared.datasource.live.LiveDataSource) — "
+                    "returns typed ActivityRecord DTOs with retry / "
+                    "circuit-breaker / proxy / bounded pagination."
+                ),
+            )
+        )
 
     async def get_positions(
         self,
         wallet_address: str,
     ) -> list[dict[str, Any]]:
-        """Fetch current open positions for *wallet_address*.
-
-        Args:
-            wallet_address: The trader's wallet address.
-
-        Returns:
-            List of open position dicts (market, outcome, size, avg_price).
+        """Retired stub — use ``LiveDataSource.get_positions`` instead.
 
         Raises:
-            NotImplementedError: Phase 1 deliverable.
+            RuntimeError: Always.  Use
+                :class:`polyecho.shared.datasource.live.LiveDataSource`.
         """
-        raise NotImplementedError("Phase 1: implement get_positions via Data API")
+        del wallet_address  # intentionally unused
+        raise RuntimeError(
+            self._RETIRED_READ_HINT.format(
+                method="get_positions",
+                alt=(
+                    "Use `async with LiveDataSource() as ds: "
+                    "await ds.get_positions(wallet)` "
+                    "(polyecho.shared.datasource.live.LiveDataSource) — "
+                    "returns typed PositionRecord DTOs with retry / "
+                    "circuit-breaker / proxy / bounded pagination."
+                ),
+            )
+        )
 
     async def get_orderbook(
         self,
         token_id: str,
     ) -> dict[str, Any]:
-        """Fetch the current order book for a given outcome token.
+        """Retired stub — orderbook is injected as a callable, not fetched here.
 
-        Args:
-            token_id: The Polymarket outcome token ID (``YES`` or ``NO``
-                      side of a market).
-
-        Returns:
-            Dict with ``bids`` and ``asks`` lists, each entry having
-            ``price`` and ``size``.
+        The trading path (``polyecho.core.trader.Trader``) accepts an
+        ``orderbook_for: Callable[[str], Awaitable[dict[str, Any]]]``
+        injection (see trader.py); the CLOB orderbook is never read via
+        this client.
 
         Raises:
-            NotImplementedError: Phase 1 deliverable.
+            RuntimeError: Always.  Inject an ``orderbook_for`` callable
+                into ``Trader`` instead.
         """
-        raise NotImplementedError("Phase 1: implement get_orderbook via CLOB API")
+        del token_id  # intentionally unused
+        raise RuntimeError(
+            self._RETIRED_READ_HINT.format(
+                method="get_orderbook",
+                alt=(
+                    "Inject an `orderbook_for: Callable[[str], "
+                    "Awaitable[dict[str, Any]]]` into "
+                    "polyecho.core.trader.Trader — the trading path "
+                    "never reads the CLOB orderbook through "
+                    "PolymarketClient."
+                ),
+            )
+        )
 
     # ------------------------------------------------------------------
     # Public — Trading (Phase 4)
