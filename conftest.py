@@ -27,9 +27,26 @@ this fixture simply guarantees a clean baseline around it.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Iterator
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# P1-4 fail-fast env default for the WHOLE test suite.
+#
+# ``polyecho.shared.datasource.factory.get_datasource()`` now RAISES
+# ``RuntimeError`` when ``POLYECHO_DATASOURCE`` is unset (no silent
+# fixture-fallback in production).  The pytest collections across all
+# packages (shared, discovery, core, backtest, push, cli) routinely call
+# ``get_datasource()`` without an explicit settings argument, so we declare
+# the explicit fixture opt-in here exactly once at import time.
+#
+# Individual tests that assert the unset-env-raises contract still
+# ``monkeypatch.delenv("POLYECHO_DATASOURCE", raising=False)`` locally; this
+# only provides a default when the variable was not previously set.
+# ---------------------------------------------------------------------------
+os.environ.setdefault("POLYECHO_DATASOURCE", "fixture")
 
 
 @pytest.fixture(autouse=True)

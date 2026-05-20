@@ -19,8 +19,22 @@ from __future__ import annotations
 import functools
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+#: Sentinel DSNs used as the *fixture-mode-only* defaults for ``db_url`` and
+#: ``db_url_drizzle``.  They are intentionally pointed at ``localhost`` so the
+#: test/CI suite (which runs with ``POLYECHO_DATASOURCE=fixture``) does not
+#: need to set DB URLs.  In ``live`` mode the model validator below RAISES
+#: when the resolved URL still equals one of these sentinels — production
+#: must export ``POLYECHO_DB_URL`` / ``POLYECHO_DB_URL_DRIZZLE`` explicitly
+#: (P1-3: no silent localhost fallback in live).
+_FIXTURE_DEFAULT_DB_URL: str = (
+    "postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho"
+)
+_FIXTURE_DEFAULT_DB_URL_DRIZZLE: str = (
+    "postgresql://polyecho:polyecho@localhost:5432/polyecho"
+)
 
 #: Hard OWASP-floor minimum for PBKDF2-HMAC-SHA256 iterations (P0-7).
 #:
@@ -55,16 +69,18 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # SecretStr: the DSN embeds the DB password, so it must never be logged
     # or repr'd in clear. Read the value via ``.get_secret_value()``.
+    #
+    # P1-3 fail-fast: the localhost default below is allowed ONLY in fixture
+    # mode (tests / CI).  When ``datasource == "live"`` the model validator
+    # ``_require_explicit_db_url_in_live_mode`` RAISES ``RuntimeError`` if the
+    # URL still equals the bundled localhost sentinel — production must set
+    # ``POLYECHO_DB_URL`` explicitly (no silent localhost fallback).
     db_url: SecretStr = Field(
-        default=SecretStr(
-            "postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho"
-        ),
+        default=SecretStr(_FIXTURE_DEFAULT_DB_URL),
         description="Async SQLAlchemy DB URL (asyncpg driver). Secret (DSN holds the password).",
     )
     db_url_drizzle: SecretStr = Field(
-        default=SecretStr(
-            "postgresql://polyecho:polyecho@localhost:5432/polyecho"
-        ),
+        default=SecretStr(_FIXTURE_DEFAULT_DB_URL_DRIZZLE),
         description=(
             "Synchronous Postgres URL used by Drizzle ORM in the Next.js web "
             "package. Secret (DSN holds the password)."
@@ -214,6 +230,39 @@ class Settings(BaseSettings):
         default="Asia/Taipei",
         description="IANA timezone name used for display and scheduled tasks.",
     )
+
+    # ------------------------------------------------------------------
+    # P1-3 fail-fast validators — no silent localhost DB fallback in live
+    # ------------------------------------------------------------------
+    @model_validator(mode="after")
+    def _require_explicit_db_url_in_live_mode(self) -> Settings:
+        """Fail-closed: in live mode the localhost default DB URL is rejected.
+
+        The two ``db_url`` / ``db_url_drizzle`` fields carry a localhost
+        sentinel default so the test/CI suite (which runs under
+        ``POLYECHO_DATASOURCE=fixture``) does not need DB env vars.
+        When the operator runs with ``POLYECHO_DATASOURCE=live`` and forgets
+        to export their real Postgres DSN, this validator RAISES instead of
+        silently routing every worker / web request at ``localhost:5432`` —
+        which on a CI/Docker host is *not* the operator DB and would
+        previously have caused either confusing connection errors or, worse,
+        writes against the wrong database.
+        """
+        if self.datasource != "live":
+            return self
+        if self.db_url.get_secret_value() == _FIXTURE_DEFAULT_DB_URL:
+            raise RuntimeError(
+                "POLYECHO_DB_URL is required in live mode; export it in .env "
+                "(or docker-compose env). The localhost default is only "
+                "allowed when POLYECHO_DATASOURCE=fixture."
+            )
+        if self.db_url_drizzle.get_secret_value() == _FIXTURE_DEFAULT_DB_URL_DRIZZLE:
+            raise RuntimeError(
+                "POLYECHO_DB_URL_DRIZZLE is required in live mode; export it "
+                "in .env (or docker-compose env). The localhost default is "
+                "only allowed when POLYECHO_DATASOURCE=fixture."
+            )
+        return self
 
 
 @functools.lru_cache(maxsize=1)

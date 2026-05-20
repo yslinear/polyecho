@@ -317,6 +317,17 @@ class TestConfigDatasourceSwitch:
         self, monkeypatch: pytest.MonkeyPatch, value: str
     ) -> None:
         monkeypatch.setenv("POLYECHO_DATASOURCE", value)
+        # P1-3: in live mode the localhost default DB URL is rejected, so
+        # provide an explicit (non-localhost-sentinel) DSN for this branch.
+        if value == "live":
+            monkeypatch.setenv(
+                "POLYECHO_DB_URL",
+                "postgresql+asyncpg://u:p@db.example.com:5432/polyecho",
+            )
+            monkeypatch.setenv(
+                "POLYECHO_DB_URL_DRIZZLE",
+                "postgresql://u:p@db.example.com:5432/polyecho",
+            )
         get_settings.cache_clear()
         assert get_settings().datasource == value
 
@@ -327,6 +338,46 @@ class TestConfigDatasourceSwitch:
         get_settings.cache_clear()
         with pytest.raises(ValidationError):
             get_settings()
+
+    def test_live_mode_requires_explicit_db_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """P1-3 fail-fast: live mode + localhost-default DB URL → RuntimeError."""
+        monkeypatch.setenv("POLYECHO_DATASOURCE", "live")
+        monkeypatch.delenv("POLYECHO_DB_URL", raising=False)
+        monkeypatch.delenv("POLYECHO_DB_URL_DRIZZLE", raising=False)
+        get_settings.cache_clear()
+        with pytest.raises(RuntimeError, match="POLYECHO_DB_URL is required"):
+            get_settings()
+
+    def test_live_mode_requires_explicit_drizzle_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """P1-3 fail-fast: drizzle-side URL has the same fail-closed contract."""
+        monkeypatch.setenv("POLYECHO_DATASOURCE", "live")
+        monkeypatch.setenv(
+            "POLYECHO_DB_URL",
+            "postgresql+asyncpg://u:p@db.example.com:5432/polyecho",
+        )
+        monkeypatch.delenv("POLYECHO_DB_URL_DRIZZLE", raising=False)
+        get_settings.cache_clear()
+        with pytest.raises(
+            RuntimeError, match="POLYECHO_DB_URL_DRIZZLE is required"
+        ):
+            get_settings()
+
+    def test_fixture_mode_allows_localhost_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """In fixture mode the bundled localhost DSN is the explicit default
+        (test-friendly opt-in path) — must NOT raise."""
+        monkeypatch.setenv("POLYECHO_DATASOURCE", "fixture")
+        monkeypatch.delenv("POLYECHO_DB_URL", raising=False)
+        monkeypatch.delenv("POLYECHO_DB_URL_DRIZZLE", raising=False)
+        get_settings.cache_clear()
+        s = get_settings()
+        assert s.datasource == "fixture"
+        assert "localhost" in s.db_url.get_secret_value()
 
     @pytest.mark.parametrize(
         "level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]

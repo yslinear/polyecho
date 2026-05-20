@@ -32,6 +32,12 @@ from typing import Any
 
 import pytest
 
+# NOTE: ``POLYECHO_DATASOURCE=fixture`` is set repo-wide in the root
+# ``conftest.py`` so the P1-4 fail-fast contract in
+# ``polyecho.shared.datasource.factory.get_datasource()`` does not break the
+# pytest collection.  This package-local conftest only deals with the
+# ``get_settings()`` cache.
+
 
 @pytest.fixture(autouse=True)
 def _clear_settings_cache() -> Iterator[None]:
