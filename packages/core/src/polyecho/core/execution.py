@@ -268,8 +268,9 @@ class OrderExecutor:
                 decision=decision,
                 skip_reason=SkipReason.LIVE_LOCKED,
                 detail=(
-                    "live trading LOCKED (default) — intended order logged, "
-                    "NOT placed"
+                    "live trading is OFF (POLYECHO_LIVE_TRADING is not "
+                    "'true') — intended order recorded for audit, no funds "
+                    "moved. Set POLYECHO_LIVE_TRADING=true to enable."
                 ),
                 sell_match=sell_match,
             )
@@ -309,6 +310,9 @@ class OrderExecutor:
             placed=False,
             decision=decision,
             skip_reason=SkipReason.DATA_UNAVAILABLE,
-            detail=f"order placement failed after retries: {last_exc}",
+            detail=(
+                f"order placement failed after "
+                f"{self._max_retries + 1} attempts: {last_exc}"
+            ),
             sell_match=sell_match,
         )

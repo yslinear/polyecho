@@ -517,8 +517,9 @@ class RedeemWorker:
                             status=RedeemJobStatus.PENDING,
                             skip_reason=SkipReason.LIVE_LOCKED,
                             detail=(
-                                "live/auto_redeem off — redeem intent logged, "
-                                "NOT submitted"
+                                "redeem skipped: POLYECHO_LIVE_TRADING or "
+                                "auto_redeem is off. Intent recorded for "
+                                "audit; no on-chain call made."
                             ),
                         ),
                     )

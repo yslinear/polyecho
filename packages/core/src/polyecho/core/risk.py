@@ -224,7 +224,10 @@ class LayeredRiskGate:
             return RiskResult(
                 passed=False,
                 skip_reason=SkipReason.FILTER_PRICE_BAND,
-                detail=f"price {price} outside band",
+                detail=(
+                    f"price {price} outside template band "
+                    f"[{tpl.min_price}, {tpl.max_price}]"
+                ),
             )
 
         # --- ONE orderbook fetch, reused by 6/7/15 (brief §4) -----------
@@ -324,13 +327,21 @@ class LayeredRiskGate:
                     return RiskResult(
                         passed=False,
                         skip_reason=SkipReason.POSITION_CAP,
-                        detail="position-value cap infeasible after normalize",
+                        detail=(
+                            f"notional ${notional} > position cap "
+                            f"${tpl.max_position_usd}; normalised size "
+                            "would breach min_trade_size or shares minimum"
+                        ),
                     )
             else:
                 return RiskResult(
                     passed=False,
                     skip_reason=SkipReason.POSITION_CAP,
-                    detail="position-value cap, zero price",
+                    detail=(
+                        f"notional ${notional} > position cap "
+                        f"${tpl.max_position_usd}; cannot normalise "
+                        "(price is zero)"
+                    ),
                 )
 
         # 10. daily-order-cap --------------------------------------------
@@ -424,7 +435,11 @@ class LayeredRiskGate:
             return RiskResult(
                 passed=False,
                 skip_reason=SkipReason.STRATEGY_DRIFT,
-                detail="leader strategy drifted from followed profile",
+                detail=(
+                    "leader's 7-day strategy diverged from the profile "
+                    "you are following; copy paused until profile is "
+                    "re-confirmed"
+                ),
             )
 
         adjusted_size = size if size != (decision.size or _ZERO) else None

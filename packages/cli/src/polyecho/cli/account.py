@@ -8,8 +8,10 @@ Commands
 * ``polyecho account detect <eoa>``   — derive 4 candidate wallets and rank
   them by on-chain evidence (positions ≫ balance ≫ activity).
 * ``polyecho account import <eoa>``   — securely import + encrypt a private
-  key (CLI only; prompts are hidden; the key is never a CLI arg and never
-  logged/printed).
+  key from the operator terminal (hidden prompts; the key is never a CLI
+  arg and never logged/printed). Equivalent operator-authorised web
+  key-import is supported separately; this CLI path is the recommended
+  offline route.
 * ``polyecho account list``           — list registered accounts (never any
   key material).
 * ``polyecho account balance <name>`` — best-effort USDC value for an account.
@@ -196,7 +198,9 @@ def detect(
             Panel(
                 "[red]No positions or activity found for any candidate "
                 "address.[/red]\nThe EOA may be unused on Polymarket, or the "
-                "datasource has no data for it.",
+                "configured datasource has no data for it. Verify the EOA on "
+                "polymarket.com, then re-run with a working datasource "
+                "(see `polyecho doctor`).",
                 title="[dim]Recommendation[/dim]",
                 border_style="red",
             )
@@ -248,7 +252,7 @@ def import_key(
         "type 0/1 the verified derived funder is used and this is ignored.",
     ),
 ) -> None:
-    """Securely import a private key for an EOA account (CLI only — never via Web UI).
+    """Securely import a private key for an EOA account (offline operator terminal).
 
     Both the **passphrase** and the **private key** are read via standalone
     hidden ``typer.prompt`` calls — NEVER Typer Options.  This is the P3

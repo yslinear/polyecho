@@ -148,14 +148,15 @@ class TraderCopyEvaluator:
         if tpl is None:
             return _skip(
                 SkipReason.NOT_FOLLOWING,
-                "no copy template snapshot for this (account, leader)",
+                f"no copy_template snapshot for account {account_id} "
+                f"leader {leader_address}; re-promote or reattach template",
             )
 
         side_raw = str(trade.get("side", "")).upper()
         if side_raw not in ("BUY", "SELL"):
             return _skip(
                 SkipReason.DATA_UNAVAILABLE,
-                f"unparseable side {trade.get('side')!r}",
+                f"leader trade side {trade.get('side')!r} is not BUY/SELL",
             )
         side = TradeSide(side_raw)
 
@@ -194,7 +195,8 @@ class TraderCopyEvaluator:
         if price is None or price <= 0:
             return _skip(
                 SkipReason.DATA_UNAVAILABLE,
-                "leader trade has no usable price",
+                f"leader trade has no usable price (got {trade.get('price')!r}); "
+                "expected a positive number",
             )
         if price < tpl.min_price or price > tpl.max_price:
             return _skip(
@@ -211,7 +213,8 @@ class TraderCopyEvaluator:
         else:
             return _skip(
                 SkipReason.DATA_UNAVAILABLE,
-                "template has neither copy_ratio nor fixed_size_usd",
+                "copy_template has neither copy_ratio nor fixed_size_usd; "
+                "set one to enable sizing",
             )
 
         # Clamp by max_position_usd (value cap, brief §3/§4).
@@ -225,7 +228,7 @@ class TraderCopyEvaluator:
         if size < _ONE:
             return _skip(
                 SkipReason.BELOW_MIN_SIZE,
-                f"computed size {size} < 1 share minimum",
+                f"computed size {size} is below the venue minimum of 1 share",
             )
 
         notional = size * price

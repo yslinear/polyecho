@@ -613,7 +613,8 @@ class TraderCore:
                     title="每日虧損熔斷觸發",
                     body=(
                         f"領單者 {spec.leader_address[:10]}… "
-                        f"已觸發每日虧損上限，已暫停跟單"
+                        f"已觸發每日虧損上限，已暫停跟單。"
+                        f"請於儀表板檢視 PnL 後再決定是否復跟"
                     ),
                     url="/dashboard",
                     tag=f"risk_daily_loss:{spec.account_id}",
@@ -628,8 +629,8 @@ class TraderCore:
                 push=PushPayload(
                     title="策略偏移偵測",
                     body=(
-                        f"領單者 {spec.leader_address[:10]}… "
-                        f"策略已偏離追蹤輪廓，已暫停跟單"
+                        f"領單者 {spec.leader_address[:10]}… 近 7 日策略已偏離"
+                        f"原追蹤輪廓，已暫停跟單。請於探索頁重新評估"
                     ),
                     url=f"/discovery/{spec.leader_address}",
                     tag=f"strategy_drift:{spec.leader_address}",
