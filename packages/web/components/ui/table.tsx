@@ -57,7 +57,12 @@ const TableHead = React.forwardRef<
   <th
     ref={ref}
     className={cn(
-      "h-12 px-4 text-left align-middle font-medium text-muted-foreground [&:has([role=checkbox])]:pr-0",
+      // `whitespace-nowrap` so Chinese / multi-word headers do NOT
+      // wrap between glyphs at narrow column widths (every Table in
+      // the dashboard renders inside an `overflow-x-auto` wrapper, so
+      // wider content scrolls horizontally instead of breaking
+      // mid-glyph). Standard responsive data-table behaviour.
+      "h-12 whitespace-nowrap px-4 text-left align-middle font-medium text-muted-foreground [&:has([role=checkbox])]:pr-0",
       className
     )}
     {...props}
