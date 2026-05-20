@@ -67,7 +67,7 @@ import threading
 from collections.abc import Iterator
 from typing import Any, cast
 
-from py_clob_client_v2 import (  # type: ignore[import-untyped]
+from py_clob_client_v2 import (
     ApiCreds,
     ClobClient,
     OrderArgs,

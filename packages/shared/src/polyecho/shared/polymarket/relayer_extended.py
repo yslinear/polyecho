@@ -80,6 +80,10 @@ __all__ = [
     "redeem_deposit_wallet",
     "relay_unwrap_proxy",
     "relay_unwrap_deposit_wallet",
+    # P8 parity / probe tests reach these; explicit re-export so mypy strict
+    # mode doesn't reject `RX.CTF_ADDRESS` / `relayer_extended.httpx`.
+    "CTF_ADDRESS",
+    "httpx",
 ]
 
 logger = logging.getLogger(__name__)
@@ -232,18 +236,20 @@ def _encode_unwrap(*, to_address: str, amount: int) -> bytes:
     return selector + body
 
 
-def _encode_proxy_batch(calls: list[tuple[str, int, bytes, int]]) -> bytes:
-    """``ProxyFactory.proxy((address,uint8,bytes,uint256)[])`` calldata.
+def _encode_proxy_batch(calls: list[tuple[int, str, int, bytes]]) -> bytes:
+    """``ProxyFactory.proxy((uint8,address,uint256,bytes)[])`` calldata.
 
     provenance: brief §sig-1 step 3 + ``src/abis/proxyFactory.ts`` —
-    ``proxy((address to, uint8 typeCode, bytes data, uint256 value)[])``.
+    ABI tuple component order is
+    ``[typeCode uint8, to address, value uint256, data bytes]`` so the
+    selector is ``proxy((uint8,address,uint256,bytes)[])`` = ``0x34ee9791``.
     ``typeCode=1`` = Call (TS ``OperationType.Call``).
     """
     from eth_abi import encode  # type: ignore[attr-defined]
 
-    selector = _function_selector("proxy((address,uint8,bytes,uint256)[])")
+    selector = _function_selector("proxy((uint8,address,uint256,bytes)[])")
     body: bytes = encode(
-        ["(address,uint8,bytes,uint256)[]"],
+        ["(uint8,address,uint256,bytes)[]"],
         [calls],
     )
     return selector + body
@@ -467,30 +473,27 @@ def _proxy_struct_hash(
 
 
 def _sign_proxy(struct_hash: bytes, private_key: str) -> str:
-    """Sign *struct_hash* via ``eth_sign`` (NOT EIP-712).
+    """Sign *struct_hash* via ``eth_sign`` (EIP-191 personal_sign path).
 
     provenance: brief §sig-1 step 5 ("eth_sign via web3.eth.account.signHash
-    — not EIP-712").  Modern ``eth_account`` exposes the same raw-32-byte
-    ECDSA via ``Account._sign_hash`` (the older public ``signHash`` was
-    removed in v0.13+); we keep the same semantics — sign the 32-byte
-    digest directly (the relayer does the recover against ``from``).
+    — not EIP-712").  The TS reference (``signer.signMessage(structHash)``)
+    runs through the EIP-191 personal_sign path which prepends
+    ``\\x19Ethereum Signed Message:\\n32`` before signing — NOT raw ECDSA.
 
-    .. note:: TODO(verify) — the brief explicitly says "eth_sign" which on
-       many wallets adds the ``\\x19Ethereum Signed Message:\\n32`` prefix
-       BEFORE signing.  The TS reference uses a raw 32-byte signHash; we
-       follow TS.  If a real submit recovers a wrong signer, swap to
-       ``encode_defunct(primitive=struct_hash)`` + ``sign_message``.
+    # VERIFIED 2026-05-20: TS uses EIP-191 path (signMessage), not raw ECDSA.
     """
     from eth_account import Account
+    from eth_account.messages import encode_defunct
 
     if len(struct_hash) != 32:
         raise RelayerSubmissionError(
             f"struct_hash must be 32 bytes, got {len(struct_hash)}"
         )
-    # _sign_hash is the modern equivalent of web3.py v5's signHash (raw
-    # ECDSA over a 32-byte digest).  Underscore-prefixed but stable across
-    # eth_account 0.13.x; callers handle ImportError elsewhere.
-    signed = Account._sign_hash(struct_hash, private_key=private_key)
+    # encode_defunct(primitive=...) prepends the EIP-191 header
+    # (``\x19Ethereum Signed Message:\n32`` + struct_hash) and re-hashes
+    # before ECDSA — bit-for-bit equivalent to ethers.js signer.signMessage.
+    signable = encode_defunct(primitive=struct_hash)
+    signed = Account.sign_message(signable, private_key=private_key)
     sig: bytes = signed.signature
     if len(sig) != 65:
         raise RelayerSubmissionError(
@@ -658,7 +661,7 @@ async def redeem_proxy(
         index_sets=index_sets,
     )
     _assert_target_allowed(CTF_ADDRESS)
-    outer = _encode_proxy_batch([(CTF_ADDRESS, 1, inner, 0)])  # value=0
+    outer = _encode_proxy_batch([(1, CTF_ADDRESS, 0, inner)])  # typeCode=Call, value=0
     _assert_gas_limit_ok(_PROXY_DEFAULT_GAS_LIMIT)
 
     return await _submit_proxy(
@@ -698,7 +701,7 @@ async def relay_unwrap_proxy(
     inner = _encode_unwrap(to_address=proxy_funder, amount=amount)
     _assert_target_allowed(WRAPPED_COLLATERAL_ADDRESS)
     outer = _encode_proxy_batch(
-        [(WRAPPED_COLLATERAL_ADDRESS, 1, inner, 0)]
+        [(1, WRAPPED_COLLATERAL_ADDRESS, 0, inner)]
     )
     return await _submit_proxy(
         eoa=eoa,

@@ -98,6 +98,13 @@ ignore_missing_imports = true
 module = ["py_builder_relayer_client.*", "py_builder_signing_sdk.*"]
 ignore_missing_imports = true
 
+# `py_clob_client_v2` ships no `py.typed` marker; same narrow single-lib
+# exception. Used by the public-endpoint smoke test to confirm
+# `ClobClient.get_server_time()` round-trips against the real CLOB.
+[[tool.mypy.overrides]]
+module = ["py_clob_client_v2", "py_clob_client_v2.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["packages"]
@@ -123,6 +130,16 @@ testpaths = ["packages"]
 # artifact. Do not raise/lower either gate to make the other pass.
 addopts = "--import-mode=importlib --cov --cov-report=term-missing --cov-fail-under=70"
 consider_namespace_packages = true
+# Custom markers — registered so `pytest --strict-markers` (and future
+# enablement of `filterwarnings = error`) does not flag tests carrying
+# them.  ``network`` is the only opt-in marker today: see
+# packages/shared/tests/test_public_endpoint_smoke.py — those tests hit
+# real public Polymarket / Polygon endpoints and are gated by
+# ``POLYECHO_RUN_NETWORK_TESTS=1`` so the byte-mirror / CI default run
+# stays hermetic (no IP leak, no upstream flake).
+markers = [
+    "network: integration tests hitting real public endpoints (opt-in via POLYECHO_RUN_NETWORK_TESTS=1)",
+]
 
 # ── Coverage: scoped to packages/*/src (the shipped code), single source ─────
 [tool.coverage.run]
