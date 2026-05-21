@@ -65,3 +65,6 @@ Icon?
 
 # Serena MCP plugin local cache + memories — never commit
 .serena/
+
+# TypeScript incremental build cache — never commit
+*.tsbuildinfo
