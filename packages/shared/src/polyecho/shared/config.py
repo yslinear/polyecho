@@ -17,7 +17,7 @@ Usage::
 from __future__ import annotations
 
 import functools
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,12 +29,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 #: when the resolved URL still equals one of these sentinels — production
 #: must export ``POLYECHO_DB_URL`` / ``POLYECHO_DB_URL_DRIZZLE`` explicitly
 #: (P1-3: no silent localhost fallback in live).
-_FIXTURE_DEFAULT_DB_URL: str = (
-    "postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho"
-)
-_FIXTURE_DEFAULT_DB_URL_DRIZZLE: str = (
-    "postgresql://polyecho:polyecho@localhost:5432/polyecho"
-)
+_FIXTURE_DEFAULT_DB_URL: str = "postgresql+asyncpg://polyecho:polyecho@localhost:5432/polyecho"
+_FIXTURE_DEFAULT_DB_URL_DRIZZLE: str = "postgresql://polyecho:polyecho@localhost:5432/polyecho"
 
 #: Hard OWASP-floor minimum for PBKDF2-HMAC-SHA256 iterations (P0-7).
 #:
@@ -100,8 +96,69 @@ class Settings(BaseSettings):
     )
     polygon_rpc_url: str = Field(
         default="https://polygon-rpc.com",
-        description="Polygon JSON-RPC endpoint for on-chain event monitoring.",
+        description=(
+            "Polygon JSON-RPC endpoint for on-chain event monitoring.  "
+            "ADVANCED: may also be a comma-separated list of endpoints "
+            "(e.g. 'https://polygon.drpc.org,https://polygon-bor-rpc.publicnode.com'); "
+            "in that case the integration probe and SAFE-proxy resolver iterate "
+            "through them in order and report success on the first that works. "
+            "The single-URL form remains fully supported for backward compatibility. "
+            "Back-compat: this attribute always exposes the FIRST URL as a plain "
+            "string (so legacy single-URL callers in core.wiring / "
+            "core.onchain_reconcile keep working unchanged). Read the full list "
+            "via :meth:`Settings.polygon_rpc_urls`."
+        ),
     )
+
+    @field_validator("polygon_rpc_url", mode="before")
+    @classmethod
+    def _normalize_polygon_rpc_url(cls, v: Any) -> Any:
+        """Accept a single URL **or** a CSV; store the first URL as the str.
+
+        Back-compat: ``polygon_rpc_url`` stays typed as ``str`` so every legacy
+        caller (``core.wiring`` / ``core.onchain_reconcile``) keeps working
+        unchanged.  The full list is exposed via
+        :meth:`Settings.polygon_rpc_urls` (parsed from this same env value).
+        Empty entries and surrounding whitespace are dropped; an empty / blank
+        env value falls back to pydantic's field default.
+
+        ``mode="before"`` so we receive the raw env string; non-``str`` /
+        ``None`` inputs are returned untouched so the field's own coercion
+        path (or pydantic's TypeError) runs unchanged.
+        """
+        if v is None or not isinstance(v, str):
+            return v
+        first = next(
+            (part.strip() for part in v.split(",") if part.strip()),
+            "",
+        )
+        return first or v.strip()
+
+    @property
+    def polygon_rpc_urls(self) -> list[str]:
+        """Ordered list of Polygon RPC endpoints (1 or more).
+
+        Parses ``POLYECHO_POLYGON_RPC_URL`` as a comma-separated list,
+        trims whitespace, and drops empty entries.  The single-URL case
+        returns a one-element list — the integration probe and SAFE-proxy
+        resolver iterate this list in order on each call, advancing on any
+        timeout / transport / HTTP error, and report success on the first
+        endpoint that works.
+
+        Reads the raw env directly (not the normalized ``polygon_rpc_url``
+        field, which holds only the FIRST URL for back-compat).  Falls back
+        to ``[polygon_rpc_url]`` when the env var is absent.
+        """
+        import os
+
+        raw = os.environ.get("POLYECHO_POLYGON_RPC_URL", "")
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        if parts:
+            return parts
+        # Env unset / blank → use whatever the field resolved to (its default
+        # or a model-construction override).  Always at least one entry.
+        return [self.polygon_rpc_url]
+
     polymarket_chain_id: int = Field(
         default=137,
         description="EVM chain ID. 137 = Polygon mainnet; 80002 = Amoy testnet.",

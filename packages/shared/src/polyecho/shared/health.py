@@ -201,9 +201,7 @@ def _unwrap(value: Any) -> Any:
     Readers MUST go through this so the contract is symmetric across
     Python and TS.  Never raises.
     """
-    if isinstance(value, dict) and "value" in value and isinstance(
-        value["value"], dict
-    ):
+    if isinstance(value, dict) and "value" in value and isinstance(value["value"], dict):
         return value["value"]
     return value
 
@@ -377,9 +375,7 @@ class _RpcError(RuntimeError):
     """
 
 
-def _result(
-    ok: bool, detail: str, *, latency_ms: float | None = None
-) -> ProbeResult:
+def _result(ok: bool, detail: str, *, latency_ms: float | None = None) -> ProbeResult:
     return ProbeResult(
         ok=ok,
         detail=detail,
@@ -428,8 +424,7 @@ def probe_config() -> ProbeResult:
             )
         return _result(
             True,
-            f"driver={parsed.drivername} host={parsed.host or '-'} "
-            f"log_level={settings.log_level}",
+            f"driver={parsed.drivername} host={parsed.host or '-'} log_level={settings.log_level}",
             latency_ms=(time.perf_counter() - t0) * 1000,
         )
     except Exception as exc:  # noqa: BLE001 - fail-soft: report, never raise
@@ -493,11 +488,7 @@ async def _http_probe(
                 resp = await client.get(url)
         latency_ms = (time.perf_counter() - t0) * 1000
         if resp.is_success:
-            detail = (
-                ok_detail(resp)
-                if callable(ok_detail)
-                else f"HTTP {resp.status_code}"
-            )
+            detail = ok_detail(resp) if callable(ok_detail) else f"HTTP {resp.status_code}"
             return _result(True, str(detail), latency_ms=latency_ms)
         return _result(
             False,
@@ -563,8 +554,7 @@ async def probe_polymarket_data_api() -> ProbeResult:
         return _result(False, f"polymarket_data_api: config error: {exc}")
     return await _http_probe(
         "polymarket_data_api",
-        f"{base}/v1/leaderboard?category=OVERALL&timePeriod=MONTH"
-        "&orderBy=PNL&limit=1&offset=0",
+        f"{base}/v1/leaderboard?category=OVERALL&timePeriod=MONTH&orderBy=PNL&limit=1&offset=0",
     )
 
 
@@ -574,40 +564,67 @@ async def probe_polygon_rpc() -> ProbeResult:
     Proves the on-chain path (path-B cross-check / EOA tx / Safe
     ``computeProxyAddress``) is reachable.  A 2xx with a ``result`` is OK;
     a JSON-RPC ``error`` body is reported as ``ok=false``.
+
+    Endpoint iteration (advanced): ``POLYECHO_POLYGON_RPC_URL`` may be a
+    comma-separated list (e.g. ``polygon.drpc.org,publicnode.com,1rpc.io``).
+    This probe iterates the list in order, advancing on any transport-level
+    failure (timeout/connect-error/HTTP-error) or JSON-RPC ``error`` body,
+    and reports success (with detail naming the URL that worked) on the
+    first endpoint that responds with a usable result.  Reports ``ok=false``
+    only when EVERY endpoint fails (last error wins in the detail string).
+    The single-URL form is fully back-compatible — a one-element list
+    behaves exactly as before.
     """
     try:
         from polyecho.shared.config import get_settings
 
-        url = get_settings().polygon_rpc_url
+        urls = list(get_settings().polygon_rpc_urls)
     except Exception as exc:  # noqa: BLE001
         return _result(False, f"polygon_rpc: config error: {exc}")
+    if not urls:
+        return _result(False, "polygon_rpc: no endpoint configured")
 
-    def _ok(resp: httpx.Response) -> str:
+    def _ok_factory(endpoint: str) -> Any:
+        def _ok(resp: httpx.Response) -> str:
+            try:
+                body = resp.json()
+            except Exception:  # noqa: BLE001
+                return f"HTTP 200 (non-JSON body) via {endpoint}"
+            if isinstance(body, dict) and body.get("error"):
+                # 2xx but JSON-RPC-level error — surface it (not "ok").
+                raise _RpcError(str(body.get("error")))
+            result = body.get("result") if isinstance(body, dict) else None
+            if result:
+                return f"block {result} via {endpoint}" if len(urls) > 1 else f"block {result}"
+            return f"HTTP 200 via {endpoint}" if len(urls) > 1 else "HTTP 200"
+
+        return _ok
+
+    last: ProbeResult | None = None
+    for endpoint in urls:
         try:
-            body = resp.json()
-        except Exception:  # noqa: BLE001
-            return "HTTP 200 (non-JSON body)"
-        if isinstance(body, dict) and body.get("error"):
-            # 2xx but JSON-RPC-level error — surface it (not "ok").
-            raise _RpcError(str(body.get("error")))
-        result = body.get("result") if isinstance(body, dict) else None
-        return f"block {result}" if result else "HTTP 200"
-
-    try:
-        return await _http_probe(
-            "polygon_rpc",
-            url,
-            method="POST",
-            json_body={
-                "jsonrpc": "2.0",
-                "method": "eth_blockNumber",
-                "params": [],
-                "id": 1,
-            },
-            ok_detail=_ok,
-        )
-    except _RpcError as exc:
-        return _result(False, f"polygon_rpc: RPC error: {exc}")
+            attempt = await _http_probe(
+                "polygon_rpc",
+                endpoint,
+                method="POST",
+                json_body={
+                    "jsonrpc": "2.0",
+                    "method": "eth_blockNumber",
+                    "params": [],
+                    "id": 1,
+                },
+                ok_detail=_ok_factory(endpoint),
+            )
+        except _RpcError as exc:
+            attempt = _result(False, f"polygon_rpc: RPC error: {exc}")
+        if attempt.ok:
+            return attempt
+        last = attempt
+    # Every endpoint failed — return the LAST failure verbatim (preserves
+    # the existing single-URL detail shape; in multi-URL mode the operator
+    # can re-check the latency_ms / detail to identify the last-tried node).
+    assert last is not None  # loop ran at least once (urls non-empty)
+    return last
 
 
 async def probe_vpn_egress() -> ProbeResult:
@@ -755,9 +772,7 @@ async def write_integration_status(
     """
     results = probes if probes is not None else await run_all_probes()
     snapshot = IntegrationSnapshot(checked_at=_now_iso(), probes=results)
-    await _upsert_setting(
-        INTEGRATION_STATUS_KEY, snapshot.model_dump(mode="json")
-    )
+    await _upsert_setting(INTEGRATION_STATUS_KEY, snapshot.model_dump(mode="json"))
     return snapshot
 
 
@@ -783,15 +798,13 @@ async def get_status() -> StatusSnapshot:
         from polyecho.shared.db import session_scope
         from polyecho.shared.models import Setting
 
-        wanted = list(WORKER_HEARTBEAT_KEYS.values()) + [
-            INTEGRATION_STATUS_KEY
-        ]
+        wanted = list(WORKER_HEARTBEAT_KEYS.values()) + [INTEGRATION_STATUS_KEY]
         async with session_scope() as session:
             rows = (
-                await session.execute(
-                    select(Setting).where(Setting.key.in_(wanted))
-                )
-            ).scalars().all()
+                (await session.execute(select(Setting).where(Setting.key.in_(wanted))))
+                .scalars()
+                .all()
+            )
         by_key: dict[str, Any] = {r.key: r.value for r in rows}
     except Exception as exc:  # noqa: BLE001 - fail-soft: empty snapshot
         logger.warning(
@@ -802,13 +815,9 @@ async def get_status() -> StatusSnapshot:
 
     for name, key in WORKER_HEARTBEAT_KEYS.items():
         if key in by_key:
-            snapshot.workers[name] = WorkerHeartbeat.from_settings(
-                by_key[key]
-            )
+            snapshot.workers[name] = WorkerHeartbeat.from_settings(by_key[key])
     if INTEGRATION_STATUS_KEY in by_key:
-        snapshot.integration = IntegrationSnapshot.from_settings(
-            by_key[INTEGRATION_STATUS_KEY]
-        )
+        snapshot.integration = IntegrationSnapshot.from_settings(by_key[INTEGRATION_STATUS_KEY])
     return snapshot
 
 

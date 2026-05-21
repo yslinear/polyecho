@@ -45,6 +45,7 @@ import asyncio
 import logging
 import os
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from aiohttp import web
@@ -56,14 +57,28 @@ from polyecho.shared.polymarket.wallet import (
     make_safe_proxy_resolver,
 )
 
-__all__ = ["W3_KEY", "make_app", "run"]
+__all__ = ["W3_KEY", "W3S_KEY", "make_app", "run"]
 
 # Typed app-state key for the (Async)Web3 client. aiohttp 3.10+ recommends
 # AppKey over bare-string keys (NotAppKeyWarning otherwise). Typed as
 # ``object`` because the real value is ``AsyncWeb3`` in production but
 # tests inject a structural fake — we don't want a hard web3 type pin in
 # the key.
+#
+# Back-compat: ``W3_KEY`` continues to hold a SINGLE web3-like client (the
+# first endpoint).  When ``POLYECHO_POLYGON_RPC_URL`` is a comma-separated
+# list, the additional clients (for fallback iteration) live at ``W3S_KEY``
+# below.  Tests that stub ``W3_KEY`` directly continue to work unchanged
+# (single-endpoint path) — fallback only kicks in when multiple clients are
+# explicitly registered.
 W3_KEY: web.AppKey[object] = web.AppKey("w3", object)
+
+# Ordered fallback list of (Async)Web3 clients, one per endpoint configured in
+# ``POLYECHO_POLYGON_RPC_URL`` (CSV).  Always non-empty when ``make_app`` is
+# used; the first element MIRRORS ``app[W3_KEY]`` for back-compat.  Tests that
+# inject ``W3_KEY`` directly (without populating this list) automatically run
+# the single-endpoint code path.
+W3S_KEY: web.AppKey[Iterable[object]] = web.AppKey("w3s", Iterable)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 # Strict EVM address regex.  The shape `^0x[0-9a-fA-F]{40}$` is intentional
@@ -136,42 +151,71 @@ async def _detect(request: web.Request) -> web.Response:
     # sig2 (SAFE proxy) requires a Polygon eth_call on the Safe Proxy
     # Factory's `computeProxyAddress(eoa)`. RPC may be down / slow / rate-
     # limited; the response shape's `error` field carries that signal.
-    sig2 = await _resolve_safe(eoa_l, request.app[W3_KEY])
+    #
+    # Resolution order (back-compat first):
+    #   1. ``app[W3_KEY]`` — the canonical single client; tests that stub
+    #      this attribute MUST keep driving the resolver (the existing
+    #      contract).  Always tried first.
+    #   2. ``app[W3S_KEY][1:]`` — the extra fallback clients populated by
+    #      ``make_app`` when ``POLYECHO_POLYGON_RPC_URL`` is a CSV.  Each
+    #      additional endpoint is tried in order if the previous one
+    #      timed out or errored.  Tests that override only ``W3_KEY`` are
+    #      unaffected (the original ``W3S_KEY[0]`` becomes a duplicate of
+    #      the first attempt — see note below).
+    primary = request.app[W3_KEY]
+    fallback_tail = list(request.app.get(W3S_KEY) or [])[1:]
+    sig2 = await _resolve_safe(eoa_l, [primary, *fallback_tail])
 
     return web.json_response({"sig0": sig0, "sig1": sig1, "sig2": sig2, "sig3": sig3})
 
 
-async def _resolve_safe(eoa: str, w3: object) -> dict[str, Any]:
+async def _resolve_safe(eoa: str, clients: list[object]) -> dict[str, Any]:
     """SAFE (sig-type 2) funder via the Polygon view-call. Fail-soft.
 
-    On timeout / RPC error returns ``{"addr": null, "error": <generic>}``
-    so the caller still gets sig0/1/3. The error string is GENERIC — we
-    never leak ``exc.args`` (which may contain RPC response bodies / URLs
-    / proxy creds / chain context).
+    Iterates ``clients`` in order — on timeout / RPC error against the
+    current endpoint, advances to the next.  Returns the first successful
+    address resolution.  When EVERY endpoint fails the response is the
+    last failure shape (``{"addr": null, "error": <generic>}``) so the
+    caller still gets sig0/1/3.  Error strings are GENERIC — we never
+    leak ``exc.args`` (which may contain RPC response bodies / URLs /
+    proxy creds / chain context).
+
+    Single-client list reproduces the previous single-URL behaviour
+    byte-for-byte (no extra wait / no extra hop).
     """
-    try:
-        resolver = make_safe_proxy_resolver(w3)
-        addr = await asyncio.wait_for(resolver(eoa), timeout=_SAFE_RPC_TIMEOUT_S)
+    last: dict[str, Any] = {
+        "addr": None,
+        "mode": WalletMode.SAFE,
+        "derived": True,
+        "error": "RPC error",
+    }
+    for w3 in clients:
+        try:
+            resolver = make_safe_proxy_resolver(w3)
+            addr = await asyncio.wait_for(resolver(eoa), timeout=_SAFE_RPC_TIMEOUT_S)
+        except TimeoutError:
+            # asyncio.TimeoutError == TimeoutError in 3.11+
+            _log.warning("detect: SAFE proxy RPC timeout")
+            last = {
+                "addr": None,
+                "mode": WalletMode.SAFE,
+                "derived": True,
+                "error": "RPC timeout",
+            }
+            continue
+        except Exception:
+            # NEVER include `exc.args` — could leak RPC URL / response body /
+            # account hints into the operator UI.
+            _log.warning("detect: SAFE proxy RPC error", exc_info=True)
+            last = {
+                "addr": None,
+                "mode": WalletMode.SAFE,
+                "derived": True,
+                "error": "RPC error",
+            }
+            continue
         return {"addr": addr, "mode": WalletMode.SAFE, "derived": True}
-    except TimeoutError:
-        # asyncio.TimeoutError == TimeoutError in 3.11+
-        _log.warning("detect: SAFE proxy RPC timeout")
-        return {
-            "addr": None,
-            "mode": WalletMode.SAFE,
-            "derived": True,
-            "error": "RPC timeout",
-        }
-    except Exception:
-        # NEVER include `exc.args` — could leak RPC URL / response body /
-        # account hints into the operator UI.
-        _log.warning("detect: SAFE proxy RPC error", exc_info=True)
-        return {
-            "addr": None,
-            "mode": WalletMode.SAFE,
-            "derived": True,
-            "error": "RPC error",
-        }
+    return last
 
 
 # ── App factory + entrypoint ─────────────────────────────────────────────────
@@ -183,15 +227,27 @@ def make_app(rpc_url: str | None = None) -> web.Application:
                  sentinel here so they never touch a real node; production
                  leaves it ``None`` and the URL is read from
                  ``POLYECHO_POLYGON_RPC_URL`` (falling back to drpc.org).
+                 ADVANCED: may also be a comma-separated list of endpoints
+                 (e.g. ``polygon.drpc.org,publicnode.com,1rpc.io``); the
+                 SAFE-proxy resolver iterates the list in order and reports
+                 success on the first endpoint that works.
 
     Returns:
-        A configured :class:`aiohttp.web.Application` with the
-        :class:`~web3.AsyncWeb3` client stashed at ``app["w3"]``.
+        A configured :class:`aiohttp.web.Application` with the FIRST
+        :class:`~web3.AsyncWeb3` client stashed at ``app["w3"]`` (back-compat)
+        and the full ordered fallback list at ``app["w3s"]``.
     """
     app = web.Application()
 
     if rpc_url is None:
         rpc_url = os.environ.get("POLYECHO_POLYGON_RPC_URL", _DEFAULT_POLYGON_RPC)
+
+    # Parse CSV → ordered list of endpoints.  Drops empty entries / surrounding
+    # whitespace.  An empty / blank value falls back to the bundled default so
+    # the container always has at least one usable endpoint.
+    endpoints = [p.strip() for p in rpc_url.split(",") if p.strip()]
+    if not endpoints:
+        endpoints = [_DEFAULT_POLYGON_RPC]
 
     # Late web3 imports: this keeps importing `polyecho.detect.app` cheap
     # for tests that stub `app["w3"]` directly. (web3.py drags in eth-abi /
@@ -201,7 +257,9 @@ def make_app(rpc_url: str | None = None) -> web.Application:
     # top-level alias to stay version-tolerant).
     from web3 import AsyncHTTPProvider, AsyncWeb3
 
-    app[W3_KEY] = AsyncWeb3(AsyncHTTPProvider(rpc_url))
+    clients: list[object] = [AsyncWeb3(AsyncHTTPProvider(ep)) for ep in endpoints]
+    app[W3_KEY] = clients[0]  # back-compat: first client at the original key
+    app[W3S_KEY] = clients  # ordered fallback list (length ≥ 1)
 
     app.router.add_get("/healthz", _healthz)
     app.router.add_get("/detect", _detect)
