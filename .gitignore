@@ -62,3 +62,6 @@ Icon?
 
 # Claude Code agent worktrees / local metadata — never commit
 .claude/
+
+# Serena MCP plugin local cache + memories — never commit
+.serena/
