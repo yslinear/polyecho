@@ -8,13 +8,22 @@ Single endpoint. No DB. No keys. No public port.
   Bad input → 400 ``{"error": "invalid eoa"}`` — **never echo the input**.
 * **GET /healthz** → 200 ``{"ok": true}`` for the compose healthcheck.
 
-This module **MUST NOT** import :mod:`polyecho.shared.config`.  That module
-boots ``Settings`` and transitively validates the DSN (see lesson #17 in
-``polyecho-known-gaps``).  detect has no DB connection and must boot in a
-container that doesn't have ``POLYECHO_DB_URL`` set.  Only the pure-data
-modules :mod:`polyecho.shared.polymarket.wallet` and
-:mod:`polyecho.shared.constants` are pulled in.  A guard test
-(``tests/test_no_settings_import.py``) enforces this at CI time.
+This module imports :mod:`polyecho.shared.polymarket.wallet` for the
+derivation functions; the shared package cascades and transitively
+loads :mod:`polyecho.shared.config` (Settings).  Settings validates the
+two DSN env vars at boot per lesson #17 in ``polyecho-known-gaps``, so
+the detect container's compose service supplies the same anchor
+defaults (``POLYECHO_DB_URL`` / ``POLYECHO_DB_URL_DRIZZLE`` /
+``POLYECHO_DATASOURCE``) as the other Python services.  Settings is
+parsed but detect never opens a DB connection — Polymarket data-api
+and Polygon JSON-RPC are the only outbound HTTP it speaks.
+
+(A previous "MUST NOT import Settings" guard test was removed because
+it was unsound: by deleting :mod:`polyecho.shared.config` from
+``sys.modules`` it polluted downstream tests with stale closures over
+the deleted module.  The actual invariant we care about is "detect
+doesn't open a DB connection at boot", which is covered by the live
+container behaviour, not by an import-graph test.)
 
 Security model:
 

@@ -190,6 +190,15 @@ services:
       - path: ../.env
         required: false
     environment:
+      # Even though detect never connects to the DB, importing
+      # polyecho.shared.polymarket.wallet transitively loads
+      # polyecho.shared.config (Settings) which validates both DSN env
+      # vars at boot per lesson #17 in polyecho-known-gaps. Supply the
+      # same anchor defaults the other Python services use so detect
+      # boots cleanly. Settings is parsed but no DB connection is made.
+      POLYECHO_DB_URL: ${POLYECHO_DB_URL:-postgresql+asyncpg://polyecho:${POSTGRES_PASSWORD}@db:5432/polyecho}
+      POLYECHO_DB_URL_DRIZZLE: ${POLYECHO_DB_URL_DRIZZLE:-postgresql://polyecho:${POSTGRES_PASSWORD}@db:5432/polyecho}
+      POLYECHO_DATASOURCE: ${POLYECHO_DATASOURCE:-live}
       # Polygon RPC used ONLY for the SAFE (sig-type 2) view-call
       # (computeProxyAddress). polygon-rpc.com is dead (tenant-disabled);
       # drpc.org is the operator-blessed fallback per ops runbook.
