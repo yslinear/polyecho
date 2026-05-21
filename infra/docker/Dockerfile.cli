@@ -31,6 +31,11 @@ COPY packages/discovery/pyproject.toml packages/discovery/pyproject.toml
 COPY packages/backtest/pyproject.toml packages/backtest/pyproject.toml
 COPY packages/push/pyproject.toml     packages/push/pyproject.toml
 COPY packages/cli/pyproject.toml      packages/cli/pyproject.toml
+# `detect` is a workspace member but ships in its own image
+# (Dockerfile.detect). We still need its manifest + src here so the
+# shared `uv.lock` resolves the workspace graph (uv sync --frozen walks
+# every member; a missing member errors with "Distribution not found").
+COPY packages/detect/pyproject.toml   packages/detect/pyproject.toml
 
 COPY packages/shared/src   packages/shared/src
 COPY packages/core/src     packages/core/src
@@ -38,6 +43,7 @@ COPY packages/discovery/src packages/discovery/src
 COPY packages/backtest/src packages/backtest/src
 COPY packages/push/src     packages/push/src
 COPY packages/cli/src      packages/cli/src
+COPY packages/detect/src   packages/detect/src
 
 RUN if [ -f uv.lock ]; then \
         uv sync --frozen --no-dev; \
