@@ -164,6 +164,53 @@ services:
     <<: *python-defaults
     # NO ports (sends outbound VAPID push only)
 
+  # ── detect (sig-type funder candidate derivation, internal HTTP) ─────────────
+  # Single-endpoint aiohttp service that, given an EOA, returns the 4
+  # Polymarket funder candidates (sigType 0/1/2/3). Called by the Next.js
+  # `web` service internally over the docker network when the operator
+  # types an EOA into the /accounts import form so the UI can show all 4
+  # candidates without running the CLI `polyecho account detect`.
+  #
+  # Security model — IMPORTANT (PRD §4.2 sanctioned exception):
+  #   * NO `ports:` block. The container MUST NOT be reachable from the
+  #     host network. Trust here comes from docker-network isolation; the
+  #     service has no authentication of its own.
+  #   * NO `depends_on:` block. detect talks to NO DB and needs NO
+  #     migrations. It is one of the few services that can boot before
+  #     `migrate` completes (and indeed before `db` exists at all).
+  #   * detect MUST NOT import polyecho.shared.config (lesson #17). A
+  #     guard test enforces this at CI time — see
+  #     packages/detect/tests/test_no_settings_import.py.
+  detect:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.detect
+    image: polyecho-detect
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      # Polygon RPC used ONLY for the SAFE (sig-type 2) view-call
+      # (computeProxyAddress). polygon-rpc.com is dead (tenant-disabled);
+      # drpc.org is the operator-blessed fallback per ops runbook.
+      POLYECHO_POLYGON_RPC_URL: ${POLYECHO_POLYGON_RPC_URL:-https://polygon.drpc.org}
+    # NO ports — reachable only from `web` at http://detect:8001 inside
+    # the polyecho docker network.
+    healthcheck:
+      # The runtime image is python:slim — curl/wget aren't installed, but
+      # python's stdlib urllib is. A 200 from /healthz is a strict pass.
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8001/healthz').read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
   # ── dashboard-web (Next.js 15) ────────────────────────────────────────────────
   web:
     build:

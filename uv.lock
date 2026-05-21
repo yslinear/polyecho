@@ -18,6 +18,7 @@ members = [
     "polyecho-backtest",
     "polyecho-cli",
     "polyecho-core",
+    "polyecho-detect",
     "polyecho-discovery",
     "polyecho-push",
     "polyecho-shared",
@@ -1596,6 +1597,23 @@ requires-dist = [
     { name = "polyecho-shared", editable = "packages/shared" },
     { name = "web3", specifier = ">=7.0" },
     { name = "websockets", specifier = ">=13.0" },
+]
+
+[[package]]
+name = "polyecho-detect"
+version = "0.1.0"
+source = { editable = "packages/detect" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "polyecho-shared" },
+    { name = "web3" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", specifier = ">=3.10" },
+    { name = "polyecho-shared", editable = "packages/shared" },
+    { name = "web3", specifier = ">=7" },
 ]
 
 [[package]]

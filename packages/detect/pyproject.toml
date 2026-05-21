@@ -1,0 +1,22 @@
+[project]
+name = "polyecho-detect"
+version = "0.1.0"
+description = "Single-endpoint aiohttp service that derives the 4 Polymarket funder candidates (sigType 0/1/2/3) for an EOA"
+requires-python = ">=3.12"
+dependencies = [
+    "polyecho-shared",
+    # aiohttp is already a transitive dep of polyecho-shared (used by the
+    # Polymarket client). Declared here explicitly so this package's wheel
+    # advertises the framework dependency.
+    "aiohttp>=3.10",
+    # web3.py provides AsyncWeb3 + AsyncHTTPProvider used by the SAFE
+    # (sig-type 2) view-call path. View-only — no signer/key.
+    "web3>=7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/polyecho"]

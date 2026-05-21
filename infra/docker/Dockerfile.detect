@@ -1,0 +1,94 @@
+# PolyEcho — detect service image (multi-stage, uv-based)
+# Build context: repo root (uv workspace requires it)
+# Usage:
+#   docker build -f infra/docker/Dockerfile.detect .
+#
+# This is a SISTER image to Dockerfile.python — same uv-workspace pattern,
+# same non-root user, same editable-install path discipline — but for the
+# `polyecho-detect` package specifically (single-endpoint aiohttp service
+# exposing GET /detect + GET /healthz on port 8001).
+#
+# Important: detect intentionally does NOT publish a port in compose. The
+# container is reachable only from `web` over the polyecho docker network.
+
+ARG PYTHON_VERSION=3.12
+ARG UV_VERSION=0.5
+
+# ── Stage 1: builder ──────────────────────────────────────────────────────────
+# Digest-pinned identically to Dockerfile.python (supply-chain integrity).
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-bookworm-slim@sha256:fef6dca3a45cd7ac8c4386e78263033ee4b262fe36c1ee077630e53ed6df2070 AS builder
+
+# Mirror Dockerfile.python: build under /app (same path used at runtime) so
+# uv's editable .pth entries — which hard-code the absolute src path — resolve
+# correctly after the cross-stage copy. If you move this, also move the
+# runtime stage's WORKDIR or the polyecho namespace package will not import.
+WORKDIR /app
+
+# Copy workspace manifest first (cache-friendly layer)
+COPY pyproject.toml ./
+COPY uv.lock* ./
+
+# Copy ALL workspace package manifests so uv can resolve the workspace graph
+# even though we only RUN the detect package at the end. Skipping a sibling
+# manifest here would cause `uv sync` to fail to resolve `polyecho-shared`
+# as a workspace source.
+COPY packages/shared/pyproject.toml    packages/shared/pyproject.toml
+COPY packages/core/pyproject.toml      packages/core/pyproject.toml
+COPY packages/discovery/pyproject.toml packages/discovery/pyproject.toml
+COPY packages/backtest/pyproject.toml  packages/backtest/pyproject.toml
+COPY packages/push/pyproject.toml      packages/push/pyproject.toml
+COPY packages/cli/pyproject.toml       packages/cli/pyproject.toml
+COPY packages/detect/pyproject.toml    packages/detect/pyproject.toml
+
+# Copy ALL source trees (PEP 420 namespace — all share `polyecho/`). detect
+# only DIRECTLY imports polyecho-shared but uv-sync needs every member's src
+# tree present to install the editable namespace package cleanly.
+COPY packages/shared/src    packages/shared/src
+COPY packages/core/src      packages/core/src
+COPY packages/discovery/src packages/discovery/src
+COPY packages/backtest/src  packages/backtest/src
+COPY packages/push/src      packages/push/src
+COPY packages/cli/src       packages/cli/src
+COPY packages/detect/src    packages/detect/src
+
+# Install workspace (--frozen if lockfile present, plain otherwise).
+RUN if [ -f uv.lock ]; then \
+        uv sync --frozen --no-dev; \
+    else \
+        uv sync --no-dev; \
+    fi
+
+# ── Stage 2: runtime ─────────────────────────────────────────────────────────
+# Digest-pinned identically to Dockerfile.python.
+FROM python:${PYTHON_VERSION}-slim-bookworm@sha256:d193c6f51a7dbd10395d6328de3a7edb0516fb0608ca138036576f574c3e07d2 AS runtime
+
+# Non-root user (PRD §7.2). Same UID/GID as the other Python images so
+# bind-mount permissions stay consistent across services.
+RUN groupadd --gid 1001 polyecho && \
+    useradd  --uid 1001 --gid polyecho --no-create-home --shell /sbin/nologin polyecho
+
+WORKDIR /app
+
+# Copy the venv produced by uv (built at /app).
+COPY --from=builder /app/.venv /app/.venv
+
+# Copy source into runtime at the SAME path the editable installs reference.
+COPY --from=builder /app/packages /app/packages
+
+# Put the venv on PATH. Belt-and-suspenders PYTHONPATH covers PEP 420
+# namespace resolution if the editable finder gets confused after the
+# cross-stage copy (matches Dockerfile.python).
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONPATH="/app/packages/shared/src:/app/packages/core/src:/app/packages/discovery/src:/app/packages/backtest/src:/app/packages/push/src:/app/packages/cli/src:/app/packages/detect/src"
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Documentary only — compose does NOT publish this port. The container is
+# reachable from `web` over the polyecho docker network at http://detect:8001.
+EXPOSE 8001
+
+USER polyecho
+
+# Single fixed entrypoint — this image only runs the detect service.
+# (Contrast with Dockerfile.python which uses ARG PACKAGE to multiplex.)
+CMD ["python", "-m", "polyecho.detect"]

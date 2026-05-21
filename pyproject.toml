@@ -10,6 +10,7 @@ members = [
     "packages/backtest",
     "packages/push",
     "packages/cli",
+    "packages/detect",
 ]
 
 [tool.uv.sources]
@@ -18,6 +19,7 @@ polyecho-core = { workspace = true }
 polyecho-discovery = { workspace = true }
 polyecho-backtest = { workspace = true }
 polyecho-push = { workspace = true }
+polyecho-detect = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -63,6 +65,7 @@ mypy_path = [
     "packages/backtest/src",
     "packages/push/src",
     "packages/cli/src",
+    "packages/detect/src",
 ]
 
 # Phase-0 stubs: trader-core and web-push-sender are skeletons whose
@@ -151,6 +154,7 @@ source = [
     "packages/backtest/src",
     "packages/push/src",
     "packages/cli/src",
+    "packages/detect/src",
 ]
 
 [tool.coverage.report]
