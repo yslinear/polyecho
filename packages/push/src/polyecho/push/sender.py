@@ -250,9 +250,7 @@ def _start_of_today(tz_name: str) -> datetime:
     except Exception:  # noqa: BLE001 - bad tz string ⇒ fall back to UTC
         tz = ZoneInfo("UTC")
     local_now = datetime.now(tz)
-    local_midnight = local_now.replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     return local_midnight.astimezone(UTC)
 
 
@@ -301,9 +299,7 @@ class WebPushSender:
     # ``--once`` backfill, or the scheduler.
     # ------------------------------------------------------------------
 
-    async def _emit_heartbeat(
-        self, phase: str, counters: _HeartbeatCounters
-    ) -> None:
+    async def _emit_heartbeat(self, phase: str, counters: _HeartbeatCounters) -> None:
         """Write one ``push_heartbeat`` via the frozen shared contract.
 
         Calls ``polyecho.shared.health.write_heartbeat("push", phase=,
@@ -349,11 +345,8 @@ class WebPushSender:
                 _HEARTBEAT_COMPONENT,
                 phase=phase,
                 datasource=self._settings.datasource,
-                live_trading=self._settings.live_trading,
                 counters=counters.as_dict(),
-                on_error=lambda exc: log.warning(
-                    "web_push_heartbeat_write_failed", error=str(exc)
-                ),
+                on_error=lambda exc: log.warning("web_push_heartbeat_write_failed", error=str(exc)),
             )
         except asyncio.CancelledError:
             # Cooperative cancellation is not a heartbeat failure — never
@@ -400,9 +393,7 @@ class WebPushSender:
         log.info("web_push_sender_starting", channel=EVENTS_NOTIFY_CHANNEL)
         await self._stream_forever(initial=True)
 
-    async def run_mini_backfill(
-        self, counters: _HeartbeatCounters | None = None
-    ) -> int:
+    async def run_mini_backfill(self, counters: _HeartbeatCounters | None = None) -> int:
         """Re-deliver every ``pushed_at IS NULL`` event (reconnect path).
 
         Identical query to the startup backfill; named distinctly so the
@@ -492,9 +483,7 @@ class WebPushSender:
             return 0
         except Exception as exc:  # noqa: BLE001 - safety net must not crash
             if _is_db_down(exc):
-                log.warning(
-                    "web_push_fallback_scan_db_unavailable", error=str(exc)
-                )
+                log.warning("web_push_fallback_scan_db_unavailable", error=str(exc))
                 await self._emit_heartbeat(_PHASE_IDLE, counters)
                 return 0
             # Unexpected non-DB error: log and swallow so one bad scan does
@@ -512,9 +501,7 @@ class WebPushSender:
         await self._emit_heartbeat(_PHASE_IDLE, counters)
         return processed
 
-    async def run_backfill(
-        self, counters: _HeartbeatCounters | None = None
-    ) -> int:
+    async def run_backfill(self, counters: _HeartbeatCounters | None = None) -> int:
         """Deliver every ``events`` row with ``pushed_at IS NULL`` (id ASC).
 
         ``counters`` (optional) is the current cycle's heartbeat tally; when
@@ -592,9 +579,7 @@ class WebPushSender:
                     # we are about to park on the live stream (phase=idle).
                     # Both are best-effort — see _emit_heartbeat.
                     await self._emit_heartbeat(_PHASE_SENDING, counters)
-                    log.info(
-                        "web_push_listening", channel=EVENTS_NOTIFY_CHANNEL
-                    )
+                    log.info("web_push_listening", channel=EVENTS_NOTIFY_CHANNEL)
                     await self._emit_heartbeat(_PHASE_IDLE, counters)
                     async for note in notes:
                         await self._handle_notification(note.payload)
@@ -657,9 +642,7 @@ class WebPushSender:
             # Bad VAPID config — must halt delivery, not be swallowed (I4).
             raise
         except Exception as exc:  # noqa: BLE001 - one event never kills loop
-            log.error(
-                "web_push_event_failed", event_id=event_id, error=str(exc)
-            )
+            log.error("web_push_event_failed", event_id=event_id, error=str(exc))
 
     # ------------------------------------------------------------------
     # Delivery
@@ -718,13 +701,9 @@ class WebPushSender:
 
         async def _bounded(sub: PushSubscription) -> str:
             async with sem:
-                return await self._deliver_to_subscription(
-                    session, sub, data
-                )
+                return await self._deliver_to_subscription(session, sub, data)
 
-        results = await asyncio.gather(
-            *(_bounded(sub) for sub in subs), return_exceptions=True
-        )
+        results = await asyncio.gather(*(_bounded(sub) for sub in subs), return_exceptions=True)
 
         # ``all_durable`` — every subscription reached a terminal state (no
         # "transient" / unexpected error left), so the event must NOT be
@@ -824,16 +803,10 @@ class WebPushSender:
             try:
                 await asyncio.to_thread(self._webpush_blocking, sub, data)
             except WebPushException as exc:
-                status = (
-                    exc.response.status_code
-                    if exc.response is not None
-                    else None
-                )
+                status = exc.response.status_code if exc.response is not None else None
                 if status in _GONE_STATUSES:
                     await session.execute(
-                        delete(PushSubscription).where(
-                            PushSubscription.id == sub_id
-                        )
+                        delete(PushSubscription).where(PushSubscription.id == sub_id)
                     )
                     log.info(
                         "web_push_subscription_pruned",
@@ -896,9 +869,7 @@ class WebPushSender:
                     .where(PushSubscription.id == sub_id)
                     .values(last_used_at=_now())
                 )
-                log.info(
-                    "web_push_delivered", subscription_id=str(sub_id)
-                )
+                log.info("web_push_delivered", subscription_id=str(sub_id))
                 return "ok"
 
             if attempt < _MAX_TRANSIENT_RETRIES:
@@ -930,20 +901,14 @@ class WebPushSender:
     # Queries
     # ------------------------------------------------------------------
 
-    async def _fetch_pending_event_ids(
-        self, session: AsyncSession
-    ) -> list[int]:
+    async def _fetch_pending_event_ids(self, session: AsyncSession) -> list[int]:
         """Event ids with ``pushed_at IS NULL`` ordered ``id ASC``."""
         result = await session.execute(
-            select(Event.id)
-            .where(Event.pushed_at.is_(None))
-            .order_by(Event.id.asc())
+            select(Event.id).where(Event.pushed_at.is_(None)).order_by(Event.id.asc())
         )
         return [int(row) for row in result.scalars().all()]
 
-    async def _fetch_subscriptions(
-        self, session: AsyncSession
-    ) -> list[PushSubscription]:
+    async def _fetch_subscriptions(self, session: AsyncSession) -> list[PushSubscription]:
         """All registered push subscription rows."""
         result = await session.execute(select(PushSubscription))
         return list(result.scalars().all())

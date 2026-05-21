@@ -171,9 +171,7 @@ class _FakeSession:
         if "count" in text:  # daily-summary aggregate
             return _FakeResult([(0, 0)])
         # events id list ordered by id asc, pushed_at IS NULL
-        pending = sorted(
-            e.id for e in self._events.values() if e.pushed_at is None
-        )
+        pending = sorted(e.id for e in self._events.values() if e.pushed_at is None)
         return _FakeResult(pending)
 
 
@@ -216,18 +214,14 @@ def _webpush_exc(status: int) -> Exception:
 
 @pytest.mark.parametrize("status", [404, 410])
 @pytest.mark.asyncio
-async def test_gone_status_deletes_subscription(
-    status: int, _patched_scope: Any
-) -> None:
+async def test_gone_status_deletes_subscription(status: int, _patched_scope: Any) -> None:
     ev = _FakeEvent(1, {"data": {}, "push": {"title": "t", "body": "b"}})
     sub = _FakeSub("https://push.example/abc")
     session = _FakeSession({1: ev}, [sub])
     sender = _make_sender()
 
     with (
-        patch(
-            "polyecho.push.sender.session_scope", _patched_scope(session)
-        ),
+        patch("polyecho.push.sender.session_scope", _patched_scope(session)),
         patch(
             "polyecho.push.sender.webpush",
             side_effect=_webpush_exc(status),
@@ -346,9 +340,7 @@ async def test_backfill_selects_only_unpushed(_patched_scope: Any) -> None:
     already.pushed_at = datetime.now()
     pending_a = _FakeEvent(2, {"data": {}, "push": None})
     pending_b = _FakeEvent(3, {"data": {}, "push": None})
-    session = _FakeSession(
-        {1: already, 2: pending_a, 3: pending_b}, []
-    )
+    session = _FakeSession({1: already, 2: pending_a, 3: pending_b}, [])
     sender = _make_sender()
 
     delivered: list[int] = []
@@ -413,9 +405,7 @@ async def test_daily_pnl_summary_emits_event(_patched_scope: Any) -> None:
 
     with (
         patch("polyecho.push.sender.session_scope", _patched_scope(session)),
-        patch(
-            "polyecho.push.sender.emit_event", return_value=42
-        ) as emit,
+        patch("polyecho.push.sender.emit_event", return_value=42) as emit,
     ):
         event_id = await sender.emit_daily_pnl_summary()
 
@@ -481,9 +471,7 @@ async def test_listen_attaches_before_backfill_no_lost_event() -> None:
         # double ignores it — the test only asserts call ordering.
         return 0
 
-    async def _fake_safe(
-        event_id: int, counters: Any = None
-    ) -> None:  # noqa: ARG001
+    async def _fake_safe(event_id: int, counters: Any = None) -> None:  # noqa: ARG001
         # Mirrors the real _safe_deliver signature (optional heartbeat
         # counters); the stream path delivers event 99 then cancels.
         delivered.append(event_id)
@@ -579,9 +567,7 @@ async def test_daily_summary_filters_today_only() -> None:
 
     class _CapSession:
         async def execute(self, stmt: Any) -> Any:
-            captured["sql"] = str(stmt.compile(
-                compile_kwargs={"literal_binds": False}
-            )).lower()
+            captured["sql"] = str(stmt.compile(compile_kwargs={"literal_binds": False})).lower()
             return _FakeResult([(0, 0)])
 
     @asynccontextmanager
@@ -633,9 +619,7 @@ def test_start_of_today_is_tz_aware_local_midnight() -> None:
 
 @pytest.mark.parametrize("status", [401, 403])
 @pytest.mark.asyncio
-async def test_vapid_auth_status_halts_delivery(
-    status: int, _patched_scope: Any
-) -> None:
+async def test_vapid_auth_status_halts_delivery(status: int, _patched_scope: Any) -> None:
     """401/403 raises PushConfigError (halts) and does NOT stamp the event
     nor return a silent "ok"."""
     from polyecho.push.sender import PushConfigError
@@ -816,9 +800,7 @@ async def test_fallback_scan_delivers_event_with_no_notify(
     """An event sitting pushed_at IS NULL (its NOTIFY was dropped on buffer
     overflow — no stream event, no restart) is eventually delivered purely
     by the periodic fallback scan."""
-    stranded = _FakeEvent(
-        21, {"data": {}, "push": {"title": "t", "body": "b"}}
-    )
+    stranded = _FakeEvent(21, {"data": {}, "push": {"title": "t", "body": "b"}})
     sub = _FakeSub("https://push.example/stranded")
     session = _FakeSession({21: stranded}, [sub])
     sender = _make_sender()
@@ -890,25 +872,16 @@ def test_fallback_scan_interval_env_override_and_floor(
     from polyecho.push import sender as smod
 
     monkeypatch.delenv("POLYECHO_PUSH_FALLBACK_SCAN_SECONDS", raising=False)
-    assert (
-        smod._fallback_scan_interval_seconds()
-        == smod._FALLBACK_SCAN_DEFAULT_SECONDS
-    )
+    assert smod._fallback_scan_interval_seconds() == smod._FALLBACK_SCAN_DEFAULT_SECONDS
 
     monkeypatch.setenv("POLYECHO_PUSH_FALLBACK_SCAN_SECONDS", "60")
     assert smod._fallback_scan_interval_seconds() == 60
 
     # Sub-floor / non-positive / garbage are all clamped or defaulted.
     monkeypatch.setenv("POLYECHO_PUSH_FALLBACK_SCAN_SECONDS", "1")
-    assert (
-        smod._fallback_scan_interval_seconds()
-        == smod._FALLBACK_SCAN_MIN_SECONDS
-    )
+    assert smod._fallback_scan_interval_seconds() == smod._FALLBACK_SCAN_MIN_SECONDS
     monkeypatch.setenv("POLYECHO_PUSH_FALLBACK_SCAN_SECONDS", "not-an-int")
-    assert (
-        smod._fallback_scan_interval_seconds()
-        == smod._FALLBACK_SCAN_DEFAULT_SECONDS
-    )
+    assert smod._fallback_scan_interval_seconds() == smod._FALLBACK_SCAN_DEFAULT_SECONDS
 
 
 @pytest.mark.asyncio
@@ -1023,13 +996,13 @@ def _fake_health(write_impl: Any) -> Any:
             sys.modules.pop("polyecho.shared.health", None)
 
 
-def _hb_sender(*, datasource: str = "fixture", live: bool = False) -> Any:
-    """A sender whose settings carry the datasource / live_trading flags the
-    heartbeat payload must echo from ``polyecho.shared.config``."""
+def _hb_sender(*, datasource: str = "fixture") -> Any:
+    """A sender whose settings carry the datasource flag the heartbeat
+    payload must echo from ``polyecho.shared.config``. (``live_trading``
+    was removed in R24 — the heartbeat seam now omits it.)"""
     settings = MagicMock()
     settings.vapid_private_key.get_secret_value.return_value = "priv-redacted"
     settings.datasource = datasource
-    settings.live_trading = live
     with patch("polyecho.push.sender.get_settings", return_value=settings):
         from polyecho.push.sender import WebPushSender
 
@@ -1039,13 +1012,14 @@ def _hb_sender(*, datasource: str = "fixture", live: bool = False) -> Any:
 @pytest.mark.asyncio
 async def test_once_writes_well_formed_heartbeat(_patched_scope: Any) -> None:
     """``--once`` emits exactly one ``write_heartbeat("push", ...)`` whose
-    payload matches the FROZEN shape: phase, datasource, live_trading,
-    counters{} with the three cycle counts (F0 stamps ``ts`` itself)."""
+    payload matches the FROZEN shape: phase, datasource, counters{} with
+    the three cycle counts (F0 stamps ``ts`` itself; ``live_trading`` was
+    retired in R24)."""
 
     ev = _FakeEvent(1, {"data": {}, "push": {"title": "t", "body": "b"}})
     sub = _FakeSub("https://push.example/ok")
     session = _FakeSession({1: ev}, [sub])
-    sender = _hb_sender(datasource="live", live=True)
+    sender = _hb_sender(datasource="live")
 
     calls: list[tuple[Any, ...]] = []
 
@@ -1071,7 +1045,8 @@ async def test_once_writes_well_formed_heartbeat(_patched_scope: Any) -> None:
     assert args == ("push",)
     assert kwargs["phase"] in {"idle", "sending"}
     assert kwargs["datasource"] == "live"
-    assert kwargs["live_trading"] is True
+    # ``live_trading`` retired in R24 — push no longer forwards it.
+    assert "live_trading" not in kwargs or kwargs["live_trading"] is None
     assert kwargs["counters"] == {
         "delivered": 1,
         "content_error": 0,
@@ -1248,9 +1223,7 @@ async def test_all_content_error_heartbeat_counts_content_error(
     with (
         _fake_health(lambda *a, **kw: calls.append((a, kw))),
         patch("polyecho.push.sender.session_scope", _patched_scope(session)),
-        patch(
-            "polyecho.push.sender.webpush", side_effect=_webpush_exc(413)
-        ),
+        patch("polyecho.push.sender.webpush", side_effect=_webpush_exc(413)),
         patch(
             "polyecho.push.sender.build_vapid_claims",
             return_value={"sub": "x"},
@@ -1305,9 +1278,7 @@ async def test_emit_heartbeat_awaits_coroutine_write_impl() -> None:
 
 
 @pytest.mark.asyncio
-async def test_supervised_loop_emits_heartbeat_and_survives_hb_error() -> (
-    None
-):
+async def test_supervised_loop_emits_heartbeat_and_survives_hb_error() -> None:
     """The supervised stream emits a per-iteration heartbeat; a raising
     heartbeat must NOT break the reconnect/drain loop (it still reaches the
     NOTIFY wait and is then cleanly cancelled)."""
