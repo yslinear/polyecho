@@ -60,6 +60,7 @@ import { loadDangerPassphraseHash, verifyPassphrase } from "@/lib/passphrase";
 import { encryptPrivateKey } from "@/lib/key-crypto";
 import { EVM_ADDRESS_RE, PRIVATE_KEY_RE } from "@/lib/format";
 import { magicProxyAddress } from "@/lib/magic-proxy";
+import { t, type I18nKey } from "@/lib/i18n";
 
 /** Mirrors `polyecho.shared.accounts.SIGNATURE_TYPE_NAMES` (0..3). */
 const SIGNATURE_TYPE_NAMES: Record<number, string> = {
@@ -268,4 +269,127 @@ export async function deriveMagicProxyForCheck(
   } catch {
     return { ok: false, derived: null };
   }
+}
+
+// ===========================================================================
+// deriveAllFunders — Server Action proxy to the internal `detect` container.
+// ===========================================================================
+//
+// The `detect` service (separate docker container, internal docker network
+// only, no public port) imports the FROZEN Python `polyecho.shared.polymarket.wallet`
+// derivations and returns the 4 candidate funder addresses for an EOA. This
+// Server Action is the web's entry point; the UI (`funder-picker.tsx`) calls
+// it and then runs `probeTotalBalance` on each address.
+//
+// SECURITY MODEL: The web tier still does NOT itself derive the type-1/2/3
+// CREATE2 / RPC addresses. The derivations live in the trusted Python source
+// of truth; this action only PROXIES. The returned addresses are RENDERED
+// ONLY and never persisted (the picker click pre-fills the form, but the
+// operator still confirms via submit, which goes through the existing
+// `importAccount` gates).
+//
+// FAIL-SOFT: timeout (3s) / network / parse / sig2 RPC failure all resolve
+// to {ok:false, reason:<zh-TW>}. The picker then shows a fallback message and
+// the user can still manually proceed. No throws.
+//
+// i18n NOTE: the `tables.accounts.import.picker.*` keys below are added by
+// Agent C (parallel). To keep this typecheck-clean NOW, the literals are
+// cast through `I18nKey`; `t()` returns the key itself when missing (see
+// lib/i18n.ts — "Missing key → returns the key itself"), so the action stays
+// safe even before Agent C lands the strings.
+
+export type FunderCandidate = {
+  sigType: 0 | 1 | 2 | 3;
+  mode: "eoa" | "magic" | "safe" | "poly_1271";
+  address: string | null;
+  derived: boolean;
+  error?: string;
+};
+
+export type DeriveAllFundersResult =
+  | { ok: true; candidates: FunderCandidate[] }
+  | { ok: false; reason: string };
+
+const DETECT_URL = process.env.POLYECHO_DETECT_URL ?? "http://detect:8001";
+const DETECT_TIMEOUT_MS = 3000;
+
+export async function deriveAllFunders(
+  eoa: string,
+): Promise<DeriveAllFundersResult> {
+  const trimmed = (eoa ?? "").trim();
+  if (!EVM_ADDRESS_RE.test(trimmed)) {
+    return {
+      ok: false,
+      reason: t("tables.accounts.import.picker.errInvalidEoa" as I18nKey),
+    };
+  }
+  const url = `${DETECT_URL}/detect?eoa=${encodeURIComponent(trimmed.toLowerCase())}`;
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(DETECT_TIMEOUT_MS),
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      return {
+        ok: false,
+        reason: t("tables.accounts.import.picker.errServiceDown" as I18nKey),
+      };
+    }
+    const body = (await res.json()) as unknown;
+    if (body == null || typeof body !== "object") {
+      return {
+        ok: false,
+        reason: t("tables.accounts.import.picker.errServiceDown" as I18nKey),
+      };
+    }
+    const b = body as Record<string, unknown>;
+    // Map detect response → ordered candidates list (sig0,1,2,3). Validate
+    // each field defensively; a malformed sub-object yields a candidate
+    // with address:null + derived:false (the picker handles that fallback).
+    const candidates: FunderCandidate[] = [
+      mapCandidate(0, b.sig0),
+      mapCandidate(1, b.sig1),
+      mapCandidate(2, b.sig2),
+      mapCandidate(3, b.sig3),
+    ];
+    return { ok: true, candidates };
+  } catch {
+    // Timeout / network / JSON-parse — all collapse to a single fail-soft
+    // result. DO NOT log the EOA (operator privacy + security model).
+    return {
+      ok: false,
+      reason: t("tables.accounts.import.picker.errServiceDown" as I18nKey),
+    };
+  }
+}
+
+function mapCandidate(
+  sigType: 0 | 1 | 2 | 3,
+  raw: unknown,
+): FunderCandidate {
+  const r =
+    raw && typeof raw === "object"
+      ? (raw as {
+          addr?: string | null;
+          mode?: string;
+          derived?: boolean;
+          error?: string;
+        })
+      : null;
+  const mode = (r?.mode ?? sigTypeMode(sigType)) as FunderCandidate["mode"];
+  const address =
+    typeof r?.addr === "string" && r.addr.length > 0 ? r.addr : null;
+  return {
+    sigType,
+    mode,
+    address,
+    derived: Boolean(r?.derived),
+    ...(typeof r?.error === "string" && r.error.length > 0
+      ? { error: r.error }
+      : {}),
+  };
+}
+
+function sigTypeMode(sigType: 0 | 1 | 2 | 3): FunderCandidate["mode"] {
+  return (["eoa", "magic", "safe", "poly_1271"] as const)[sigType];
 }

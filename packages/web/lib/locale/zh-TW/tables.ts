@@ -171,6 +171,30 @@ export const tables = {
       create2MismatchHint:
         "可能是有意的（例如自訂代理 / 已遷移帳戶）；若你不確定，請對照 polymarket.com/settings 顯示的 funder。本頁不阻擋送出。",
       create2DerivedLabel: "CREATE2 推導",
+      /** P3 — funder-picker: auto-derive 4 candidate funder addresses
+       *  for the typed EOA (via internal `detect` Server Action), probe
+       *  USDC balance of each, and let the operator pick by balance.
+       *  Fail-soft: if detect is down, show a short note and the manual
+       *  funder input stays usable. */
+      picker: {
+        heading: "這個 EOA 可開的 4 個錢包",
+        subheading: "依鏈上餘額挑你在用的",
+        modeEoa: "EOA 自身",
+        modeMagic: "Magic Proxy",
+        modeSafe: "Gnosis Safe",
+        modePoly1271: "Deposit Wallet",
+        positionsLabel: "部位",
+        idleLabel: "閒置",
+        balanceFailed: "餘額無法取得",
+        noAddress: "（無）",
+        allZeroNote: "還沒入金到任何錢包，先 deposit USDC 再回來",
+        selectAria: "選擇 {{mode}}",
+        serviceUnavailable: "自動偵測暫不可用，請手動輸入 Funder 位址",
+        errInvalidEoa: "EOA 格式不對",
+        errServiceDown: "偵測服務無法觸及",
+        reselect: "重選",
+        selectedPrefix: "已選",
+      },
     },
   },
   leaders: {
