@@ -161,11 +161,24 @@ async def _process_job(job: BacktestJob, engine: BacktestEngine) -> None:
             async with session_scope() as session:
                 await _set_status(session, job_id, "running", progress=progress * 100.0)
 
+    # P11 Bug 2: if ANY leader produced an ``"error"`` envelope, the job is
+    # NOT a success — calling it 'completed' silently is exactly how the
+    # UI showed "已完成 / completed" for job 557eef18 despite every leader
+    # carrying ``RuntimeError: LiveDataSource must be used as an async
+    # context manager``.  A job with any leader-level error is reported as
+    # ``status='failed'`` so the existing failed-state UI surfaces it.
+    # Per-leader envelopes remain inside ``result["leaders"]`` unchanged
+    # (schema is preserved — no extra wrapper layer added).
+    has_error = any(
+        isinstance(leader_result, dict) and "error" in leader_result
+        for leader_result in all_results.values()
+    )
+    final_status = "failed" if has_error else "completed"
     async with session_scope() as session:
         await _set_status(
             session,
             job_id,
-            "completed",
+            final_status,
             progress=100.0,
             result={"leaders": all_results},
         )

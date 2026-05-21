@@ -74,6 +74,14 @@ export const backtest = {
       bodyPrefix: "backtest 引擎回傳錯誤。請以 ",
       bodySuffix: " 檢視 Python worker 紀錄，然後重新將任務送入佇列。",
     },
+    /** P11 Bug 3: per-leader error envelope surfacing.  Used when
+     *  `result.leaders[wallet].error` is set — typically the live
+     *  `LiveDataSource must be used as an async context manager` regression
+     *  or any other per-leader worker exception. */
+    leaderError: {
+      title: "Leader 回測失敗",
+      body: "以下 Leader 在回測過程中發生錯誤，已無對應的績效資料：",
+    },
     scenario: {
       title: "情境比較",
       desc: "在不同的 slippage 與延遲假設下的最佳、基準與最差情況。",

@@ -577,13 +577,18 @@ async def test_job_lifecycle_pending_to_running_to_done(
 
 
 @pytest.mark.asyncio
-async def test_job_lifecycle_records_per_leader_error_then_completes(
+async def test_job_lifecycle_records_per_leader_error_then_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A leader that raises inside run_triple must NOT fail the whole job.
+    """A leader that raises inside run_triple must mark the job FAILED.
 
-    jobs._process_job catches per-leader exceptions, stores an error
-    envelope for that leader, and still finishes the job as 'completed'.
+    P11 Bug 2: previously _process_job stored the per-leader error envelope
+    and still wrote ``status='completed'``, which the UI showed as success
+    despite the result actually being all-errors (job 557eef18 was the
+    wake-up call).  The contract now: if ANY leader has an ``"error"`` key
+    in its envelope, the terminal status is ``'failed'``.  Per-leader
+    envelopes are preserved inside ``result["leaders"]`` unchanged
+    (schema is not extended with a wrapper).
     """
     import polyecho.backtest.jobs as jobs_mod
     from polyecho.backtest.jobs import _process_job
@@ -600,12 +605,46 @@ async def test_job_lifecycle_records_per_leader_error_then_completes(
     await _process_job(job, make_engine())  # type: ignore[arg-type]
 
     statuses = [t["status"] for t in transitions]
-    assert statuses[-1] == "completed"  # per-leader error is contained
+    assert statuses[-1] == "failed"  # P11: any per-leader error => job failed
     final_result = transitions[-1]["result"]
     assert isinstance(final_result, dict)
     env = final_result["leaders"]["0xbad"]
     assert "error" in env
     assert "RuntimeError" in env["error"]
+
+
+@pytest.mark.asyncio
+async def test_job_lifecycle_all_clean_leaders_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When NO leader has an ``"error"`` envelope, the job is 'completed'.
+
+    P11 Bug 2 regression-lock — the failed-on-any-error rule must not break
+    the happy path: a job whose every leader returned a clean scenario dict
+    still terminates at ``status='completed'``.
+    """
+    import polyecho.backtest.jobs as jobs_mod
+    from polyecho.backtest.jobs import _process_job
+
+    transitions: list[dict[str, object]] = []
+    _patch_status_recorder(monkeypatch, transitions)
+
+    async def _ok(engine: object, params: object, leader: str) -> dict[str, object]:
+        # Shape mirrors run_triple's per-leader return: a triple-scenario dict.
+        return {"scenarios": []}
+
+    monkeypatch.setattr(jobs_mod, "run_triple", _ok)
+
+    job = _FakeJob(leader_addresses=["0xgood", "0xalsogood"], template_params=None)
+    await _process_job(job, make_engine())  # type: ignore[arg-type]
+
+    statuses = [t["status"] for t in transitions]
+    assert statuses[-1] == "completed"
+    final_result = transitions[-1]["result"]
+    assert isinstance(final_result, dict)
+    for leader in ("0xgood", "0xalsogood"):
+        env = final_result["leaders"][leader]
+        assert "error" not in env
 
 
 @pytest.mark.asyncio

@@ -87,11 +87,33 @@ interface ScenarioResult {
   pnl_curve: DayPoint[];
 }
 
+/**
+ * Per-leader envelope written by `packages/backtest/src/polyecho/backtest/
+ * jobs.py:_process_job`. On a clean run, value is the run_triple dict
+ * (`scenarios` / `stats` / `pnl_curve`). On a per-leader failure the worker
+ * stores `{ error: "ExceptionName: message" }` instead (e.g. the
+ * `LiveDataSource must be used as an async context manager` RuntimeError
+ * that bit job 557eef18 — P11 Bug 3).
+ */
+interface LeaderResult {
+  scenarios?: ScenarioResult[];
+  stats?: ScenarioStats;
+  pnl_curve?: DayPoint[];
+  error?: string;
+}
+
 interface BacktestResult {
   scenarios?: ScenarioResult[];
   /** Single-scenario run */
   stats?: ScenarioStats;
   pnl_curve?: DayPoint[];
+  /**
+   * Per-leader envelopes keyed by wallet address. Schema written by
+   * `_process_job`; preserved (no extra wrapper layer) per P11 contract.
+   */
+  leaders?: Record<string, LeaderResult>;
+  /** Whole-job error envelope (when `_process_job` itself raises). */
+  error?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +181,28 @@ export default async function BacktestResultPage({ params }: PageProps) {
   const isRunning = job.status === "running";
   const progress = Number(job.progress ?? 0);
 
+  // P11 Bug 3: surface per-leader error envelopes even if the row's terminal
+  // status is 'completed' (legacy rows that pre-date P11 Bug 2's
+  // failed-on-any-error rule) — silently skipping over them is exactly how
+  // job 557eef18 displayed "已完成" with every leader carrying the
+  // ``LiveDataSource must be used as an async context manager`` RuntimeError.
+  // We collect [wallet, error] pairs and render them in a destructive Alert
+  // above the rest of the result body. The result schema is NOT extended —
+  // we just READ ``result.leaders[wallet].error`` and ``result.error``.
+  const leaderErrors: Array<{ wallet: string; error: string }> = result?.leaders
+    ? Object.entries(result.leaders)
+        .filter(
+          ([, leaderResult]) =>
+            leaderResult &&
+            typeof leaderResult === "object" &&
+            typeof (leaderResult as LeaderResult).error === "string",
+        )
+        .map(([wallet, leaderResult]) => ({
+          wallet,
+          error: (leaderResult as LeaderResult).error as string,
+        }))
+    : [];
+
   return (
     <div className="space-y-6">
       {/* Back → list page (R-list 2026-05-21 UX: detail returns to the
@@ -197,6 +241,48 @@ export default async function BacktestResultPage({ params }: PageProps) {
           {STATUS_LABEL[job.status] ?? job.status}
         </Badge>
       </div>
+
+      {/* P11 Bug 3: per-leader error envelopes.  Shown ABOVE the rest of
+          the result body so an operator viewing a job whose every leader
+          failed (e.g. the live ``LiveDataSource must be used as an async
+          context manager`` regression) cannot miss it — pre-P11 the page
+          rendered "已完成" with no error surface and the scenarios block
+          simply didn't appear (silent skip).  The Alert lists the leader
+          address (truncated for legibility, full string still in the DOM
+          via the wallet attribute) and the raw worker error string. */}
+      {leaderErrors.length > 0 && (
+        <Card
+          className="border-destructive"
+          data-testid="backtest-leader-errors"
+        >
+          <CardHeader className="pb-3">
+            <CardTitle className="text-destructive">
+              {t("backtest.result.leaderError.title")}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <p className="text-sm text-muted-foreground">
+              {t("backtest.result.leaderError.body")}
+            </p>
+            <ul className="space-y-2">
+              {leaderErrors.map(({ wallet, error }) => (
+                <li
+                  key={wallet}
+                  className="rounded border border-destructive/40 bg-destructive/5 p-3"
+                  data-leader={wallet}
+                >
+                  <p className="font-mono text-xs text-muted-foreground">
+                    {wallet.slice(0, 10)}…{wallet.slice(-6)}
+                  </p>
+                  <p className="mt-1 break-all text-sm text-destructive">
+                    {error}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Job metadata */}
       <Card>

@@ -141,6 +141,70 @@ describe("/backtest/[id] result page", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders per-leader error envelopes in a destructive Alert (P11 Bug 3)", async () => {
+    // P11 Bug 3 regression-lock: result.leaders[wallet].error MUST be
+    // surfaced, never silently skipped.  Job 557eef18 was 'completed' but
+    // every leader carried the
+    //   RuntimeError: LiveDataSource must be used as an async context manager
+    // envelope — pre-P11 the detail page rendered the "completed" badge with
+    // no error block.  We render here a job that mirrors that wire shape
+    // (status='failed' now per Bug 2; we still assert the Alert renders).
+    const leaderError =
+      "RuntimeError: LiveDataSource must be used as an async context manager " +
+      "(`async with LiveDataSource() as ds: ...`)";
+    row = {
+      ...baseJob,
+      status: "failed",
+      result: {
+        leaders: {
+          "0x1f1d29e8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+            error: leaderError,
+          },
+        },
+      },
+    };
+    const { container } = render(await renderPage());
+    // The destructive Alert region must be present (data-testid lets the
+    // test bind to the surface independently of i18n copy).
+    const alert = container.querySelector(
+      '[data-testid="backtest-leader-errors"]',
+    );
+    expect(alert).not.toBeNull();
+    // The localised title is rendered.
+    expect(
+      screen.getByText(t("backtest.result.leaderError.title")),
+    ).toBeInTheDocument();
+    // The raw worker error string is rendered verbatim (operator-actionable;
+    // truncating would defeat the entire point of showing it).
+    expect(screen.getByText(leaderError)).toBeInTheDocument();
+    // The wallet is tagged so an operator can copy the full address from the
+    // DOM even though the visible label is truncated.
+    const item = container.querySelector(
+      '[data-leader="0x1f1d29e8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]',
+    );
+    expect(item).not.toBeNull();
+  });
+
+  it("does NOT render the leader-error Alert when every leader is clean", async () => {
+    // Regression-lock for Bug 3: the Alert must appear ONLY when at least
+    // one leader carries an `error` envelope.  A clean completed run must
+    // not display an empty/spurious error surface.
+    row = {
+      ...baseJob,
+      status: "completed",
+      result: {
+        leaders: {
+          "0xabc": { scenarios: [] },
+        },
+        scenarios: [],
+      },
+    };
+    const { container } = render(await renderPage());
+    expect(
+      container.querySelector('[data-testid="backtest-leader-errors"]'),
+    ).toBeNull();
+  });
+
   it("completed (triple): renders signed returns with arrows + the chart", async () => {
     row = {
       ...baseJob,
