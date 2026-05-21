@@ -133,6 +133,19 @@ services:
         PACKAGE: core
     <<: *python-defaults
     # NO ports — key isolation (PRD §4.2 / §5 G5)
+    # Heartbeat-based healthcheck: worker writes settings.trader_heartbeat
+    # (JSON with ts field) on every loop. Healthy if ts < 5min old.
+    # Closes lesson #24 ("docker `Up` != healthy").
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, asyncio, datetime as dt, asyncpg\nurl = os.environ['POLYECHO_DB_URL'].replace('postgresql+asyncpg://', 'postgresql://')\nasync def main():\n    c = await asyncpg.connect(url)\n    try:\n        ts = await c.fetchval(\"SELECT (value::jsonb->>'ts')::timestamptz FROM settings WHERE key=$$1\", 'trader_heartbeat')\n        assert ts is not None, 'no heartbeat row'\n        age = dt.datetime.now(dt.timezone.utc) - ts\n        assert age.total_seconds() < 300, f'stale {age.total_seconds()}s'\n    finally:\n        await c.close()\nasyncio.run(main())\n"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
 
   # ── discovery-worker ─────────────────────────────────────────────────────────
   discovery:
@@ -142,6 +155,19 @@ services:
         PACKAGE: discovery
     <<: *python-defaults
     # NO ports
+    # Heartbeat-based healthcheck: worker writes settings.discovery_heartbeat
+    # (JSON with ts field) on every loop. Healthy if ts < 5min old.
+    # Closes lesson #24 ("docker `Up` != healthy").
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, asyncio, datetime as dt, asyncpg\nurl = os.environ['POLYECHO_DB_URL'].replace('postgresql+asyncpg://', 'postgresql://')\nasync def main():\n    c = await asyncpg.connect(url)\n    try:\n        ts = await c.fetchval(\"SELECT (value::jsonb->>'ts')::timestamptz FROM settings WHERE key=$$1\", 'discovery_heartbeat')\n        assert ts is not None, 'no heartbeat row'\n        age = dt.datetime.now(dt.timezone.utc) - ts\n        assert age.total_seconds() < 300, f'stale {age.total_seconds()}s'\n    finally:\n        await c.close()\nasyncio.run(main())\n"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
 
   # ── backtest-worker ──────────────────────────────────────────────────────────
   # Polls backtest_jobs WHERE status='pending', runs BacktestEngine, writes
@@ -154,6 +180,19 @@ services:
         PACKAGE: backtest
     <<: *python-defaults
     # NO ports — DB-only communication (PRD §4.2)
+    # Heartbeat-based healthcheck: worker writes settings.backtest_heartbeat
+    # (JSON with ts field) on every loop. Healthy if ts < 5min old.
+    # Closes lesson #24 ("docker `Up` != healthy").
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, asyncio, datetime as dt, asyncpg\nurl = os.environ['POLYECHO_DB_URL'].replace('postgresql+asyncpg://', 'postgresql://')\nasync def main():\n    c = await asyncpg.connect(url)\n    try:\n        ts = await c.fetchval(\"SELECT (value::jsonb->>'ts')::timestamptz FROM settings WHERE key=$$1\", 'backtest_heartbeat')\n        assert ts is not None, 'no heartbeat row'\n        age = dt.datetime.now(dt.timezone.utc) - ts\n        assert age.total_seconds() < 300, f'stale {age.total_seconds()}s'\n    finally:\n        await c.close()\nasyncio.run(main())\n"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
 
   # ── web-push-sender ──────────────────────────────────────────────────────────
   push:
@@ -163,6 +202,19 @@ services:
         PACKAGE: push
     <<: *python-defaults
     # NO ports (sends outbound VAPID push only)
+    # Heartbeat-based healthcheck: worker writes settings.push_heartbeat
+    # (JSON with ts field) on every loop. Healthy if ts < 5min old.
+    # Closes lesson #24 ("docker `Up` != healthy").
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, asyncio, datetime as dt, asyncpg\nurl = os.environ['POLYECHO_DB_URL'].replace('postgresql+asyncpg://', 'postgresql://')\nasync def main():\n    c = await asyncpg.connect(url)\n    try:\n        ts = await c.fetchval(\"SELECT (value::jsonb->>'ts')::timestamptz FROM settings WHERE key=$$1\", 'push_heartbeat')\n        assert ts is not None, 'no heartbeat row'\n        age = dt.datetime.now(dt.timezone.utc) - ts\n        assert age.total_seconds() < 300, f'stale {age.total_seconds()}s'\n    finally:\n        await c.close()\nasyncio.run(main())\n"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
 
   # ── detect (sig-type funder candidate derivation, internal HTTP) ─────────────
   # Single-endpoint aiohttp service that, given an EOA, returns the 4
