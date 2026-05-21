@@ -30,6 +30,22 @@ import { encryptPrivateKey } from "@/lib/key-crypto";
  * the EXACT Python algorithm (PBKDF2-HMAC-SHA256 over UTF-8 passphrase
  * bytes, AES-256-GCM, 5-byte header as AAD) — an independent in-leg proof
  * that the blob is structurally the v1 Python expects.
+ *
+ * FIXTURE REGENERATION RECIPE
+ * ---------------------------
+ * The cross-language fixture `packages/shared/tests/ts_keycrypto_blob.json`
+ * is COMMITTED and treated as a pinned vector. Each test run encrypts under
+ * a fresh random salt/IV and in-memory verifies the produced blob; the
+ * on-disk fixture is ONLY rewritten when explicitly requested. This keeps
+ * `git status` clean on routine vitest runs.
+ *
+ * To regenerate after a deliberate key-crypto change:
+ *     REGENERATE_FIXTURE=1 pnpm --filter @polyecho/web test -- key-crypto
+ *
+ * Then commit the updated `packages/shared/tests/ts_keycrypto_blob.json`
+ * alongside the code change. The Python leg
+ * (`packages/shared/tests/test_keycrypto_crosslang.py`) always reads the
+ * on-disk file as the pinned vector.
  */
 
 // Frozen field sizes (must match crypto.py / key-crypto.ts exactly).
@@ -159,14 +175,25 @@ describe("key-crypto encryptPrivateKey — FROZEN Python v1 blob mirror", () => 
       private_key: PK,
       blob_hex: blob.toString("hex"),
     };
-    writeFileSync(
-      fixturePath,
-      JSON.stringify(fixture, null, 2) + "\n",
-      "utf8"
-    );
+    // Gate the on-disk write behind REGENERATE_FIXTURE=1 so routine vitest
+    // runs do NOT mutate the committed pinned cross-lang vector. The
+    // in-memory `decryptV1Like(blob, PASSPHRASE) === PK` assertion above
+    // already proves the TS encryptor still produces a Python-decryptable
+    // blob; the on-disk fixture only needs refreshing after a deliberate
+    // key-crypto change (see "FIXTURE REGENERATION RECIPE" at top of file).
+    if (process.env.REGENERATE_FIXTURE === "1") {
+      writeFileSync(
+        fixturePath,
+        JSON.stringify(fixture, null, 2) + "\n",
+        "utf8"
+      );
+    }
 
     // The committed file must be parseable + structurally a v1 blob.
     expect(blob[0]).toBe(0x01);
     expect(blob.readUInt32BE(1)).toBe(100_000);
+    // Silence unused-binding lint when the write is gated off.
+    void fixturePath;
+    void fixture;
   });
 });
