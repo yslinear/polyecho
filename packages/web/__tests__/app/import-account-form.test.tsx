@@ -29,10 +29,19 @@ import { t } from "@/lib/i18n";
 
 const importAccount = vi.fn();
 const deriveMagicProxyForCheck = vi.fn();
+// P3 — funder-picker is now rendered between EOA and Funder. Default the
+// derive call to {ok:false} so the picker shows its unavailable note
+// (which the existing assertions never look at) instead of firing 4
+// real probes during these tests.
+const deriveAllFunders = vi.fn(async () => ({
+  ok: false as const,
+  reason: "stub",
+}));
 vi.mock("@/app/accounts/actions", () => ({
   importAccount: (...a: unknown[]) => importAccount(...a),
   deriveMagicProxyForCheck: (...a: unknown[]) =>
     deriveMagicProxyForCheck(...a),
+  deriveAllFunders: (...a: unknown[]) => deriveAllFunders(...a),
 }));
 
 const probeTotalBalance = vi.fn();

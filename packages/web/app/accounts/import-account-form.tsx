@@ -50,8 +50,13 @@ import {
 } from "@/components/ui/select";
 import { t } from "@/lib/i18n";
 import { EVM_ADDRESS_RE, PRIVATE_KEY_RE, formatUsd } from "@/lib/format";
-import { importAccount, deriveMagicProxyForCheck } from "./actions";
+import {
+  importAccount,
+  deriveMagicProxyForCheck,
+  type FunderCandidate,
+} from "./actions";
 import { probeTotalBalance } from "./balance";
+import { FunderPicker } from "./funder-picker";
 
 /** Debounce (ms) so the probe fires once per SETTLED address, not per key. */
 const PROBE_DEBOUNCE_MS = 600;
@@ -341,6 +346,20 @@ export function ImportAccountForm() {
     setDangerPass("");
   }
 
+  /**
+   * P3 — funder-picker hand-off. Operator clicks one of the 4 derived
+   * candidates; we pre-fill sigType + funder. Defensive null-check on
+   * address (button is disabled when address is null, but the picker
+   * does not depend on this to be safe). The CREATE2 cross-check below
+   * still runs on the value the operator now sees in the Funder input.
+   */
+  function handlePick(c: FunderCandidate) {
+    if (c.address !== null) {
+      setSigType(String(c.sigType));
+      setFunder(c.address);
+    }
+  }
+
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
 
@@ -469,6 +488,14 @@ export function ImportAccountForm() {
             state={eoaBalance}
             note={t("tables.accounts.import.balanceEoaNote")}
           />
+        </div>
+
+        {/* P3. Funder-picker — auto-derive 4 candidate funders for the
+            typed EOA, probe each USDC balance, let the operator pick by
+            balance. Click pre-fills sigType + funder below. Spans the
+            full grid width (sm:col-span-2). Hidden until EOA is valid. */}
+        <div className="sm:col-span-2">
+          <FunderPicker eoa={eoa} onPick={handlePick} />
         </div>
 
         {/* 3. Funder + 即時餘額 — always enabled. The operator may pre-fill
