@@ -180,7 +180,7 @@ beforeEach(() => {
 });
 
 describe("DiscoveryTable (shadcn data-table)", () => {
-  it("wraps the table in a Card titled with the i18n card title + a total-count badge", () => {
+  it("renders the i18n table title heading next to a total-count badge", () => {
     render(<DiscoveryTable data={rows} />);
     expect(screen.getByText(TX.cardTitle)).toBeInTheDocument();
     // count badge shows total dataset size (3)

@@ -2,13 +2,19 @@
 
 /**
  * DiscoveryTable — purpose-built shadcn data-table for the candidate-leader
- * pool. Self-contained (does not use the shared `components/ui/data-table`
- * so this page can layer in a Card wrapper, page-size Select, column
- * visibility, reset, aria-sort headers and a rich empty state without
- * regressing the shared component consumed by /trades).
+ * pool. Self-contained (does not use the shared `components/ui/data-table`)
+ * so this page can layer in a page-size Select, column visibility, reset,
+ * aria-sort headers and a rich empty state without regressing the shared
+ * component consumed by /trades.
  *
  * Stack: @tanstack/react-table v8 + shadcn primitives + lucide icons.
  * Read-only; receives server-fetched candidate_leaders rows as props.
+ *
+ * Layout: rendered without a Card wrapper so the table stretches to the
+ * page-level container width (large screens were wasting horizontal space
+ * under a constrained Card). Title + row-count badge live as a page-level
+ * <h2>; the toolbar, table container, and pagination footer are siblings
+ * inside a `space-y-5` section.
  */
 
 import * as React from "react";
@@ -44,12 +50,6 @@ import {
   X,
 } from "lucide-react";
 
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -889,20 +889,17 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
   const visibleColCount = table.getVisibleLeafColumns().length;
 
   return (
-    <Card>
-      <CardHeader className="pb-4">
-        <CardTitle className="flex items-center gap-2 text-lg font-semibold">
-          {t("discovery.table.cardTitle")}
-          <Badge
-            variant="secondary"
-            className="rounded-full tabular-nums font-medium"
-          >
-            {data.length}
-          </Badge>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-5">
-        {/* Toolbar */}
+    <section className="space-y-5">
+      <h2 className="flex items-center gap-2 text-lg font-semibold">
+        {t("discovery.table.cardTitle")}
+        <Badge
+          variant="secondary"
+          className="rounded-full tabular-nums font-medium"
+        >
+          {data.length}
+        </Badge>
+      </h2>
+      {/* Toolbar */}
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative">
             <Search
@@ -1194,7 +1191,6 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
             </div>
           </div>
         </div>
-      </CardContent>
-    </Card>
+    </section>
   );
 }
