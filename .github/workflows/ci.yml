@@ -140,33 +140,34 @@ jobs:
           psql postgresql://polyecho:polyecho@localhost:5432/polyecho \
             -f infra/migrations/0000_init.sql
 
-      - name: Schema sanity check — exact 14-table set
+      - name: Schema sanity check — exact 16-table set
         run: |
           set -euo pipefail
           DB=postgresql://polyecho:polyecho@localhost:5432/polyecho
-          # Exact count: the frozen A1 schema (0000_init.sql) defines exactly
-          # 14 public tables (incl. redeem_jobs + copy_skips). Any drift —
+          # Exact count: 0000_init.sql defines exactly 16 public tables.
+          # backtest_trades + markets were added by the PolyHermes Wave-3
+          # batch (B1 per-trade ledger, C4 market cache). Any drift —
           # extra OR missing — fails the gate.
           count=$(psql "$DB" -tAc \
             "SELECT count(*) FROM information_schema.tables \
              WHERE table_schema='public' AND table_type='BASE TABLE';")
           echo "public BASE TABLE count = ${count}"
-          if [ "$count" != "14" ]; then
+          if [ "$count" != "16" ]; then
             psql "$DB" -c "\dt"
-            echo "FAIL: expected exactly 14 tables, got ${count}"
+            echo "FAIL: expected exactly 16 tables, got ${count}"
             exit 1
           fi
           # Full explicit name list — every one must be present.
-          for tbl in accounts backtest_jobs candidate_leaders \
+          for tbl in accounts backtest_jobs backtest_trades candidate_leaders \
                      candidate_score_history copy_skips copy_templates \
-                     events follow_relations leader_trades my_trades \
+                     events follow_relations leader_trades markets my_trades \
                      pending_actions push_subscriptions redeem_jobs \
                      settings; do
             psql "$DB" -tAc \
               "SELECT to_regclass('public.${tbl}');" | grep -qx "$tbl" \
               || { echo "MISSING TABLE: $tbl"; psql "$DB" -c "\dt"; exit 1; }
           done
-          echo "All 14 expected tables present (exact set verified)."
+          echo "All 16 expected tables present (exact set verified)."
 
       # Exercise the documented in-container migration path: the same
       # `polyecho db migrate` the compose `migrate` one-shot service runs.
