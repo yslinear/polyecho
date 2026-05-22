@@ -5,9 +5,10 @@ The worker runs one ~15-min cycle: for every leader at
 new trades since the open ``paper_session``'s cursor, advances the shared
 :meth:`BacktestEngine.simulate_one` incrementally, persists the per-fill
 ``paper_trades`` rows + the open-lot ``paper_positions`` rows, recomputes
-the ``paper_sessions`` summary, re-scores via the discovery scoring
-module, and then runs the lifecycle :func:`state_machine.advance` for
-every non-retired, non-locked candidate.
+the ``paper_sessions`` summary, re-scores via the PolyHermes
+``research-copyability-v1`` copyability scorer
+(:mod:`polyecho.paper.copyability`), and then runs the lifecycle
+:func:`state_machine.advance` for every non-retired, non-locked candidate.
 
 DB I/O is isolated behind :class:`PaperRepo` so the orchestration logic
 (:class:`PaperWorker`) is unit-testable with a mocked repo -- mirroring
@@ -35,8 +36,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from polyecho.backtest.engine import BacktestEngine as _BacktestEngine
 from polyecho.backtest.engine import BacktestParams, SimState
-from polyecho.discovery.scoring import final_score, profit_score, replicability_score
 from polyecho.paper import safety
+from polyecho.paper.copyability import PaperSessionStats, score_copyability
 from polyecho.paper.state_machine import (
     LadderCandidate,
     LifecycleState,
@@ -315,10 +316,9 @@ class PaperWorker:
         paper_session.filtered_ratio = summary.filtered_ratio
         paper_session.cursor_ts = new_cursor
 
-        # Re-score from the candidate's existing discovery stats (the score
-        # cap below the 60 gate is owned by discovery/scoring.py — C1-P4 —
-        # so we IMPORT and call it, never edit it).
-        paper_session.score = self._rescore(candidate)
+        # Re-score: compute the PolyHermes research-copyability-v1
+        # paper-trade copyability score from this session and persist it.
+        paper_session.score = self._rescore(candidate, paper_session)
         return len(new_trades)
 
     async def _fetch_new_trades(
@@ -512,36 +512,82 @@ class PaperWorker:
         return fills
 
     @staticmethod
-    def _rescore(candidate: CandidateLeader) -> float:
-        """Re-score a candidate via the discovery scoring functions.
+    def _session_stats(paper_session: PaperSession | None) -> PaperSessionStats | None:
+        """Build the :class:`PaperSessionStats` the copyability scorer reads.
 
-        IMPORTS the discovery scoring module (never edits it -- C1-P4 owns
-        the <10-trade score cap there).  Re-scores from the candidate's
-        already-persisted ``stats_30d`` / ``frequency_stats`` JSONB so the
-        paper cycle does not re-fetch the leaderboard.
+        Returns ``None`` when there is no open session -- the scorer treats
+        that as the no-session case (every paper-derived component takes
+        its conservative no-data value).  An unmeasured ``None`` ratio maps
+        to ``1.0`` (maximally unknown / filtered): an unmeasured exposure
+        must never be assumed clean.
         """
-        stats = candidate.stats_30d or {}
-        freq = candidate.frequency_stats or {}
-        p_score = profit_score(stats)
-        r_score = replicability_score(freq)
-        return final_score(p_score, r_score)
+        if paper_session is None:
+            return None
+        return PaperSessionStats(
+            copyable_pnl=float(paper_session.copyable_pnl or 0.0),
+            trade_count=paper_session.trade_count or 0,
+            unknown_exposure_ratio=(
+                float(paper_session.unknown_exposure_ratio)
+                if paper_session.unknown_exposure_ratio is not None
+                else 1.0
+            ),
+            filtered_ratio=(
+                float(paper_session.filtered_ratio)
+                if paper_session.filtered_ratio is not None
+                else 1.0
+            ),
+            max_drawdown=(
+                float(paper_session.max_drawdown)
+                if paper_session.max_drawdown is not None
+                else None
+            ),
+            started_at=paper_session.started_at,
+        )
 
-    @staticmethod
+    @classmethod
+    def _rescore(cls, candidate: CandidateLeader, paper_session: PaperSession | None) -> float:
+        """Re-score a candidate via the PolyHermes copyability scorer.
+
+        Computes the ``research-copyability-v1`` paper-trade copyability
+        score (:func:`copyability.score_copyability`) from the candidate's
+        open paper session.  This is the ADDITIVE copyability score the
+        ladder gates on -- NOT the multiplicative discovery ``total_score``
+        (which stays as-is for the ``/discovery`` leaderboard).  With no
+        session the scorer returns the no-session value (<= 20).
+        """
+        stats = cls._session_stats(paper_session)
+        result = score_copyability(
+            stats,
+            source_last_seen=candidate.last_seen_ts or candidate.last_active_at,
+        )
+        return result.total
+
+    @classmethod
     def _snapshot(
+        cls,
         candidate: CandidateLeader,
         paper_session: PaperSession | None,
         now: datetime,
     ) -> LadderCandidate:
-        """Build the immutable :class:`LadderCandidate` the ladder reads."""
+        """Build the immutable :class:`LadderCandidate` the ladder reads.
+
+        ``score`` is the PolyHermes ``research-copyability-v1`` paper-trade
+        copyability score, computed fresh from the open paper session (the
+        no-session value when there is none) -- NOT the discovery
+        ``total_score``.  ``can_bootstrap`` is ``True``: every PolyEcho
+        candidate is found by the discovery worker, so the bootstrap clause
+        admits it to paper-trading where the copyability score becomes real.
+        """
         try:
             state = LifecycleState(candidate.lifecycle_state)
         except ValueError:  # pragma: no cover - defensive, CHECK-constrained
             state = LifecycleState.DISCOVERED
-        score = float(candidate.total_score) if candidate.total_score is not None else None
+        score = cls._rescore(candidate, paper_session)
         return LadderCandidate(
             wallet_address=candidate.wallet_address,
             lifecycle_state=state,
             score=score,
+            can_bootstrap=True,
             locked=bool(candidate.locked),
             source_last_seen=candidate.last_seen_ts or candidate.last_active_at,
             cooldown_until=candidate.cooldown_until,

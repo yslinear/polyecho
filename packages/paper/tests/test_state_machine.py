@@ -99,27 +99,64 @@ class TestLockedAndTerminal:
 
 class TestDiscoveredToCandidate:
     def test_promotes_when_fresh_and_scored(self) -> None:
-        t = advance(_candidate(score=PROMOTE_SCORE_MIN), NOW)
+        # A non-bootstrappable leader still needs score >= 60.
+        t = advance(_candidate(score=PROMOTE_SCORE_MIN, can_bootstrap=False), NOW)
         assert t.changed
         assert t.to_state is LifecycleState.CANDIDATE
         assert t.reason == "score_and_source_gate"
 
     def test_blocked_when_score_below_gate(self) -> None:
-        t = advance(_candidate(score=PROMOTE_SCORE_MIN - 0.01), NOW)
+        # Non-bootstrappable + below the score gate -> blocked.
+        t = advance(_candidate(score=PROMOTE_SCORE_MIN - 0.01, can_bootstrap=False), NOW)
         assert not t.changed
         assert t.reason == "promote_gate_not_met"
 
     def test_blocked_when_score_is_none(self) -> None:
-        t = advance(_candidate(score=None), NOW)
+        # Non-bootstrappable + an unscored leader -> blocked.
+        t = advance(_candidate(score=None, can_bootstrap=False), NOW)
         assert not t.changed
 
     def test_blocked_when_source_stale(self) -> None:
-        # Source seen just past the 48h freshness window.
+        # Source seen just past the 48h freshness window. The source-fresh
+        # clause gates BOTH a bootstrappable and a scored leader.
         stale = NOW - SOURCE_FRESH_MAX - timedelta(minutes=1)
         t = advance(_candidate(source_last_seen=stale, score=90.0), NOW)
         assert not t.changed
         # Note: 48h..72h is stale-for-promotion but not yet a cooldown.
         assert t.reason == "promote_gate_not_met"
+
+
+class TestBootstrapClause:
+    """The PolyHermes bootstrap clause: a discovery-found leader is
+    admitted to paper-trading even with a copyability score of 0, because
+    that score only becomes real AFTER paper data accrues.
+    """
+
+    def test_bootstrap_promotes_a_zero_score_discovered_leader(self) -> None:
+        # score 0 (a no-session copyability score) + can_bootstrap True ->
+        # still promoted: the ladder is no longer permanently blocked.
+        t = advance(_candidate(score=0.0, can_bootstrap=True), NOW)
+        assert t.changed
+        assert t.to_state is LifecycleState.CANDIDATE
+
+    def test_bootstrap_promotes_an_unscored_discovered_leader(self) -> None:
+        t = advance(_candidate(score=None, can_bootstrap=True), NOW)
+        assert t.changed
+        assert t.to_state is LifecycleState.CANDIDATE
+
+    def test_bootstrap_candidate_advances_to_paper_with_score_0(self) -> None:
+        # candidate -> paper bootstraps too, and opens a session.
+        cand = _candidate(lifecycle_state=LifecycleState.CANDIDATE, score=0.0, can_bootstrap=True)
+        t = advance(cand, NOW)
+        assert t.changed
+        assert t.to_state is LifecycleState.PAPER
+        assert t.open_session is True
+
+    def test_bootstrap_still_requires_a_fresh_source(self) -> None:
+        # The bootstrap clause does not bypass the source-freshness gate.
+        stale = NOW - SOURCE_FRESH_MAX - timedelta(minutes=1)
+        t = advance(_candidate(score=0.0, can_bootstrap=True, source_last_seen=stale), NOW)
+        assert not t.changed
 
 
 # ---------------------------------------------------------------------------
@@ -129,14 +166,16 @@ class TestDiscoveredToCandidate:
 
 class TestCandidateToPaper:
     def test_promotes_and_opens_session(self) -> None:
-        cand = _candidate(lifecycle_state=LifecycleState.CANDIDATE, score=88.0)
+        cand = _candidate(lifecycle_state=LifecycleState.CANDIDATE, score=88.0, can_bootstrap=False)
         t = advance(cand, NOW)
         assert t.changed
         assert t.to_state is LifecycleState.PAPER
         assert t.open_session is True
 
     def test_no_session_opened_when_gate_fails(self) -> None:
-        cand = _candidate(lifecycle_state=LifecycleState.CANDIDATE, score=10.0)
+        # A non-bootstrappable candidate below the score gate is not
+        # promoted, so no session is opened.
+        cand = _candidate(lifecycle_state=LifecycleState.CANDIDATE, score=10.0, can_bootstrap=False)
         t = advance(cand, NOW)
         assert not t.changed
         assert t.open_session is False

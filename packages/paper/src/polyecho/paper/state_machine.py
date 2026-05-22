@@ -72,8 +72,11 @@ TERMINAL_STATES: frozenset[LifecycleState] = frozenset({LifecycleState.RETIRED})
 #: been seen within this window (a stale source is not a live candidate).
 SOURCE_FRESH_MAX = timedelta(hours=48)
 
-#: discovered/candidate promotion: minimum total discovery score.  This is
-#: the SAME 0-100 ``total_score`` the discovery worker computes.
+#: discovered/candidate promotion: minimum copyability score.  This is the
+#: PolyHermes ``research-copyability-v1`` paper-trade copyability score
+#: (``copyability.score_copyability``), NOT the discovery leaderboard
+#: ``total_score``.  It still governs a non-bootstrappable leader (see
+#: ``can_bootstrap`` / :func:`_meets_promote_gate`).
 PROMOTE_SCORE_MIN = 60.0
 
 #: paper -> trial_ready: the paper session must have run at least this long.
@@ -146,8 +149,19 @@ class LadderCandidate:
     Attributes:
         wallet_address: The leader's proxy-wallet address (identity).
         lifecycle_state: Current ladder state.
-        score: The discovery ``total_score`` (0-100), or ``None`` if the
-            leader has not been scored yet (treated as below the gate).
+        score: The PolyHermes ``research-copyability-v1`` paper-trade
+            copyability score (0-100), or ``None`` if not scored yet.  This
+            is the additive copyability score, NOT the discovery
+            leaderboard ``total_score``.  A leader with no paper session
+            scores at most 20, so this score CANNOT gate entry to
+            paper-trading -- that is what ``can_bootstrap`` resolves.
+        can_bootstrap: True when this candidate may be promoted past the
+            ``PROMOTE_SCORE_MIN`` gate without yet meeting it.  Every
+            PolyEcho candidate is found by the discovery worker, so this
+            defaults to ``True``: an agent-discovered leader is allowed
+            into paper-trading so the copyability score can become real.
+            A future manually-imported (non-discovered) leader would set
+            this ``False`` and so would still need ``score >= 60``.
         locked: Operator override -- a locked leader is skipped entirely.
         source_last_seen: When the discovery source last saw this leader
             (``candidate_leaders.last_seen_at`` / ``last_active_at``), or
@@ -167,6 +181,7 @@ class LadderCandidate:
     wallet_address: str
     lifecycle_state: LifecycleState
     score: float | None = None
+    can_bootstrap: bool = True
     locked: bool = False
     source_last_seen: datetime | None = None
     cooldown_until: datetime | None = None
@@ -234,14 +249,27 @@ def _source_is_fresh(candidate: LadderCandidate, now: datetime) -> bool:
 
 
 def _meets_promote_gate(candidate: LadderCandidate, now: datetime) -> bool:
-    """The shared discovered/candidate promotion gate.
+    """The shared discovered/candidate promotion gate (with bootstrap).
 
-    ``source seen <= 48h AND score >= 60`` -- a ``None`` score never
-    passes (an unscored leader is not promotable).
+    ``source seen <= 48h AND (score >= 60 OR can_bootstrap)``.
+
+    The score here is the PolyHermes ``research-copyability-v1`` paper-trade
+    copyability score.  That score only becomes real AFTER paper data
+    accrues -- a leader with no paper session scores at most 20 -- so it
+    cannot gate ENTRY to paper-trading: requiring ``score >= 60`` first
+    would permanently block the ladder (this is exactly the live bug it
+    replaces).  PolyHermes' answer is the bootstrap clause: an
+    agent-discovered candidate (``can_bootstrap`` True, the default for
+    every discovery-found leader) is admitted to paper-trading so the
+    copyability score CAN become real.  ``PROMOTE_SCORE_MIN`` is retained
+    and still governs a non-bootstrappable leader (a future manually
+    imported, non-discovered leader with ``can_bootstrap`` False).
     """
-    if candidate.score is None:
+    if not _source_is_fresh(candidate, now):
         return False
-    return _source_is_fresh(candidate, now) and candidate.score >= PROMOTE_SCORE_MIN
+    if candidate.can_bootstrap:
+        return True
+    return candidate.score is not None and candidate.score >= PROMOTE_SCORE_MIN
 
 
 def _cooldown_reason(candidate: LadderCandidate, now: datetime) -> str | None:
