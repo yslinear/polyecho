@@ -57,9 +57,7 @@ PUSD_ADDRESS: Final[str] = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 #: WrappedCollateral (WCOL) — collateral for **NegRisk** markets.  NegRisk
 #: redeem pays WCOL which must then be ``unwrap(to, amount)``-ed.  Brief §9
 #: ("WrappedCollateral 0x3A3BD7bb9528E159577F7C2e685CC81A765002E2").
-WRAPPED_COLLATERAL_ADDRESS: Final[str] = (
-    "0x3A3BD7bb9528E159577F7C2e685CC81A765002E2"
-)
+WRAPPED_COLLATERAL_ADDRESS: Final[str] = "0x3A3BD7bb9528E159577F7C2e685CC81A765002E2"
 
 # ---------------------------------------------------------------------------
 # Exchange contracts (brief §2/§9 — NegRisk selects a different exchange,
@@ -68,13 +66,9 @@ WRAPPED_COLLATERAL_ADDRESS: Final[str] = (
 #: CTF Exchange — normal-market order settlement.  Brief §2/§9.
 CTF_EXCHANGE_ADDRESS: Final[str] = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
 #: NegRisk CTF Exchange — NegRisk-market order settlement.  Brief §2/§9.
-NEG_RISK_CTF_EXCHANGE_ADDRESS: Final[str] = (
-    "0xC5d563A36AE78145C45a50134d48A1215220f80a"
-)
+NEG_RISK_CTF_EXCHANGE_ADDRESS: Final[str] = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
 #: NegRisk Adapter — wraps/unwraps collateral for NegRisk markets.  Brief §9.
-NEG_RISK_ADAPTER_ADDRESS: Final[str] = (
-    "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
-)
+NEG_RISK_ADAPTER_ADDRESS: Final[str] = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 
 # ---------------------------------------------------------------------------
 # Wallet-mode proxy factories (brief §9 per-wallet-mode table)
@@ -95,6 +89,17 @@ MAGIC_PROXY_INIT_CODE_HASH: Final[str] = (
 #: ("Safe factory 0xaacFeEa03eb1561C4e67d661e40682Bd20E3541b").
 SAFE_PROXY_FACTORY: Final[str] = "0xaacFeEa03eb1561C4e67d661e40682Bd20E3541b"
 
+#: Gnosis Safe canonical ``MultiSendCallOnly`` (v1.3.0) — the standard,
+#: chain-uniform Safe utility contract used to batch many calls into ONE
+#: ``execTransaction`` (deep-dive B6 — batch SAFE redeems via MultiSend).
+#: A Safe invokes it with ``operation=DelegateCall`` so the batched calls
+#: execute in the Safe's own context.  ``CallOnly`` (vs plain ``MultiSend``)
+#: forbids nested DelegateCall in the inner ops, so batching value=0 CTF
+#: ``redeemPositions`` calls through it cannot be abused to delegatecall
+#: into a hostile contract.  Address is identical on every EVM chain it is
+#: deployed to (deterministic CREATE2 deploy); verified for Polygon (137).
+SAFE_MULTISEND_CALL_ONLY: Final[str] = "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D"
+
 # ---------------------------------------------------------------------------
 # Deposit-Wallet (signature_type 3, POLY_1271) — Polymarket "Deposit Wallet"
 # ---------------------------------------------------------------------------
@@ -107,15 +112,11 @@ SAFE_PROXY_FACTORY: Final[str] = "0xaacFeEa03eb1561C4e67d661e40682Bd20E3541b"
 
 #: Deposit-Wallet factory.  Brief §sig-3 (CREATE2 deployer for ERC-1967
 #: minimal-proxy clones).
-DEPOSIT_WALLET_FACTORY: Final[str] = (
-    "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07"
-)
+DEPOSIT_WALLET_FACTORY: Final[str] = "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07"
 
 #: Deposit-Wallet implementation that every per-EOA clone delegates to.
 #: Brief §sig-3.
-DEPOSIT_WALLET_IMPLEMENTATION: Final[str] = (
-    "0x58CA52ebe0DadfdF531Cde7062e76746de4Db1eB"
-)
+DEPOSIT_WALLET_IMPLEMENTATION: Final[str] = "0x58CA52ebe0DadfdF531Cde7062e76746de4Db1eB"
 
 #: Builder-Relayer ``RelayHub`` address — required in the sig 1 (PROXY)
 #: ``rlx:`` struct-hash pre-image (the trailing 20-byte field).  Brief §sig-1
@@ -167,9 +168,7 @@ DATA_API_BASE_URL: Final[str] = "https://data-api.polymarket.com"
 #: path A, strictly better than the global-stream substring scan).
 CLOB_WSS_USER_URL: Final[str] = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
 #: Market WS channel (orderbook / price changes).  Brief §3.
-CLOB_WSS_MARKET_URL: Final[str] = (
-    "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-)
+CLOB_WSS_MARKET_URL: Final[str] = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
 #: Default Polygon JSON-RPC (path-B on-chain log cross-check + EOA tx +
 #: Safe ``computeProxyAddress``).  Brief §3/§9.
@@ -196,6 +195,7 @@ __all__ = [
     "MAGIC_PROXY_FACTORY",
     "MAGIC_PROXY_INIT_CODE_HASH",
     "SAFE_PROXY_FACTORY",
+    "SAFE_MULTISEND_CALL_ONLY",
     "DEPOSIT_WALLET_FACTORY",
     "DEPOSIT_WALLET_IMPLEMENTATION",
     "RELAY_HUB",

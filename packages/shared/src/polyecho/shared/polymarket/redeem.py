@@ -69,7 +69,7 @@ Dependency note (Wave C-redeem)
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from polyecho.shared.constants import (
@@ -286,13 +286,9 @@ class RedeemClient(Protocol):
     on-chain / relayer call for one resolved job.
     """
 
-    async def redeem(
-        self, spec: RedeemJobSpec, *, binding: WalletBinding
-    ) -> RedeemResult: ...
+    async def redeem(self, spec: RedeemJobSpec, *, binding: WalletBinding) -> RedeemResult: ...
 
-    async def unwrap_collateral(
-        self, *, binding: WalletBinding, amount: int
-    ) -> RedeemResult: ...
+    async def unwrap_collateral(self, *, binding: WalletBinding, amount: int) -> RedeemResult: ...
 
 
 class BaseRedeemClient:
@@ -310,32 +306,62 @@ class BaseRedeemClient:
     ctf_address: str = CTF_ADDRESS
     parent_collection_id: str = PARENT_COLLECTION_ID
 
-    async def redeem(
-        self, spec: RedeemJobSpec, *, binding: WalletBinding
-    ) -> RedeemResult:
+    async def redeem(self, spec: RedeemJobSpec, *, binding: WalletBinding) -> RedeemResult:
         """Redeem one resolved position (brief §9)."""
         return await self._do_redeem(spec, binding=binding)
 
-    async def unwrap_collateral(
-        self, *, binding: WalletBinding, amount: int
-    ) -> RedeemResult:
+    async def redeem_batch(
+        self,
+        specs: Sequence[RedeemJobSpec],
+        *,
+        binding: WalletBinding,
+    ) -> dict[tuple[str, int], RedeemResult]:
+        """Redeem many resolved positions for one account (deep-dive B6).
+
+        For a SAFE (signature_type 2) wallet the concrete client batches
+        the N ``redeemPositions`` calls into ONE MultiSend transaction
+        (lower gas + fewer relayer-quota hits).  Any other signature_type
+        (notably Magic / sig 1, which PolyHermes explicitly excludes from
+        batching) falls back to a per-job sequential :meth:`redeem` loop so
+        the caller can treat every wallet mode uniformly.
+
+        Per-job idempotency is preserved regardless of mode: the result is
+        keyed by ``(condition_id, outcome_index)`` so every
+        ``(account_id, condition_id, outcome_index)`` ``redeem_jobs`` row is
+        still individually tracked / status-written.
+        """
+        return await self._do_redeem_batch(specs, binding=binding)
+
+    async def unwrap_collateral(self, *, binding: WalletBinding, amount: int) -> RedeemResult:
         """Unwrap WCOL → pUSD after a NegRisk redeem."""
         return await self._do_unwrap(binding=binding, amount=amount)
 
-    async def _do_redeem(
-        self, spec: RedeemJobSpec, *, binding: WalletBinding
-    ) -> RedeemResult:
+    async def _do_redeem(self, spec: RedeemJobSpec, *, binding: WalletBinding) -> RedeemResult:
         raise NotImplementedError(
-            "Wave C-redeem: use Web3RedeemClient for the concrete EOA path "
-            "(brief §9)"
+            "Wave C-redeem: use Web3RedeemClient for the concrete EOA path (brief §9)"
         )
 
-    async def _do_unwrap(
-        self, *, binding: WalletBinding, amount: int
-    ) -> RedeemResult:
+    async def _do_redeem_batch(
+        self,
+        specs: Sequence[RedeemJobSpec],
+        *,
+        binding: WalletBinding,
+    ) -> dict[tuple[str, int], RedeemResult]:
+        """Default batch path: sequential per-job :meth:`redeem` (deep-dive
+        B6).  SAFE-only MultiSend batching is overridden in
+        :class:`Web3RedeemClient`; this base fallback keeps every other
+        wallet mode (incl. Magic, which is excluded from batching) working
+        with the SAME per-job idempotency contract."""
+        out: dict[tuple[str, int], RedeemResult] = {}
+        for spec in specs:
+            out[(spec.condition_id, spec.outcome_index)] = await self._do_redeem(
+                spec, binding=binding
+            )
+        return out
+
+    async def _do_unwrap(self, *, binding: WalletBinding, amount: int) -> RedeemResult:
         raise NotImplementedError(
-            "Wave C-redeem: use Web3RedeemClient for the concrete EOA path "
-            "(brief §9)"
+            "Wave C-redeem: use Web3RedeemClient for the concrete EOA path (brief §9)"
         )
 
     # -- Gasless seam (MAGIC/SAFE/1271) — concrete via relayer.py --------
@@ -345,9 +371,7 @@ class BaseRedeemClient:
     # 2026-05-20: py-builder-relayer-client v0.0.1 only exposes
     # SafeTransaction submit (TransactionType.SAFE), not PROXY/EIP-191
     # or 1271; we refuse to invent the wire format.
-    async def _relay_redeem(
-        self, spec: RedeemJobSpec, *, binding: WalletBinding
-    ) -> RedeemResult:
+    async def _relay_redeem(self, spec: RedeemJobSpec, *, binding: WalletBinding) -> RedeemResult:
         """Gasless redeem via the official Builder-Relayer (brief §9).
 
         Default (no relayer injected) ⇒ fail closed.  Concrete dispatch
@@ -361,9 +385,7 @@ class BaseRedeemClient:
             f"PolymarketRelayerClient injected) are concrete."
         )
 
-    async def _relay_unwrap(
-        self, *, binding: WalletBinding, amount: int
-    ) -> RedeemResult:
+    async def _relay_unwrap(self, *, binding: WalletBinding, amount: int) -> RedeemResult:
         """Gasless WCOL unwrap via the Builder-Relayer (brief §9).
 
         Default (no relayer injected) ⇒ fail closed.  Concrete dispatch
@@ -479,9 +501,7 @@ class Web3RedeemClient(BaseRedeemClient):
     # verified 2026-05-20: concrete via relayer_extended.py for sig 1 / 3
     # (per docs/reference/polymarket-sig1-sig3-redeem-wire.md) and via
     # relayer.py for sig 2 (P3 wave SDK delegation).
-    async def _relay_redeem(
-        self, spec: RedeemJobSpec, *, binding: WalletBinding
-    ) -> RedeemResult:
+    async def _relay_redeem(self, spec: RedeemJobSpec, *, binding: WalletBinding) -> RedeemResult:
         """Dispatch sig 1 / 2 / 3 to the correct relayer surface.
 
         Falls back to the base-class fail-closed seam only when the
@@ -492,48 +512,55 @@ class Web3RedeemClient(BaseRedeemClient):
 
             return await relay_redeem(self._relayer, spec, binding=binding)
 
-        if (
-            binding.signature_type == _SIG_MAGIC
-            and self._ext_creds is not None
-        ):
+        if binding.signature_type == _SIG_MAGIC and self._ext_creds is not None:
             return await self._relay_redeem_sig1(spec, binding=binding)
 
-        if (
-            binding.signature_type == _SIG_POLY_1271
-            and self._ext_creds is not None
-        ):
+        if binding.signature_type == _SIG_POLY_1271 and self._ext_creds is not None:
             return await self._relay_redeem_sig3(spec, binding=binding)
 
         return await super()._relay_redeem(spec, binding=binding)
 
-    async def _relay_unwrap(
-        self, *, binding: WalletBinding, amount: int
-    ) -> RedeemResult:
+    async def _relay_unwrap(self, *, binding: WalletBinding, amount: int) -> RedeemResult:
         """Dispatch sig 1 / 2 / 3 WCOL unwrap to the correct relayer."""
         if binding.signature_type == _SIG_SAFE and self._relayer is not None:
             from polyecho.shared.polymarket.relayer import relay_unwrap
 
-            return await relay_unwrap(
-                self._relayer, binding=binding, amount=amount
-            )
+            return await relay_unwrap(self._relayer, binding=binding, amount=amount)
 
-        if (
-            binding.signature_type == _SIG_MAGIC
-            and self._ext_creds is not None
-        ):
-            return await self._relay_unwrap_sig1(
-                binding=binding, amount=amount
-            )
+        if binding.signature_type == _SIG_MAGIC and self._ext_creds is not None:
+            return await self._relay_unwrap_sig1(binding=binding, amount=amount)
 
-        if (
-            binding.signature_type == _SIG_POLY_1271
-            and self._ext_creds is not None
-        ):
-            return await self._relay_unwrap_sig3(
-                binding=binding, amount=amount
-            )
+        if binding.signature_type == _SIG_POLY_1271 and self._ext_creds is not None:
+            return await self._relay_unwrap_sig3(binding=binding, amount=amount)
 
         return await super()._relay_unwrap(binding=binding, amount=amount)
+
+    # -- batch redeem (deep-dive B6 — SAFE MultiSend) -------------------
+    async def _do_redeem_batch(
+        self,
+        specs: Sequence[RedeemJobSpec],
+        *,
+        binding: WalletBinding,
+    ) -> dict[tuple[str, int], RedeemResult]:
+        """Batch redeem for one account (deep-dive B6).
+
+        SAFE (sig 2) with an injected relayer ⇒ the N ``redeemPositions``
+        calls settle in ONE MultiSend ``execTransaction`` via
+        :func:`~polyecho.shared.polymarket.relayer.relay_redeem_batch`
+        (lower gas + fewer relayer-quota hits).  EVERY job still gets its
+        own :class:`RedeemResult` (sharing the one ``tx_hash``) so
+        per-``(account, condition, outcome)`` idempotency / status tracking
+        is preserved.
+
+        Magic (sig 1), POLY_1271 (sig 3) and EOA (sig 0) are NOT batched —
+        PolyHermes explicitly excludes Magic from MultiSend batching — so
+        they fall through to the base-class sequential per-job loop.
+        """
+        if specs and binding.signature_type == _SIG_SAFE and self._relayer is not None:
+            from polyecho.shared.polymarket.relayer import relay_redeem_batch
+
+            return await relay_redeem_batch(self._relayer, list(specs), binding=binding)
+        return await super()._do_redeem_batch(specs, binding=binding)
 
     # -- sig 1 (MAGIC) helpers ------------------------------------------
     async def _relay_redeem_sig1(
@@ -572,9 +599,7 @@ class Web3RedeemClient(BaseRedeemClient):
             ),
         )
 
-    async def _relay_unwrap_sig1(
-        self, *, binding: WalletBinding, amount: int
-    ) -> RedeemResult:
+    async def _relay_unwrap_sig1(self, *, binding: WalletBinding, amount: int) -> RedeemResult:
         from polyecho.shared.polymarket.relayer_extended import (
             ExtendedRelayerCredentials,
             RelayerSubmissionError,
@@ -645,9 +670,7 @@ class Web3RedeemClient(BaseRedeemClient):
             ),
         )
 
-    async def _relay_unwrap_sig3(
-        self, *, binding: WalletBinding, amount: int
-    ) -> RedeemResult:
+    async def _relay_unwrap_sig3(self, *, binding: WalletBinding, amount: int) -> RedeemResult:
         from polyecho.shared.polymarket.relayer_extended import (
             ExtendedRelayerCredentials,
             RelayerSubmissionError,
@@ -682,9 +705,7 @@ class Web3RedeemClient(BaseRedeemClient):
         )
 
     # -- EOA concrete path ----------------------------------------------
-    async def _do_redeem(
-        self, spec: RedeemJobSpec, *, binding: WalletBinding
-    ) -> RedeemResult:
+    async def _do_redeem(self, spec: RedeemJobSpec, *, binding: WalletBinding) -> RedeemResult:
         if binding.signature_type != _SIG_EOA:
             # MAGIC(1)/SAFE(2)/POLY_1271(3): abstract gasless seam.
             return await self._relay_redeem(spec, binding=binding)
@@ -728,9 +749,7 @@ class Web3RedeemClient(BaseRedeemClient):
             ),
         )
 
-    async def _do_unwrap(
-        self, *, binding: WalletBinding, amount: int
-    ) -> RedeemResult:
+    async def _do_unwrap(self, *, binding: WalletBinding, amount: int) -> RedeemResult:
         if binding.signature_type != _SIG_EOA:
             return await self._relay_unwrap(binding=binding, amount=amount)
         if amount <= 0:

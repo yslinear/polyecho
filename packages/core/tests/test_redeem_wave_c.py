@@ -50,9 +50,7 @@ _EOA = WalletBinding(
     wallet_mode="eoa",
     derived=False,
 )
-_MAGIC = WalletBinding(
-    signature_type=1, funder="0xabc", wallet_mode="magic", derived=True
-)
+_MAGIC = WalletBinding(signature_type=1, funder="0xabc", wallet_mode="magic", derived=True)
 
 
 def _pos(*, redeemable: Any, neg_risk: bool = False, idx: int = 0) -> PositionRecord:
@@ -125,9 +123,7 @@ async def test_poller_yields_only_redeemable_positions() -> None:
             _pos(redeemable=True, neg_risk=True, idx=1),
         ]
     )
-    poller = RedeemablePoller(
-        datasource=ds, accounts=[(ACCT, "0xwallet")], cooldown_s=0.0
-    )
+    poller = RedeemablePoller(datasource=ds, accounts=[(ACCT, "0xwallet")], cooldown_s=0.0)
     cands = await poller()
     assert len(cands) == 2
     assert cands[0].is_neg_risk is False and cands[0].outcome_index == 0
@@ -158,9 +154,7 @@ async def test_poller_failsoft_on_datasource_error() -> None:
         async def get_positions(self, *_: Any, **__: Any) -> Any:
             raise RuntimeError("api down")
 
-    poller = RedeemablePoller(
-        datasource=_Boom(), accounts=[(ACCT, "0xw")], cooldown_s=0.0
-    )
+    poller = RedeemablePoller(datasource=_Boom(), accounts=[(ACCT, "0xw")], cooldown_s=0.0)
     assert await poller() == []  # never raises into the loop
 
 
@@ -340,3 +334,166 @@ async def test_live_magic_relayer_not_configured(
 def test_relayer_error_is_clear() -> None:
     err = RelayerNotConfiguredError("x")
     assert isinstance(err, RuntimeError)
+
+
+# ---------------------------------------------------------------------------
+# 4. Deep-dive B6 — SAFE redeem batching at the worker layer
+# ---------------------------------------------------------------------------
+_SAFE = WalletBinding(
+    signature_type=2,
+    funder="0x000000000000000000000000000000000000beef",
+    wallet_mode="safe",
+    derived=True,
+)
+
+
+class _BatchSpyClient:
+    """Fake redeem client recording redeem / redeem_batch dispatch so the
+    worker's B6 grouping (one batch per account) is observable."""
+
+    def __init__(self) -> None:
+        self.redeem_calls: list[RedeemJobSpec] = []
+        self.batch_calls: list[list[RedeemJobSpec]] = []
+
+    async def redeem(self, spec: RedeemJobSpec, *, binding: WalletBinding) -> RedeemResult:
+        self.redeem_calls.append(spec)
+        return RedeemResult(status=RedeemJobStatus.CONFIRMED, tx_hash="0xsingle")
+
+    async def redeem_batch(
+        self,
+        specs: Any,
+        *,
+        binding: WalletBinding,
+    ) -> dict[tuple[str, int], RedeemResult]:
+        specs = list(specs)
+        self.batch_calls.append(specs)
+        # One shared tx hash for the whole batch; one result per job.
+        return {
+            (s.condition_id, s.outcome_index): RedeemResult(
+                status=RedeemJobStatus.CONFIRMED, tx_hash="0xbatch"
+            )
+            for s in specs
+        }
+
+
+async def test_b6_safe_account_jobs_batched_into_one_tx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N SAFE redeem jobs for ONE account ⇒ exactly one redeem_batch call;
+    every job still individually upserted + status-written + event-emitted
+    and they all share the one batched tx hash."""
+    _enable_live(monkeypatch)
+    spy = _BatchSpyClient()
+    upserted: list[RedeemJobSpec] = []
+    writes: list[RedeemResult] = []
+    events: list[bool] = []
+
+    async def candidates() -> list[RedeemCandidate]:
+        return [
+            RedeemCandidate(ACCT, "0xc1", 0, False),
+            RedeemCandidate(ACCT, "0xc2", 0, False),
+            RedeemCandidate(ACCT, "0xc3", 1, False),
+        ]
+
+    async def upsert(s: RedeemJobSpec) -> bool:
+        upserted.append(s)
+        return True
+
+    async def status_writer(_s: RedeemJobSpec, r: RedeemResult) -> None:
+        writes.append(r)
+
+    async def emitter(ok: bool, _s: RedeemJobSpec, _r: RedeemResult) -> None:
+        events.append(ok)
+
+    w = RedeemWorker(
+        candidate_source=candidates,
+        job_upserter=upsert,
+        binding_for=lambda _a: _aw(_SAFE),
+        redeem_client=spy,
+        auto_redeem=True,
+        status_writer=status_writer,
+        event_emitter=emitter,
+    )
+    outs = await w.poll_once()
+
+    # One batch call carrying all 3 jobs; no per-job single redeem.
+    assert len(spy.batch_calls) == 1
+    assert len(spy.batch_calls[0]) == 3
+    assert spy.redeem_calls == []
+    # Every job individually upserted, status-written, event-emitted.
+    assert len(upserted) == 3
+    assert len(writes) == 3 and all(r.status is RedeemJobStatus.CONFIRMED for r in writes)
+    assert events == [True, True, True]
+    # All 3 outcomes share the one batched tx hash.
+    assert {o.result.tx_hash for o in outs} == {"0xbatch"}
+    assert len(outs) == 3
+
+
+async def test_b6_magic_account_not_batched_stays_sequential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Magic (sig 1) jobs are NOT collapsed into a batch tx — PolyHermes
+    excludes Magic.  The worker still calls redeem_batch (uniform entry
+    point) but the spy proves the jobs are passed through, and a real
+    Web3RedeemClient would fan them to the sequential per-job loop."""
+    _enable_live(monkeypatch)
+    spy = _BatchSpyClient()
+
+    async def candidates() -> list[RedeemCandidate]:
+        return [
+            RedeemCandidate(ACCT, "0xm1", 0, False),
+            RedeemCandidate(ACCT, "0xm2", 0, False),
+        ]
+
+    async def upsert(_s: RedeemJobSpec) -> bool:
+        return True
+
+    w = RedeemWorker(
+        candidate_source=candidates,
+        job_upserter=upsert,
+        binding_for=lambda _a: _aw(_MAGIC),
+        redeem_client=spy,
+        auto_redeem=True,
+    )
+    outs = await w.poll_once()
+    # The worker delegates the SAFE-vs-Magic decision to redeem_batch; the
+    # real client keeps Magic sequential (covered in the relayer suite).
+    assert len(outs) == 2
+    assert len(spy.batch_calls) == 1
+
+
+async def test_b6_distinct_accounts_get_separate_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Jobs are grouped per account_id — one SAFE account with 2 jobs is
+    batched while a second account with a single job takes the plain
+    single-tx path.  Batching is per-account, never cross-account."""
+    _enable_live(monkeypatch)
+    spy = _BatchSpyClient()
+    acct_b = uuid.uuid5(uuid.NAMESPACE_DNS, "test.redeem.acct.b")
+
+    async def candidates() -> list[RedeemCandidate]:
+        return [
+            RedeemCandidate(ACCT, "0xa1", 0, False),
+            RedeemCandidate(acct_b, "0xb1", 0, False),
+            RedeemCandidate(ACCT, "0xa2", 0, False),
+        ]
+
+    async def upsert(_s: RedeemJobSpec) -> bool:
+        return True
+
+    w = RedeemWorker(
+        candidate_source=candidates,
+        job_upserter=upsert,
+        binding_for=lambda _a: _aw(_SAFE),
+        redeem_client=spy,
+        auto_redeem=True,
+    )
+    outs = await w.poll_once()
+    assert len(outs) == 3
+    # ACCT (2 jobs) ⇒ ONE batch call; acct_b (1 job) ⇒ plain single redeem.
+    assert len(spy.batch_calls) == 1
+    assert len(spy.batch_calls[0]) == 2
+    assert {s.account_id for s in spy.batch_calls[0]} == {ACCT}  # single-account
+    assert len(spy.redeem_calls) == 1
+    assert spy.redeem_calls[0].account_id == acct_b

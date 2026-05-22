@@ -82,9 +82,7 @@ class RedeemOutcome:
 #: ``async (account_id) -> (proxy_wallet, WalletBinding)`` — resolves the
 #: on-chain identity for one account (core wires this to the accounts repo +
 #: ``resolve_wallet``).  Only called on the live path.
-AccountResolver = Callable[
-    [uuid.UUID], Awaitable[tuple[str, WalletBinding]]
-]
+AccountResolver = Callable[[uuid.UUID], Awaitable[tuple[str, WalletBinding]]]
 
 
 @runtime_checkable
@@ -179,9 +177,7 @@ class RedeemablePoller:
 
     async def __call__(self) -> list[RedeemCandidate]:
         now = self.clock()
-        if self.cooldown_s > 0 and self._last_poll and (
-            now - self._last_poll
-        ) < self.cooldown_s:
+        if self.cooldown_s > 0 and self._last_poll and (now - self._last_poll) < self.cooldown_s:
             logger.debug(
                 "redeem_poll_cooldown",
                 extra={"since_last_s": now - self._last_poll},
@@ -359,9 +355,7 @@ class DbJobUpserter:
         # the cap is enforced off the persisted count and is restart-safe.
         return int(getattr(row, "attempts", 0) or 0)
 
-    async def record(
-        self, spec: RedeemJobSpec, result: RedeemResult
-    ) -> None:
+    async def record(self, spec: RedeemJobSpec, result: RedeemResult) -> None:
         """Persist a status-machine transition for one job (brief §9).
 
         ``submitted`` (tx broadcast) → ``confirmed`` (receipt ok) |
@@ -396,10 +390,7 @@ class DbJobUpserter:
             row.status = result.status.value
             if result.tx_hash is not None:
                 row.tx_hash = result.tx_hash
-            if (
-                result.status is RedeemJobStatus.CONFIRMED
-                and result.confirmed_at is not None
-            ):
+            if result.status is RedeemJobStatus.CONFIRMED and result.confirmed_at is not None:
                 row.confirmed_at = result.confirmed_at
             # C1 (R9/R19): count every FAILED attempt durably so the
             # ``max_attempts`` cap in :meth:`upsert` is real & restart-safe
@@ -448,10 +439,7 @@ class RedeemWorker:
         redeem_client: object | None = None,
         auto_redeem: bool = False,
         status_writer: JobStatusWriter | None = None,
-        event_emitter: Callable[
-            [bool, RedeemJobSpec, RedeemResult], Awaitable[None]
-        ]
-        | None = None,
+        event_emitter: Callable[[bool, RedeemJobSpec, RedeemResult], Awaitable[None]] | None = None,
     ) -> None:
         self._candidate_source = candidate_source
         self._job_upserter = job_upserter
@@ -462,9 +450,22 @@ class RedeemWorker:
         self._event_emitter = event_emitter
 
     async def poll_once(self) -> list[RedeemOutcome]:
-        """One redeem pass; idempotent, ``auto_redeem``-gated, restart-safe."""
+        """One redeem pass; idempotent, ``auto_redeem``-gated, restart-safe.
+
+        Deep-dive B6 — on the live path, redeem jobs for the SAME account
+        are grouped so a SAFE account's many resolved markets settle in ONE
+        MultiSend transaction (lower gas + fewer relayer-quota hits).  Magic
+        (sig 1) is NOT batched: :meth:`Web3RedeemClient.redeem_batch` falls
+        back to a per-job sequential loop for it.  Per-job idempotency is
+        unchanged — every ``(account, condition, outcome)`` job is still
+        upserted and status-written individually.
+        """
         candidates = await self._candidate_source()
-        outcomes: list[RedeemOutcome] = []
+        # Build the (spec, candidate, created) triples first.  The upsert
+        # enforces the ``(account, condition, outcome)`` idempotency BEFORE
+        # any on-chain call, exactly as before — batching only changes how
+        # the redeem tx is dispatched, never the durable job rows.
+        prepared: list[tuple[RedeemJobSpec, RedeemCandidate, bool]] = []
         for cand in candidates:
             spec = RedeemJobSpec(
                 account_id=cand.account_id,
@@ -475,11 +476,14 @@ class RedeemWorker:
                 detected_at=datetime.now(tz=UTC),
             )
             created = await self._job_upserter(spec)
+            prepared.append((spec, cand, created))
 
-            # auto_redeem toggle: when off, we record the upsert + log
-            # intent and submit NOTHING on-chain.  Per-op operator
-            # confirmation lives at the web layer.
-            if not self._auto_redeem:
+        # auto_redeem toggle: when off, we record the upsert + log intent
+        # and submit NOTHING on-chain.  Per-op operator confirmation lives
+        # at the web layer.
+        if not self._auto_redeem:
+            outcomes: list[RedeemOutcome] = []
+            for spec, cand, created in prepared:
                 logger.info(
                     "redeem_intent_dry_run",
                     extra={
@@ -506,12 +510,121 @@ class RedeemWorker:
                         ),
                     )
                 )
-                continue
+            return outcomes
 
-            # --- LIVE PATH (auto_redeem on) -----------------------------
-            outcome = await self._redeem_live(spec, cand, created)
-            outcomes.append(outcome)
+        # --- LIVE PATH (auto_redeem on) — group by account for B6 batch.
+        by_account: dict[uuid.UUID, list[tuple[RedeemJobSpec, RedeemCandidate, bool]]] = {}
+        for triple in prepared:
+            by_account.setdefault(triple[0].account_id, []).append(triple)
+
+        live_outcomes: list[RedeemOutcome] = []
+        for account_id, triples in by_account.items():
+            live_outcomes.extend(await self._redeem_live_account(account_id, triples))
+        return live_outcomes
+
+    async def _redeem_live_account(
+        self,
+        account_id: uuid.UUID,
+        triples: list[tuple[RedeemJobSpec, RedeemCandidate, bool]],
+    ) -> list[RedeemOutcome]:
+        """Live redeem for all of one account's jobs (deep-dive B6).
+
+        Resolves the wallet binding ONCE, then:
+
+        * SAFE (sig 2) ⇒ batch the ``redeemPositions`` calls into one
+          MultiSend tx via ``redeem_client.redeem_batch`` (lower gas +
+          fewer relayer-quota hits).
+        * any other mode (incl. Magic / sig 1) ⇒ ``redeem_batch`` itself
+          falls back to a per-job sequential loop.
+
+        NegRisk WCOL unwrap stays per-job post-processing (PolyHermes
+        batches only the redeem leg).  Every job is status-written +
+        event-emitted individually so per-job idempotency is preserved.
+        """
+        if self._redeem_client is None or self._binding_for is None:
+            raise RuntimeError(
+                "live auto_redeem enabled but redeem_client/binding_for not configured"
+            )
+        # A single resolved market for the account ⇒ keep the simple
+        # per-job path (no batching machinery, byte-identical to pre-B6).
+        if len(triples) == 1:
+            spec, cand, created = triples[0]
+            return [await self._redeem_live(spec, cand, created)]
+
+        binding = await self._binding_for(account_id)
+        specs = [t[0] for t in triples]
+        try:
+            results = await self._redeem_client.redeem_batch(specs, binding=binding)
+        except Exception as exc:  # noqa: BLE001 - fail-soft per account
+            logger.error(
+                "redeem_batch_failed",
+                extra={
+                    "account_id": str(account_id),
+                    "n_jobs": len(triples),
+                    "error": str(exc),
+                },
+            )
+            # Fan a per-job FAILED to every job so none is silently
+            # dropped; each row keeps its own bounded-retry budget.
+            results = {
+                (s.condition_id, s.outcome_index): RedeemResult(
+                    status=RedeemJobStatus.FAILED,
+                    detail=f"redeem_batch raised: {exc}",
+                )
+                for s in specs
+            }
+
+        outcomes: list[RedeemOutcome] = []
+        for spec, cand, created in triples:
+            result = results.get(
+                (spec.condition_id, spec.outcome_index),
+                RedeemResult(
+                    status=RedeemJobStatus.FAILED,
+                    detail="redeem_batch returned no result for this job",
+                ),
+            )
+            result = await self._post_redeem_negrisk(spec, cand, binding, result)
+            ok = result.status is RedeemJobStatus.CONFIRMED
+            await self._persist_and_emit(spec, result, ok=ok)
+            outcomes.append(RedeemOutcome(spec=spec, created=created, result=result))
         return outcomes
+
+    async def _post_redeem_negrisk(
+        self,
+        spec: RedeemJobSpec,
+        cand: RedeemCandidate,
+        binding: WalletBinding,
+        result: RedeemResult,
+    ) -> RedeemResult:
+        """NegRisk WCOL poll+unwrap post-processing for one confirmed job.
+
+        Shared by the single-job and batched paths.  A non-NegRisk or
+        non-confirmed job is returned unchanged.  Fail-soft: an unwrap
+        error surfaces as a FAILED result but never stalls the loop.
+        """
+        if not (cand.is_neg_risk and result.status is RedeemJobStatus.CONFIRMED):
+            return result
+        try:
+            amount = 0
+            poll = getattr(self._redeem_client, "poll_wcol_balance", None)
+            if poll is not None:
+                amount = int(await poll(binding=binding))
+            unwrap_res = await self._redeem_client.unwrap_collateral(  # type: ignore[union-attr]
+                binding=binding, amount=amount
+            )
+            if unwrap_res.status is RedeemJobStatus.FAILED:
+                return unwrap_res  # surface the unwrap failure
+        except Exception as exc:  # noqa: BLE001 - fail-soft
+            logger.error(
+                "redeem_unwrap_failed",
+                extra={"condition_id": cand.condition_id, "error": str(exc)},
+            )
+            return RedeemResult(
+                status=RedeemJobStatus.FAILED,
+                tx_hash=result.tx_hash,
+                detail=f"NegRisk redeem ok but unwrap raised: {exc}",
+            )
+        return result
 
     async def _redeem_live(
         self,
@@ -524,8 +637,7 @@ class RedeemWorker:
         one bad job never stalls the loop."""
         if self._redeem_client is None or self._binding_for is None:
             raise RuntimeError(
-                "live auto_redeem enabled but redeem_client/binding_for "
-                "not configured"
+                "live auto_redeem enabled but redeem_client/binding_for not configured"
             )
         binding = await self._binding_for(cand.account_id)
         try:
@@ -549,33 +661,7 @@ class RedeemWorker:
         # NegRisk pays WCOL → poll the WCOL balance then unwrap (brief §9 —
         # "PolyHermes polls ~20s"; the poll loop lives in the poller's
         # cooldown / the client's poll_wcol_balance).
-        if (
-            cand.is_neg_risk
-            and result.status is RedeemJobStatus.CONFIRMED
-        ):
-            try:
-                amount = 0
-                poll = getattr(self._redeem_client, "poll_wcol_balance", None)
-                if poll is not None:
-                    amount = int(await poll(binding=binding))
-                unwrap_res = await self._redeem_client.unwrap_collateral(
-                    binding=binding, amount=amount
-                )
-                if unwrap_res.status is RedeemJobStatus.FAILED:
-                    result = unwrap_res  # surface the unwrap failure
-            except Exception as exc:  # noqa: BLE001 - fail-soft
-                logger.error(
-                    "redeem_unwrap_failed",
-                    extra={
-                        "condition_id": cand.condition_id,
-                        "error": str(exc),
-                    },
-                )
-                result = RedeemResult(
-                    status=RedeemJobStatus.FAILED,
-                    tx_hash=result.tx_hash,
-                    detail=f"NegRisk redeem ok but unwrap raised: {exc}",
-                )
+        result = await self._post_redeem_negrisk(spec, cand, binding, result)
 
         ok = result.status is RedeemJobStatus.CONFIRMED
         await self._persist_and_emit(spec, result, ok=ok)

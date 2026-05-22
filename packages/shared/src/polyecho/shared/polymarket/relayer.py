@@ -55,7 +55,7 @@ import logging
 import math
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -66,6 +66,7 @@ from polyecho.shared.constants import (
     PARENT_COLLECTION_ID,
     POLYGON_CHAIN_ID,
     PUSD_ADDRESS,
+    SAFE_MULTISEND_CALL_ONLY,
     WRAPPED_COLLATERAL_ADDRESS,
 )
 from polyecho.shared.copytrading import (
@@ -86,6 +87,8 @@ __all__ = [
     "QuotaCooldown",
     "encode_redeem_positions_calldata",
     "encode_unwrap_calldata",
+    "encode_multisend_calldata",
+    "relay_redeem_batch",
 ]
 
 logger = logging.getLogger(__name__)
@@ -277,6 +280,50 @@ def encode_erc20_approve_calldata(*, spender: str, amount: int) -> str:
 
     selector = _function_selector("approve(address,uint256)")
     body: bytes = encode(["address", "uint256"], [spender, amount])
+    return "0x" + (selector + body).hex()
+
+
+def encode_multisend_calldata(calls: list[tuple[str, str]]) -> str:
+    """Encode ``MultiSendCallOnly.multiSend(bytes)`` for a batch of calls.
+
+    Deep-dive B6 — batch SAFE redeems via MultiSend so many resolved
+    markets settle in ONE ``execTransaction`` (lower gas + fewer relayer
+    quota hits).
+
+    ``calls`` is a list of ``(to, data)`` pairs.  Each inner call is
+    **always** ``operation=0`` (Call — never DelegateCall: the canonical
+    ``MultiSendCallOnly`` contract reverts on a non-zero inner operation,
+    a defence-in-depth match for our redeem-only use) and **value=0** (CTF
+    ``redeemPositions`` and WCOL ``unwrap`` never move native MATIC).
+
+    The packed encoding is the Gnosis-Safe ``MultiSend`` ABI:
+    each transaction is ``operation(1) || to(20) || value(32) ||
+    dataLength(32) || data`` concatenated, then ABI-wrapped as a single
+    ``bytes`` argument to ``multiSend(bytes)``.  Returns the ``0x…`` hex
+    string for the outer ``SafeTransaction.data`` field; the Safe must
+    invoke ``MultiSendCallOnly`` with ``operation=DelegateCall`` so the
+    batched calls run in the Safe's own context.
+
+    Raises:
+        ValueError: If *calls* is empty (caller must not batch nothing).
+    """
+    from eth_abi import encode  # type: ignore[attr-defined] # lazy
+    from eth_utils import to_bytes  # type: ignore[attr-defined] # lazy
+
+    if not calls:
+        raise ValueError("encode_multisend_calldata: refuse to encode an empty batch")
+    packed = b""
+    for to_addr, data_hex in calls:
+        data_bytes = to_bytes(hexstr=data_hex)
+        packed += (
+            (0).to_bytes(1, "big")  # operation = Call (CallOnly enforces)
+            + bytes.fromhex(to_addr[2:] if to_addr.startswith("0x") else to_addr)
+            + (0).to_bytes(32, "big")  # value = 0
+            + len(data_bytes).to_bytes(32, "big")
+            + data_bytes
+        )
+    selector = _function_selector("multiSend(bytes)")
+    body: bytes = encode(["bytes"], [packed])
     return "0x" + (selector + body).hex()
 
 
@@ -696,6 +743,80 @@ class PolymarketRelayerClient:
             )
         return result
 
+    async def submit_safe_multisend(
+        self,
+        *,
+        calls: list[tuple[str, str]],
+        metadata: str | None = None,
+        wait_for_confirmation: bool = True,
+    ) -> dict[str, Any]:
+        """Submit a batch of calls as ONE ``execTransaction`` via MultiSend.
+
+        Deep-dive B6 — batch SAFE redeems so N resolved markets settle in a
+        single relayer transaction (lower gas, fewer relayer-quota hits).
+
+        The SDK exposes no dedicated MultiSend primitive, but it does NOT
+        need one: a Gnosis-Safe batch is just an ordinary ``SafeTransaction``
+        whose ``to`` is the canonical ``MultiSendCallOnly`` contract and
+        whose ``operation`` is ``DelegateCall`` (so the packed inner calls
+        run in the Safe's own context).  We reuse the exact same
+        ``RelayClient.execute([SafeTransaction(...)])`` dispatch, retry,
+        circuit-breaker and 429 quota-cooldown gate as
+        :meth:`submit_safe_transaction` — the only difference is the
+        operation type and the MultiSend-encoded calldata.
+
+        Args:
+            calls: ``[(to, data)]`` inner calls (e.g. one CTF
+                ``redeemPositions`` per resolved market).  Each runs as
+                ``operation=Call`` value=0 inside the batch.
+            metadata: Free-form audit string forwarded to the relayer.
+            wait_for_confirmation: If True (default) poll until terminal
+                state; otherwise return as soon as the relayer ACKs.
+
+        Returns:
+            Same dict shape as :meth:`submit_safe_transaction`.
+
+        Raises:
+            ValueError: If *calls* is empty.
+            RelayerQuotaExceededError: If a 429 quota-cooldown is active —
+                the NEW batch submission is short-circuited (brief A4).
+        """
+        from py_builder_relayer_client.models import OperationType, SafeTransaction
+
+        if not calls:
+            raise ValueError("submit_safe_multisend: refuse to submit an empty batch")
+
+        # Brief A4 — same quota-cooldown gate as the single-tx path; a
+        # batched submit is still ONE relayer submission and must respect
+        # the 429 cooldown before any network I/O.
+        self._check_quota()
+
+        client = self._ensure_client()
+        data = encode_multisend_calldata(calls)
+        safe_tx = SafeTransaction(
+            to=SAFE_MULTISEND_CALL_ONLY,
+            operation=OperationType.DelegateCall,
+            data=data,
+            value=_ZERO_VALUE,
+        )
+        response = await self._run_with_retry(client.execute, [safe_tx], metadata)
+        result: dict[str, Any] = {
+            "transaction_id": getattr(response, "transaction_id", None),
+            "transaction_hash": getattr(response, "transaction_hash", None),
+        }
+        if not wait_for_confirmation:
+            return result
+
+        terminal = await asyncio.to_thread(response.wait)
+        result["transaction"] = terminal
+        result["state"] = terminal.get("state") if isinstance(terminal, dict) else None
+        if terminal is None:
+            raise RelayerSubmissionError(
+                f"Relayer multisend transaction {result['transaction_id']!r} "
+                f"did not reach a terminal state within the poll window."
+            )
+        return result
+
 
 # ---------------------------------------------------------------------------
 # High-level redeem / unwrap helpers (used by Web3RedeemClient._relay_*)
@@ -779,6 +900,145 @@ async def relay_redeem(
             f"collateral={'WCOL' if spec.is_neg_risk else 'pUSD'})"
         ),
     )
+
+
+async def relay_redeem_batch(
+    relayer: PolymarketRelayerClient,
+    specs: Sequence[RedeemJobSpec],
+    *,
+    binding: WalletBinding,
+) -> dict[tuple[str, int], RedeemResult]:
+    """Batch many CTF ``redeemPositions`` for one SAFE account into ONE tx.
+
+    Deep-dive B6 — when a SAFE account has several resolved markets ready
+    to redeem, settle them all in a single MultiSend ``execTransaction``
+    instead of N separate relayer submissions (lower gas, fewer relayer
+    quota hits).  This is SAFE-ONLY: Magic (sig 1) is excluded by design
+    (PolyHermes excludes it too) — the caller keeps Magic sequential.
+
+    Per-job idempotency is preserved: the return value maps each job's
+    ``(condition_id, outcome_index)`` key to its own :class:`RedeemResult`,
+    so every ``(account_id, condition_id, outcome_index)`` ``redeem_jobs``
+    row is still individually tracked / status-written even though the N
+    jobs shared one on-chain transaction (they all carry the same
+    ``tx_hash``).  A batch-level failure / quota-deferral fans the SAME
+    terminal status out to every job — no job is silently dropped.
+
+    A single-element *specs* is delegated to :func:`relay_redeem` so the
+    common (one resolved market) case is unchanged and never pays the
+    MultiSend wrapper overhead.
+
+    Args:
+        relayer: Configured :class:`PolymarketRelayerClient`.
+        specs:   ≥1 redeem jobs, ALL for the same SAFE *account_id*.
+        binding: The account's SAFE wallet binding (``signature_type=2``).
+
+    Returns:
+        ``{(condition_id, outcome_index): RedeemResult}`` — one entry per
+        input spec, in 1:1 correspondence.
+
+    Raises:
+        ValueError: If *specs* is empty, or the specs span more than one
+            ``account_id`` (batching is per-account by contract).
+        RelayerSubmissionError: If *binding* is not a SAFE wallet — Magic
+            (sig 1) must never be batched.
+    """
+    if not specs:
+        raise ValueError("relay_redeem_batch: specs must be non-empty")
+    if binding.signature_type != _SIG_SAFE:
+        # Defence-in-depth: Magic (sig 1) / POLY_1271 (sig 3) must NEVER
+        # reach the MultiSend path — PolyHermes explicitly excludes sig 1
+        # from batching and the SDK has no surface for sig 1/3 anyway.
+        raise RelayerSubmissionError(
+            f"relay_redeem_batch: signature_type={binding.signature_type} "
+            f"(wallet_mode={binding.wallet_mode!r}) cannot be batched; "
+            f"MultiSend redeem batching is SAFE-only (signature_type=2). "
+            f"Magic (sig 1) must stay sequential."
+        )
+    account_ids = {spec.account_id for spec in specs}
+    if len(account_ids) != 1:
+        raise ValueError(
+            f"relay_redeem_batch: all specs must share one account_id, "
+            f"got {sorted(str(a) for a in account_ids)!r}"
+        )
+
+    # Single resolved market ⇒ no MultiSend overhead; identical to the
+    # pre-B6 one-tx-per-job path.
+    if len(specs) == 1:
+        only = specs[0]
+        result = await relay_redeem(relayer, only, binding=binding)
+        return {(only.condition_id, only.outcome_index): result}
+
+    calls: list[tuple[str, str]] = []
+    for spec in specs:
+        collateral = WRAPPED_COLLATERAL_ADDRESS if spec.is_neg_risk else PUSD_ADDRESS
+        calls.append(
+            (
+                CTF_ADDRESS,
+                encode_redeem_positions_calldata(
+                    collateral=collateral,
+                    parent_collection_id=PARENT_COLLECTION_ID,
+                    condition_id=spec.condition_id,
+                    index_sets=[spec.index_set],
+                ),
+            )
+        )
+    account_id = specs[0].account_id
+    metadata = f"polyecho-redeem-batch account_id={account_id} n_jobs={len(specs)}"
+    keys = [(spec.condition_id, spec.outcome_index) for spec in specs]
+    try:
+        resp = await relayer.submit_safe_multisend(
+            calls=calls,
+            metadata=metadata,
+        )
+    except RelayerQuotaExceededError as exc:
+        # Brief A4 — 429 quota-cooldown active.  Fan a DEFERRAL out to
+        # EVERY job in the batch (keep them all ``pending``, not
+        # ``failed``); the whole batch is re-attempted on a later poll.
+        logger.info(
+            "redeem_batch_deferred_quota_cooldown",
+            extra={
+                "account_id": str(account_id),
+                "n_jobs": len(specs),
+                "retry_after_s": exc.retry_after_s,
+            },
+        )
+        deferred = RedeemResult(
+            status=RedeemJobStatus.PENDING,
+            skip_reason=SkipReason.QUOTA_COOLDOWN,
+            detail=(
+                f"batch redeem deferred: relayer 429 quota-cooldown active, "
+                f"retry after {exc.retry_after_s:.0f}s; no submission made."
+            ),
+        )
+        return {key: deferred for key in keys}
+    except RelayerSubmissionError as exc:
+        # A batch-level submit failure fans the SAME ``failed`` status to
+        # every job — none is silently dropped; each row is re-tried under
+        # its own bounded ``max_attempts`` budget on the next poll.
+        failed = RedeemResult(
+            status=RedeemJobStatus.FAILED,
+            detail=f"batch redeem via relayer failed: {exc!r}",
+        )
+        return {key: failed for key in keys}
+
+    tx_hash = resp.get("transaction_hash")
+    out: dict[tuple[str, int], RedeemResult] = {}
+    for spec, key in zip(specs, keys, strict=True):
+        # Every job gets the SAME shared tx_hash but its OWN result row so
+        # per-(account,condition,outcome) status tracking is preserved.
+        out[key] = RedeemResult(
+            status=RedeemJobStatus.CONFIRMED,
+            tx_hash=tx_hash,
+            detail=(
+                f"redeemPositions via Builder-Relayer MultiSend batch "
+                f"(n_jobs={len(specs)}, "
+                f"transaction_id={resp.get('transaction_id')!r}, "
+                f"state={resp.get('state')!r}, "
+                f"collateral={'WCOL' if spec.is_neg_risk else 'pUSD'})"
+            ),
+        )
+    return out
 
 
 async def relay_unwrap(

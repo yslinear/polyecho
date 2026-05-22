@@ -61,9 +61,11 @@ from polyecho.shared.polymarket.relayer import (
     RelayerCredentialsMissingError,
     RelayerQuotaExceededError,
     RelayerSubmissionError,
+    encode_multisend_calldata,
     encode_redeem_positions_calldata,
     encode_unwrap_calldata,
     relay_redeem,
+    relay_redeem_batch,
     relay_unwrap,
 )
 
@@ -728,3 +730,187 @@ def client_submit(relayer: PolymarketRelayerClient) -> Any:
     return relayer.submit_safe_transaction(
         to=constants.CTF_ADDRESS, data="0x", metadata="quota-probe"
     )
+
+
+# ---------------------------------------------------------------------------
+# Deep-dive B6 — SAFE redeem MultiSend batching
+# ---------------------------------------------------------------------------
+
+
+def _batch_specs(account_id: uuid.UUID, n: int) -> list[RedeemJobSpec]:
+    """N distinct redeem jobs for ONE account (distinct condition ids)."""
+    return [
+        RedeemJobSpec(
+            account_id=account_id,
+            condition_id="0x" + f"{i:02x}" * 32,
+            outcome_index=0,
+            index_set=1,
+            is_neg_risk=False,
+        )
+        for i in range(n)
+    ]
+
+
+def test_encode_multisend_packs_each_call() -> None:
+    """MultiSend calldata = ``multiSend(bytes)`` selector + ABI-wrapped
+    packed ``op(1)||to(20)||value(32)||len(32)||data`` per inner call."""
+    inner = encode_redeem_positions_calldata(
+        collateral=constants.PUSD_ADDRESS,
+        parent_collection_id=constants.PARENT_COLLECTION_ID,
+        condition_id="0x" + "ab" * 32,
+        index_sets=[1],
+    )
+    data = encode_multisend_calldata([(constants.CTF_ADDRESS, inner)])
+    # multiSend(bytes) selector = keccak256("multiSend(bytes)")[:4].
+    assert data.startswith("0x8d80ff0a")
+    # The inner CTF address (20 bytes, lowercased hex) appears in the body.
+    assert constants.CTF_ADDRESS[2:].lower() in data.lower()
+    # Two-call batch is strictly longer than a one-call batch.
+    data2 = encode_multisend_calldata(
+        [(constants.CTF_ADDRESS, inner), (constants.CTF_ADDRESS, inner)]
+    )
+    assert len(data2) > len(data)
+
+
+def test_encode_multisend_rejects_empty_batch() -> None:
+    with pytest.raises(ValueError, match="empty batch"):
+        encode_multisend_calldata([])
+
+
+def test_relay_redeem_batch_n_jobs_one_multisend_tx(
+    fake_sdk: _FakeRelayClient,
+) -> None:
+    """N SAFE redeem jobs for one account ⇒ exactly ONE relayer tx, sent
+    to MultiSend with operation=DelegateCall; every job gets its own
+    result row sharing that one tx hash (per-job idempotency preserved)."""
+    relayer = PolymarketRelayerClient(_creds())
+    account_id = uuid.uuid4()
+    specs = _batch_specs(account_id, 3)
+    results = run(relay_redeem_batch(relayer, specs, binding=_SAFE))
+
+    # Exactly one on-chain submission for 3 jobs.
+    assert len(fake_sdk.executed) == 1
+    call = fake_sdk.executed[0]
+    assert call["to"] == constants.SAFE_MULTISEND_CALL_ONLY
+    assert call["operation"] == 1  # _OpType.DelegateCall in the fake SDK
+    assert call["data"].startswith("0x8d80ff0a")  # multiSend(bytes)
+
+    # One result per job, keyed by (condition_id, outcome_index); each is
+    # individually CONFIRMED and shares the single batch tx hash.
+    assert len(results) == 3
+    tx_hashes = set()
+    for spec in specs:
+        res = results[(spec.condition_id, spec.outcome_index)]
+        assert res.status == RedeemJobStatus.CONFIRMED
+        assert res.tx_hash is not None
+        tx_hashes.add(res.tx_hash)
+        assert "MultiSend batch" in (res.detail or "")
+    assert len(tx_hashes) == 1  # all jobs share the one batched tx
+
+
+def test_relay_redeem_batch_single_job_uses_plain_redeem(
+    fake_sdk: _FakeRelayClient,
+) -> None:
+    """A 1-element batch skips the MultiSend wrapper — it is a plain
+    single-tx redeem (to=CTF, operation=Call), unchanged from pre-B6."""
+    relayer = PolymarketRelayerClient(_creds())
+    specs = _batch_specs(uuid.uuid4(), 1)
+    results = run(relay_redeem_batch(relayer, specs, binding=_SAFE))
+    assert len(fake_sdk.executed) == 1
+    assert fake_sdk.executed[0]["to"] == constants.CTF_ADDRESS
+    assert fake_sdk.executed[0]["operation"] == 0  # Call, not DelegateCall
+    assert results[(specs[0].condition_id, 0)].status == RedeemJobStatus.CONFIRMED
+
+
+def test_relay_redeem_batch_rejects_magic_sig1(
+    fake_sdk: _FakeRelayClient,
+) -> None:
+    """Magic (sig 1) must NEVER be batched — PolyHermes excludes it."""
+    relayer = PolymarketRelayerClient(_creds())
+    specs = _batch_specs(uuid.uuid4(), 3)
+    with pytest.raises(RelayerSubmissionError, match="SAFE-only"):
+        run(relay_redeem_batch(relayer, specs, binding=_MAGIC))
+    assert fake_sdk.executed == []
+
+
+def test_relay_redeem_batch_rejects_mixed_accounts(
+    fake_sdk: _FakeRelayClient,
+) -> None:
+    """All specs in a batch must share one account_id."""
+    relayer = PolymarketRelayerClient(_creds())
+    specs = _batch_specs(uuid.uuid4(), 2) + _batch_specs(uuid.uuid4(), 1)
+    with pytest.raises(ValueError, match="one account_id"):
+        run(relay_redeem_batch(relayer, specs, binding=_SAFE))
+    assert fake_sdk.executed == []
+
+
+def test_relay_redeem_batch_quota_cooldown_fans_deferral(
+    fake_sdk: _FakeRelayClient,
+) -> None:
+    """Under an active 429 cooldown a batch defers EVERY job (PENDING +
+    QUOTA_COOLDOWN) rather than marking any FAILED — no submission made."""
+    clock = _FakeClock()
+    relayer = PolymarketRelayerClient(_creds(), quota_cooldown=QuotaCooldown(clock=clock))
+    relayer._quota.trip(body="resets in 60 seconds")
+    specs = _batch_specs(uuid.uuid4(), 3)
+    results = run(relay_redeem_batch(relayer, specs, binding=_SAFE))
+    assert len(results) == 3
+    for spec in specs:
+        res = results[(spec.condition_id, spec.outcome_index)]
+        assert res.status == RedeemJobStatus.PENDING
+        assert res.skip_reason == SkipReason.QUOTA_COOLDOWN
+    assert fake_sdk.executed == []
+
+
+def test_relay_redeem_batch_submit_failure_fans_failed(
+    fake_sdk: _FakeRelayClient,
+) -> None:
+    """A batch-level submit failure fans the SAME failed status to every
+    job — none is silently dropped."""
+    fake_sdk._fail_4xx = True
+    relayer = PolymarketRelayerClient(_creds())
+    specs = _batch_specs(uuid.uuid4(), 3)
+    results = run(relay_redeem_batch(relayer, specs, binding=_SAFE))
+    assert len(results) == 3
+    for spec in specs:
+        res = results[(spec.condition_id, spec.outcome_index)]
+        assert res.status == RedeemJobStatus.FAILED
+
+
+def test_submit_safe_multisend_rejects_empty_batch(
+    fake_sdk: _FakeRelayClient,
+) -> None:
+    relayer = PolymarketRelayerClient(_creds())
+    with pytest.raises(ValueError, match="empty batch"):
+        run(relayer.submit_safe_multisend(calls=[]))
+    assert fake_sdk.executed == []
+
+
+def test_redeem_client_redeem_batch_safe_dispatches_to_multisend(
+    fake_sdk: _FakeRelayClient,
+) -> None:
+    """Web3RedeemClient.redeem_batch for a SAFE wallet routes through the
+    MultiSend batch path (one DelegateCall tx for N jobs)."""
+    relayer = PolymarketRelayerClient(_creds())
+    client = Web3RedeemClient(web3=_FakeWeb3(), private_key_resolver=_key, relayer=relayer)
+    specs = _batch_specs(uuid.uuid4(), 4)
+    results = run(client.redeem_batch(specs, binding=_SAFE))
+    assert len(fake_sdk.executed) == 1
+    assert fake_sdk.executed[0]["to"] == constants.SAFE_MULTISEND_CALL_ONLY
+    assert len(results) == 4
+    assert all(r.status == RedeemJobStatus.CONFIRMED for r in results.values())
+
+
+def test_redeem_client_redeem_batch_magic_stays_sequential(
+    fake_sdk: _FakeRelayClient,
+) -> None:
+    """Web3RedeemClient.redeem_batch for Magic (sig 1) does NOT batch — it
+    falls back to the per-job loop, which fails closed per job (no SDK
+    PROXY surface).  Crucially: no MultiSend tx is ever sent."""
+    relayer = PolymarketRelayerClient(_creds())
+    client = Web3RedeemClient(web3=_FakeWeb3(), private_key_resolver=_key, relayer=relayer)
+    specs = _batch_specs(uuid.uuid4(), 3)
+    # The per-job sequential fallback raises on the first Magic job.
+    with pytest.raises(RelayerNotConfiguredError):
+        run(client.redeem_batch(specs, binding=_MAGIC))
+    assert fake_sdk.executed == []  # never batched, never DelegateCall
