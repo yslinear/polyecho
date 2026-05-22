@@ -192,7 +192,7 @@ class TestPaperToTrialReady:
 
 
 # ---------------------------------------------------------------------------
-# any -> cooldown (each cooldown clause)
+# paper/trial_ready -> cooldown (each cooldown clause)
 # ---------------------------------------------------------------------------
 
 
@@ -246,13 +246,25 @@ class TestCooldownGates:
         assert t.reason == "cooldown_unknown_exposure"
 
     def test_cooldown_pulls_a_trial_ready_leader_back(self) -> None:
-        # A cooldown gate fires from ANY non-cooldown state.
+        # A cooldown gate fires from trial_ready too, not only paper.
         cand = _trial_ready_session(
             lifecycle_state=LifecycleState.TRIAL_READY,
             max_drawdown=-0.99,
         )
         t = advance(cand, NOW)
         assert t.to_state is LifecycleState.COOLDOWN
+
+    def test_discovered_or_candidate_never_cooldowns(self) -> None:
+        # REGRESSION (C1 first-run): a discovered / candidate leader was
+        # never paper-traded, so a cooldown clause (here a stale source)
+        # must NOT demote it to cooldown -- it simply is not promoted.
+        # The original "any state -> cooldown" wrongly cooled 1033
+        # discovered leaders on the first real worker cycle.
+        stale = NOW - COOLDOWN_SOURCE_STALE - timedelta(minutes=1)
+        for st in (LifecycleState.DISCOVERED, LifecycleState.CANDIDATE):
+            cand = _candidate(lifecycle_state=st, source_last_seen=stale)
+            t = advance(cand, NOW)
+            assert t.to_state is not LifecycleState.COOLDOWN
 
 
 # ---------------------------------------------------------------------------

@@ -12,11 +12,15 @@ The six states (``candidate_leaders.lifecycle_state``)::
 
     discovered  -> candidate -> paper -> trial_ready
                        ^                     |
-                       |                     v
-                    cooldown <--------- (any state)
-                       |
-                       v
-                    retired   (terminal)
+                       |  (recover)          |  (degrade)
+                       +------- cooldown <---+
+                                   |
+                                   v
+                                retired   (terminal)
+
+    Only an actively paper-traded state (paper / trial_ready) can degrade
+    into cooldown -- a discovered / candidate leader is never paper-traded
+    so it cannot degrade.
 
 Every numeric gate threshold is a module-level constant so the ladder is
 both tunable (an operator can re-tune by editing one place) and testable
@@ -93,20 +97,20 @@ TRIAL_UNKNOWN_EXPOSURE_MAX = 0.20
 #: ratio must be strictly < this.
 TRIAL_FILTERED_RATIO_MAX = 0.50  # strictly less-than
 
-#: any -> cooldown: paper max drawdown breach (a fraction).  A drawdown
-#: strictly worse (more negative) than this trips a cooldown.
+#: paper/trial -> cooldown: paper max drawdown breach (a fraction).  A
+#: drawdown strictly worse (more negative) than this trips a cooldown.
 COOLDOWN_MAX_DRAWDOWN = -0.20
 
-#: any -> cooldown: minimum trade count before the copyable-PnL loss gate
-#: is meaningful (a tiny sample cannot trip a loss cooldown).
+#: paper/trial -> cooldown: minimum trade count before the copyable-PnL
+#: loss gate is meaningful (a tiny sample cannot trip a loss cooldown).
 COOLDOWN_LOSS_TRADE_COUNT_MIN = 10
 
-#: any -> cooldown: copyable-PnL loss floor (USD).  With at least
+#: paper/trial -> cooldown: copyable-PnL loss floor (USD).  With at least
 #: ``COOLDOWN_LOSS_TRADE_COUNT_MIN`` trades, a copyable PnL strictly below
 #: this trips a cooldown.
 COOLDOWN_COPYABLE_PNL_LOSS = -5.0  # strictly less-than
 
-#: any -> cooldown: a discovery source staler than this trips a cooldown.
+#: paper/trial -> cooldown: a discovery source staler than this trips it.
 COOLDOWN_SOURCE_STALE = timedelta(hours=72)
 
 #: any -> cooldown: unknown-exposure ratio breach (fraction).  A ratio
@@ -327,9 +331,9 @@ def advance(candidate: LadderCandidate, now: datetime | None = None) -> Transiti
 
     1. A ``locked`` candidate is skipped entirely (operator override).
     2. A terminal (``retired``) candidate is skipped.
-    3. The four cooldown gates are checked FIRST for every non-cooldown,
-       non-retired state -- a breach must pull a leader out of ANY state
-       (including a freshly-promoted one) the moment it is detected.
+    3. The cooldown gates are checked FIRST, but ONLY for an actively
+       paper-traded state (paper / trial_ready) -- a breach pulls a
+       degrading paper-trader straight to cooldown.
     4. The per-state forward / recovery transitions.
 
     Args:
@@ -356,10 +360,12 @@ def advance(candidate: LadderCandidate, now: datetime | None = None) -> Transiti
     if state in TERMINAL_STATES:
         return Transition(state, state, reason="terminal_state")
 
-    # (3) Cooldown gates apply to ANY non-cooldown, non-retired state.
-    # A breach pulls the leader straight to cooldown regardless of which
-    # forward state it currently sits in.
-    if state is not LifecycleState.COOLDOWN:
+    # (3) Cooldown gates apply ONLY to an actively paper-traded state
+    # (paper / trial_ready). Cooldown is the demotion of a degrading
+    # paper-trader; a discovered / candidate leader was never paper-traded
+    # so it cannot "degrade" -- if its source goes stale it simply is not
+    # promoted, it is NOT cooled down.
+    if state in (LifecycleState.PAPER, LifecycleState.TRIAL_READY):
         cooldown_reason = _cooldown_reason(candidate, now)
         if cooldown_reason is not None:
             return _cooldown_transition(candidate, now, cooldown_reason)
