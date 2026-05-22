@@ -62,6 +62,16 @@ export const research = {
   /** Placeholder for a row with no paper_session. */
   noSession: "尚無 session",
 
+  /** Client-side table pagination (50 rows per page). */
+  pagination: {
+    /** {{count}} = total candidate rows across all pages. */
+    total: "共 {{count}} 筆",
+    prev: "上一頁",
+    next: "下一頁",
+    /** {{page}} = current page, {{total}} = total pages. */
+    pageOf: "第 {{page}} / {{total}} 頁",
+  },
+
   promote: {
     /** InlineConfirm trigger label ({{title}} interpolation in the primitive). */
     title: "升級為真實跟單",

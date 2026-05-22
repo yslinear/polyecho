@@ -16,7 +16,14 @@
  */
 
 import * as React from "react";
-import { ArrowDown, ArrowUp, ChevronsUpDown, Lock } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsUpDown,
+  Lock,
+} from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -227,11 +234,18 @@ function SortableHead({
   );
 }
 
+/** Rows per page. The ladder pool can hold thousands of candidates, so
+ *  the table paginates client-side (the rows are already in this island
+ *  for the client-side sort). */
+const RESEARCH_PAGE_SIZE = 50;
+
 export function ResearchTable({ rows }: { rows: ResearchRow[] }) {
   const [sortKey, setSortKey] = React.useState<SortKey>("state");
   const [sortDir, setSortDir] = React.useState<SortDir>("asc");
+  const [page, setPage] = React.useState(1);
 
   function onSort(key: SortKey) {
+    setPage(1); // a re-sort restarts at the first page
     if (key === sortKey) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
@@ -253,6 +267,17 @@ export function ResearchTable({ rows }: { rows: ResearchRow[] }) {
     });
     return copy;
   }, [rows, sortKey, sortDir]);
+
+  const totalPages = Math.max(
+    1,
+    Math.ceil(sortedRows.length / RESEARCH_PAGE_SIZE),
+  );
+  // Clamp: if the row set shrank below the current page, snap back.
+  const safePage = Math.min(page, totalPages);
+  const pageRows = sortedRows.slice(
+    (safePage - 1) * RESEARCH_PAGE_SIZE,
+    safePage * RESEARCH_PAGE_SIZE,
+  );
 
   return (
     <div className="overflow-x-auto rounded-lg border">
@@ -298,7 +323,7 @@ export function ResearchTable({ rows }: { rows: ResearchRow[] }) {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {sortedRows.map((r) => {
+          {pageRows.map((r) => {
             const days = paperDays(r.paper_started_at);
             const hasSession = r.paper_state != null;
             return (
@@ -352,6 +377,43 @@ export function ResearchTable({ rows }: { rows: ResearchRow[] }) {
           })}
         </TableBody>
       </Table>
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between gap-3 border-t bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          <span>
+            {t("research.pagination.total", { count: sortedRows.length })}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1 text-xs"
+              disabled={safePage <= 1}
+              onClick={() => setPage(safePage - 1)}
+            >
+              <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
+              {t("research.pagination.prev")}
+            </Button>
+            <span className="tabular-nums">
+              {t("research.pagination.pageOf", {
+                page: safePage,
+                total: totalPages,
+              })}
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1 text-xs"
+              disabled={safePage >= totalPages}
+              onClick={() => setPage(safePage + 1)}
+            >
+              {t("research.pagination.next")}
+              <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
