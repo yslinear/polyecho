@@ -194,6 +194,44 @@ services:
       retries: 3
       start_period: 90s
 
+  # ── paper-trading-worker (C1) ────────────────────────────────────────────────
+  # Forward paper-trading ladder validation layer. Runs `python -m
+  # polyecho.paper` (Dockerfile ENTRYPOINT resolves PACKAGE=paper). Mirrors
+  # `discovery`: a scheduled ~15-min polling worker, DB-only, NO ports.
+  # PolyHermes C1 roadmap §C1-P6.
+  #
+  # DEFAULT-OFF — IMPORTANT:
+  #   The worker is inert unless POLYECHO_PAPER_TRADING_ENABLED=true (the
+  #   Setting `paper_trading_enabled` defaults false). When disabled the
+  #   process logs one `paper_worker_disabled` line and exits 0. With
+  #   `restart: "no"` that clean exit is final — the container reaches the
+  #   `Exited (0)` state and stays there, NOT a crash-loop. Flip the env var
+  #   to true and `docker compose up -d paper` to activate the ladder; it
+  #   then runs the scheduled loop and `restart` is irrelevant (it never
+  #   exits). `restart: "no"` is deliberate: it makes the default-off exit
+  #   visibly terminal rather than masking it behind `unless-stopped`.
+  #
+  # NO healthcheck — deliberate (lesson #24 honesty clause):
+  #   The peer workers (core/discovery/backtest/push) probe a per-worker
+  #   `*_heartbeat` Setting row. The paper worker writes NO heartbeat row,
+  #   and in the default-off state the process has already exited 0 — any
+  #   heartbeat or process-liveness probe would mark a correctly-deployed
+  #   default-off service `unhealthy`, which is a misleading signal. Per
+  #   the lesson #24 carve-out, no healthcheck is shipped rather than a
+  #   false one. When the worker grows a heartbeat (an enabled-mode
+  #   follow-up), add the same asyncpg `paper_heartbeat` probe used below.
+  paper:
+    build:
+      <<: *python-build
+      args:
+        PACKAGE: paper
+    <<: *python-defaults
+    # Override the shared `restart: unless-stopped` from *python-defaults:
+    # a default-off exit 0 must stay `Exited (0)`, not be respawned.
+    restart: "no"
+    # NO ports — DB-only communication (PRD §4.2)
+    # NO healthcheck — see the block comment above.
+
   # ── web-push-sender ──────────────────────────────────────────────────────────
   push:
     build:
