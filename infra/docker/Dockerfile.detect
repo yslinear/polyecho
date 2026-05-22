@@ -39,6 +39,7 @@ COPY packages/backtest/pyproject.toml  packages/backtest/pyproject.toml
 COPY packages/push/pyproject.toml      packages/push/pyproject.toml
 COPY packages/cli/pyproject.toml       packages/cli/pyproject.toml
 COPY packages/detect/pyproject.toml    packages/detect/pyproject.toml
+COPY packages/paper/pyproject.toml     packages/paper/pyproject.toml
 
 # Copy ALL source trees (PEP 420 namespace — all share `polyecho/`). detect
 # only DIRECTLY imports polyecho-shared but uv-sync needs every member's src
@@ -50,6 +51,7 @@ COPY packages/backtest/src  packages/backtest/src
 COPY packages/push/src      packages/push/src
 COPY packages/cli/src       packages/cli/src
 COPY packages/detect/src    packages/detect/src
+COPY packages/paper/src     packages/paper/src
 
 # Install workspace (--frozen if lockfile present, plain otherwise).
 RUN if [ -f uv.lock ]; then \
@@ -79,7 +81,7 @@ COPY --from=builder /app/packages /app/packages
 # namespace resolution if the editable finder gets confused after the
 # cross-stage copy (matches Dockerfile.python).
 ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONPATH="/app/packages/shared/src:/app/packages/core/src:/app/packages/discovery/src:/app/packages/backtest/src:/app/packages/push/src:/app/packages/cli/src:/app/packages/detect/src"
+ENV PYTHONPATH="/app/packages/shared/src:/app/packages/core/src:/app/packages/discovery/src:/app/packages/backtest/src:/app/packages/push/src:/app/packages/cli/src:/app/packages/detect/src:/app/packages/paper/src"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 

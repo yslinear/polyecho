@@ -42,6 +42,9 @@ COPY packages/cli/pyproject.toml      packages/cli/pyproject.toml
 # `uv.lock` resolves the workspace graph (uv sync --frozen walks every
 # member; a missing member errors with "Distribution not found").
 COPY packages/detect/pyproject.toml   packages/detect/pyproject.toml
+# `paper` is the C1 paper-trading worker. ARG PACKAGE=paper runs it from
+# this image, and the shared `uv.lock` walks it like every other member.
+COPY packages/paper/pyproject.toml    packages/paper/pyproject.toml
 
 # Copy all source trees (namespace package — all share `polyecho/`)
 COPY packages/shared/src   packages/shared/src
@@ -51,6 +54,7 @@ COPY packages/backtest/src packages/backtest/src
 COPY packages/push/src     packages/push/src
 COPY packages/cli/src      packages/cli/src
 COPY packages/detect/src   packages/detect/src
+COPY packages/paper/src    packages/paper/src
 
 # Install workspace (--frozen if lockfile present, plain otherwise)
 # The shell-form conditional handles the missing-lockfile bootstrap case.
@@ -86,7 +90,7 @@ COPY --from=builder /app/packages /app/packages
 # on PYTHONPATH so the PEP 420 `polyecho` namespace resolves even if the
 # editable finder is unhappy after the cross-stage copy.
 ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONPATH="/app/packages/shared/src:/app/packages/core/src:/app/packages/discovery/src:/app/packages/backtest/src:/app/packages/push/src:/app/packages/cli/src"
+ENV PYTHONPATH="/app/packages/shared/src:/app/packages/core/src:/app/packages/discovery/src:/app/packages/backtest/src:/app/packages/push/src:/app/packages/cli/src:/app/packages/paper/src"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 

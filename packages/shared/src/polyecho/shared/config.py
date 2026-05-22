@@ -266,6 +266,22 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Paper-trading worker (C1 — forward paper-trading ladder)
+    # ------------------------------------------------------------------
+    paper_trading_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable the C1 paper-trading worker (env "
+            "POLYECHO_PAPER_TRADING_ENABLED). When False (default) the "
+            "`python -m polyecho.paper` service is inert: it logs one line "
+            "and exits without simulating or advancing the lifecycle "
+            "ladder. The paper worker is a VALIDATION layer only — it "
+            "shadow-copies leader trades into simulated paper_sessions and "
+            "NEVER touches real money. Default OFF."
+        ),
+    )
+
+    # ------------------------------------------------------------------
     # Ops
     # ------------------------------------------------------------------
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(

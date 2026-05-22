@@ -36,6 +36,9 @@ COPY packages/cli/pyproject.toml      packages/cli/pyproject.toml
 # shared `uv.lock` resolves the workspace graph (uv sync --frozen walks
 # every member; a missing member errors with "Distribution not found").
 COPY packages/detect/pyproject.toml   packages/detect/pyproject.toml
+# `paper` (C1 worker) ships in Dockerfile.python; its manifest + src are
+# still required here so the shared `uv.lock` resolves the workspace graph.
+COPY packages/paper/pyproject.toml    packages/paper/pyproject.toml
 
 COPY packages/shared/src   packages/shared/src
 COPY packages/core/src     packages/core/src
@@ -44,6 +47,7 @@ COPY packages/backtest/src packages/backtest/src
 COPY packages/push/src     packages/push/src
 COPY packages/cli/src      packages/cli/src
 COPY packages/detect/src   packages/detect/src
+COPY packages/paper/src    packages/paper/src
 
 RUN if [ -f uv.lock ]; then \
         uv sync --frozen --no-dev; \
@@ -73,7 +77,7 @@ COPY --from=builder /app/packages /app/packages
 ENV PATH="/app/.venv/bin:$PATH"
 # Belt-and-suspenders: expose every package src so the PEP 420 `polyecho`
 # namespace resolves even if the editable finder is unhappy after the copy.
-ENV PYTHONPATH="/app/packages/shared/src:/app/packages/core/src:/app/packages/discovery/src:/app/packages/backtest/src:/app/packages/push/src:/app/packages/cli/src"
+ENV PYTHONPATH="/app/packages/shared/src:/app/packages/core/src:/app/packages/discovery/src:/app/packages/backtest/src:/app/packages/push/src:/app/packages/cli/src:/app/packages/paper/src"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 

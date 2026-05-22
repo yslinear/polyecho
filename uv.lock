@@ -20,6 +20,7 @@ members = [
     "polyecho-core",
     "polyecho-detect",
     "polyecho-discovery",
+    "polyecho-paper",
     "polyecho-push",
     "polyecho-shared",
 ]
@@ -1634,6 +1635,32 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
+    { name = "polyecho-shared", editable = "packages/shared" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "polyecho-paper"
+version = "0.0.0"
+source = { editable = "packages/paper" }
+dependencies = [
+    { name = "polyecho-backtest" },
+    { name = "polyecho-discovery" },
+    { name = "polyecho-shared" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "polyecho-backtest", editable = "packages/backtest" },
+    { name = "polyecho-discovery", editable = "packages/discovery" },
     { name = "polyecho-shared", editable = "packages/shared" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
