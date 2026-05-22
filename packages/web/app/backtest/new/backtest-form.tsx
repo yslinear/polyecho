@@ -32,7 +32,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { createBacktestJob } from "../actions";
+import { createBacktestJob, type BacktestJobDefaults } from "../actions";
 
 // ---------------------------------------------------------------------------
 // Zod schema — mirrors PRD §5.4 BacktestParams
@@ -121,9 +121,18 @@ function Section({
 // ---------------------------------------------------------------------------
 interface BacktestFormProps {
   defaultLeader?: string;
+  /**
+   * Re-run pre-fill: the full set of form defaults reconstructed from an
+   * existing job (the list's 「重新執行」 → `?from=<jobId>` path). Any
+   * field left undefined falls back to the form's own baseline default.
+   */
+  initialValues?: BacktestJobDefaults;
 }
 
-export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
+export function BacktestForm({
+  defaultLeader = "",
+  initialValues,
+}: BacktestFormProps) {
   const [submitting, setSubmitting] = useState(false);
 
   // Default dates: 90 days ago → today
@@ -132,6 +141,11 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
   ninetyDaysAgo.setDate(today.getDate() - 90);
   const toISO = (d: Date) => d.toISOString().slice(0, 10);
 
+  // Re-run pre-fill: a value from `initialValues` (a source job) wins, else
+  // the form's own baseline. `?? undefined` guards keep the resolver's
+  // numeric coercion happy when a source field was absent.
+  const iv = initialValues;
+
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
     // Inline validation on blur (DESIGN.md "Forms"): the field is checked
@@ -139,19 +153,19 @@ export function BacktestForm({ defaultLeader = "" }: BacktestFormProps) {
     mode: "onBlur",
     reValidateMode: "onChange",
     defaultValues: {
-      leader_address: defaultLeader,
-      start_date: toISO(ninetyDaysAgo),
-      end_date: toISO(today),
-      initial_capital_usd: 1000,
-      copy_ratio: 0.001,
-      fixed_size_usd: "",
-      max_position_usd: 50,
-      min_trade_size_usd: 1,
-      daily_loss_limit_usd: 100,
-      slippage_bps: 150,
-      execution_delay_seconds: 30,
-      category_whitelist_raw: "",
-      scenario: "triple",
+      leader_address: iv?.leader_address ?? defaultLeader,
+      start_date: iv?.start_date ?? toISO(ninetyDaysAgo),
+      end_date: iv?.end_date ?? toISO(today),
+      initial_capital_usd: iv?.initial_capital_usd ?? 1000,
+      copy_ratio: iv?.copy_ratio ?? 0.001,
+      fixed_size_usd: iv?.fixed_size_usd ?? "",
+      max_position_usd: iv?.max_position_usd ?? 50,
+      min_trade_size_usd: iv?.min_trade_size_usd ?? 1,
+      daily_loss_limit_usd: iv?.daily_loss_limit_usd ?? 100,
+      slippage_bps: iv?.slippage_bps ?? 150,
+      execution_delay_seconds: iv?.execution_delay_seconds ?? 30,
+      category_whitelist_raw: iv?.category_whitelist_raw ?? "",
+      scenario: iv?.scenario ?? "triple",
     },
   });
 

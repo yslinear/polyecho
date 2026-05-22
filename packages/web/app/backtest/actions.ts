@@ -146,6 +146,99 @@ const KNOWN_SCENARIOS: ReadonlySet<string> = new Set<
   BacktestFormValues["scenario"]
 >(["optimistic", "neutral", "pessimistic", "triple"]);
 
+// ---------------------------------------------------------------------------
+// Re-run pre-fill (R-list 2026-05-22) — loadBacktestJobDefaults
+// ---------------------------------------------------------------------------
+/**
+ * Form-defaults snapshot used to PRE-FILL `/backtest/new` when the list's
+ * 「重新執行」 deep-links `?from=<jobId>`. A strict subset of the create
+ * form's inputs: enough to reconstruct the job, never the `result` jsonb.
+ * Every field is optional so a partial / legacy row degrades gracefully
+ * (the form keeps its own default for any missing key).
+ */
+export interface BacktestJobDefaults {
+  leader_address?: string;
+  start_date?: string;
+  end_date?: string;
+  initial_capital_usd?: number;
+  copy_ratio?: number;
+  fixed_size_usd?: number;
+  max_position_usd?: number;
+  min_trade_size_usd?: number;
+  daily_loss_limit_usd?: number;
+  slippage_bps?: number;
+  execution_delay_seconds?: number;
+  category_whitelist_raw?: string;
+  scenario?: BacktestFormValues["scenario"];
+}
+
+/** Coerce an unknown jsonb value to a finite number, else undefined. */
+function toFiniteNumber(v: unknown): number | undefined {
+  const n = typeof v === "string" ? Number(v) : v;
+  return typeof n === "number" && Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * loadBacktestJobDefaults — read-only lookup that maps an existing
+ * `backtest_jobs` row back to the create-form's default values, so
+ * 「重新執行」 can pre-fill `/backtest/new` instead of silently doing
+ * nothing. READ tier (PRD §5.7 唯讀): no mutation, no danger gating.
+ * Returns `null` when the id does not resolve to a row.
+ */
+export async function loadBacktestJobDefaults(
+  id: string,
+): Promise<BacktestJobDefaults | null> {
+  const [row] = await db
+    .select({
+      leader_addresses: backtestJobs.leader_addresses,
+      template_params: backtestJobs.template_params,
+      start_date: backtestJobs.start_date,
+      end_date: backtestJobs.end_date,
+      initial_capital_usd: backtestJobs.initial_capital_usd,
+      slippage_bps: backtestJobs.slippage_bps,
+      execution_delay_seconds: backtestJobs.execution_delay_seconds,
+    })
+    .from(backtestJobs)
+    .where(eq(backtestJobs.id, id))
+    .limit(1);
+
+  if (!row) return null;
+
+  const tp =
+    row.template_params &&
+    typeof row.template_params === "object" &&
+    !Array.isArray(row.template_params)
+      ? (row.template_params as Record<string, unknown>)
+      : {};
+
+  const whitelist = Array.isArray(tp.category_whitelist)
+    ? (tp.category_whitelist as unknown[]).filter(
+        (c): c is string => typeof c === "string",
+      )
+    : [];
+
+  const scenario =
+    typeof tp.scenario === "string" && KNOWN_SCENARIOS.has(tp.scenario)
+      ? (tp.scenario as BacktestFormValues["scenario"])
+      : undefined;
+
+  return {
+    leader_address: row.leader_addresses[0],
+    start_date: row.start_date,
+    end_date: row.end_date,
+    initial_capital_usd: toFiniteNumber(row.initial_capital_usd),
+    copy_ratio: toFiniteNumber(tp.copy_ratio),
+    fixed_size_usd: toFiniteNumber(tp.fixed_size_usd),
+    max_position_usd: toFiniteNumber(tp.max_position_usd),
+    min_trade_size_usd: toFiniteNumber(tp.min_trade_size_usd),
+    daily_loss_limit_usd: toFiniteNumber(tp.daily_loss_limit_usd),
+    slippage_bps: toFiniteNumber(row.slippage_bps),
+    execution_delay_seconds: toFiniteNumber(row.execution_delay_seconds),
+    category_whitelist_raw: whitelist.join(", "),
+    scenario,
+  };
+}
+
 /** A finite, strictly-positive number (rejects NaN/Infinity/0/negatives). */
 function isPositiveFinite(n: unknown): n is number {
   return typeof n === "number" && Number.isFinite(n) && n > 0;

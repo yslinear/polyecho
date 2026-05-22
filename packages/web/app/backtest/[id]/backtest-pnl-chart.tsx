@@ -48,15 +48,20 @@ const COLORS: Record<string, string> = {
   pessimistic: "hsl(var(--loss))",
 };
 
+/** Calm honest empty state — one muted sentence, no axes box. */
+function PnlEmpty() {
+  return (
+    <div className="flex h-[280px] w-full items-center justify-center rounded-md border border-dashed border-border">
+      <p className="text-sm text-muted-foreground">
+        {t("backtest.result.pnlEmpty")}
+      </p>
+    </div>
+  );
+}
+
 export function BacktestPnlChart({ scenarios }: BacktestPnlChartProps) {
   if (!scenarios.length) {
-    return (
-      <div className="flex h-[280px] w-full items-center justify-center rounded-md border border-dashed border-border">
-        <p className="text-sm text-muted-foreground">
-          {t("backtest.result.pnlEmpty")}
-        </p>
-      </div>
-    );
+    return <PnlEmpty />;
   }
 
   // Build a merged date-keyed dataset so all scenarios align on XAxis
@@ -76,6 +81,14 @@ export function BacktestPnlChart({ scenarios }: BacktestPnlChartProps) {
     }
     return row;
   });
+
+  // P1.2: 3 scenarios can exist while EVERY `pnl_curve` is empty (adapted
+  // legacy rows). `!scenarios.length` above passes, but Recharts would
+  // then render a bare axes box with no curve. Surface the honest empty
+  // state instead of an empty chart.
+  if (mergedData.length === 0) {
+    return <PnlEmpty />;
+  }
 
   const chartConfig: ChartConfig = Object.fromEntries(
     scenarios.map((s) => [
@@ -118,6 +131,12 @@ export function BacktestPnlChart({ scenarios }: BacktestPnlChartProps) {
           y={0}
           className="stroke-border"
           strokeOpacity={0.8}
+          label={{
+            value: "$0",
+            position: "insideLeft",
+            fontSize: 11,
+            className: "fill-muted-foreground tabular-nums",
+          }}
         />
         <ChartTooltip content={<ChartTooltipContent />} />
         <ChartLegend content={<ChartLegendContent />} />

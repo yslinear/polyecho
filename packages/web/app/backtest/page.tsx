@@ -68,11 +68,16 @@ function statusLabel(status: string): string {
 /**
  * Render the leader-address summary cell: first 2 addresses as a
  * monospace truncated form, with a "+N more" suffix when there are more
- * than 2. Empty array → em-dash placeholder.
+ * than 2. Empty array -> a calm muted "無" placeholder (no em dash:
+ * DESIGN.md bans em dashes in UI copy).
  */
 function LeadersSummary({ addresses }: { addresses: string[] }) {
   if (addresses.length === 0) {
-    return <span className="text-muted-foreground">—</span>;
+    return (
+      <span className="text-muted-foreground">
+        {t("backtest.list.leadersEmpty")}
+      </span>
+    );
   }
   const head = addresses.slice(0, 2);
   const moreCount = Math.max(0, addresses.length - head.length);
@@ -139,7 +144,9 @@ export default async function BacktestListPage() {
       ) : (
         <div className="rounded-lg border">
           <Table>
-            <TableHeader>
+            {/* Sticky header (DESIGN.md Components: "Tables: sticky header").
+                Mirrors the /leaders, /accounts, /discovery table treatment. */}
+            <TableHeader className="sticky top-0 z-10 bg-muted">
               <TableRow>
                 <TableHead>{t("backtest.list.columns.date")}</TableHead>
                 <TableHead>{t("backtest.list.columns.leaders")}</TableHead>
@@ -175,8 +182,18 @@ export default async function BacktestListPage() {
                         {statusLabel(r.status)}
                       </Badge>
                     </TableCell>
+                    {/* Progress is only meaningful while a job is RUNNING:
+                        completed rows are always 100% and pending rows are
+                        always 0% (pure noise). Non-running rows show a calm
+                        muted placeholder instead. */}
                     <TableCell className="text-right tabular-nums">
-                      {progress.toFixed(0)}%
+                      {r.status === "running" ? (
+                        `${progress.toFixed(0)}%`
+                      ) : (
+                        <span className="text-muted-foreground">
+                          {t("backtest.list.progressEmpty")}
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell className="font-mono text-xs tabular-nums">
                       {r.start_date} → {r.end_date}

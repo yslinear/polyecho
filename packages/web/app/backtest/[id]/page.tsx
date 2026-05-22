@@ -473,20 +473,26 @@ export default async function BacktestResultPage({ params }: PageProps) {
             <ScenarioComparison scenarios={scenarios} />
           </div>
 
-          {/* PnL curve — all 3 scenarios */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle>{t("backtest.result.pnlCurves")}</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <BacktestPnlChart scenarios={scenarios} />
-            </CardContent>
-          </Card>
+          {/* PnL curve — all 3 scenarios.
+              Un-carded for rhythm parity with the bare ScenarioComparison
+              table directly above (DESIGN.md: cards are the lazy answer;
+              two adjacent data surfaces should not differ arbitrarily). */}
+          <div className="space-y-2">
+            <h2 className="text-sm font-semibold text-foreground">
+              {t("backtest.result.pnlCurves")}
+            </h2>
+            <BacktestPnlChart scenarios={scenarios} />
+          </div>
         </>
       )}
 
-      {/* Completed: single scenario */}
-      {job.status === "completed" && result?.stats && !result.scenarios && (
+      {/* Completed: single scenario.
+          Guard is `!scenarios` (the resolved triple value, i.e.
+          `result.scenarios ?? adaptedScenarios`) — so the single-scenario
+          path and the adapted-scenario triple path above are mutually
+          exclusive. The former `!result.scenarios` check ignored the
+          adapter, letting both branches fire for an adapted-scenario row. */}
+      {job.status === "completed" && result?.stats && !scenarios && (
         <>
           <Separator />
           <Card>
@@ -499,23 +505,21 @@ export default async function BacktestResultPage({ params }: PageProps) {
           </Card>
 
           {result.pnl_curve && result.pnl_curve.length > 0 && (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle>{t("backtest.result.pnlCurve")}</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <BacktestPnlChart
-                  scenarios={[
-                    {
-                      label: "neutral",
-                      slippage_bps: job.slippage_bps ?? 150,
-                      delay_seconds: job.execution_delay_seconds ?? 30,
-                      pnl_curve: result.pnl_curve,
-                    },
-                  ]}
-                />
-              </CardContent>
-            </Card>
+            <div className="space-y-2">
+              <h2 className="text-sm font-semibold text-foreground">
+                {t("backtest.result.pnlCurve")}
+              </h2>
+              <BacktestPnlChart
+                scenarios={[
+                  {
+                    label: "neutral",
+                    slippage_bps: job.slippage_bps ?? 150,
+                    delay_seconds: job.execution_delay_seconds ?? 30,
+                    pnl_curve: result.pnl_curve,
+                  },
+                ]}
+              />
+            </div>
           )}
         </>
       )}

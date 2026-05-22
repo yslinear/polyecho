@@ -26,6 +26,10 @@ export const backtest = {
     },
     /** Suffix for leader_addresses[2:] when there are >2 leaders. */
     leadersMore: "＋{{count}}",
+    /** Placeholder when a job row carries no leader addresses. */
+    leadersEmpty: "無",
+    /** Progress cell value for non-running rows (no em dash). */
+    progressEmpty: "無",
     empty: {
       title: "尚無回測記錄。",
       hint: "請先在 /backtest/new 建立一個 backtest 任務。",
