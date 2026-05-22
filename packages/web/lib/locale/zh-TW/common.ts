@@ -109,9 +109,14 @@ export const common = {
 } as const;
 
 export const sidebar = {
-  nav: "導覽",
   /** Accessible name for the primary <SidebarMenu> nav landmark. */
   navAria: "主要導覽",
+  /** Section labels — the flat nav list is clustered into these groups. */
+  groups: {
+    discovery: "探索與評估",
+    trading: "交易與帳戶",
+    monitoring: "監控",
+  },
   items: {
     dashboard: "總覽",
     leaders: "Leaders",

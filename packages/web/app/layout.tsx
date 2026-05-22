@@ -88,10 +88,13 @@ export default async function RootLayout({
         <SidebarProvider>
           <AppSidebar />
           <SidebarInset>
-            {/* Top header bar — calm, instrument chrome. */}
+            {/* Top header bar — calm, instrument chrome. The collapse
+                trigger here is mobile-only (the off-canvas Sheet is
+                invisible when closed, so its trigger must live outside it);
+                on desktop the trigger lives in the SidebarHeader. */}
             <header className="flex min-h-12 shrink-0 items-center gap-3 border-b bg-background/95 px-4 pt-[env(safe-area-inset-top)] supports-[backdrop-filter]:bg-background/80">
               <SidebarTrigger
-                className="-ml-1 size-9 md:size-7 focus-visible:ring-2 focus-visible:ring-ring"
+                className="size-9 focus-visible:ring-2 focus-visible:ring-ring md:hidden"
                 aria-label={t("common.a11y.toggleSidebar")}
               />
               <div className="flex-1" />

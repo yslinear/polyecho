@@ -28,7 +28,7 @@ import { dict } from "@/lib/locale/zh-TW";
 
 describe("t() — key resolution", () => {
   it("resolves a top-level-ish nested key to its zh-TW string", () => {
-    expect(t("sidebar.nav")).toBe(dict.sidebar.nav);
+    expect(t("sidebar.navAria")).toBe(dict.sidebar.navAria);
     expect(t("status.title")).toBe(dict.status.title);
   });
 
@@ -70,7 +70,9 @@ describe("t() — {{var}} interpolation", () => {
     expect(repeated).toBe("Live trading X");
     // A key whose template legitimately has no var is returned verbatim
     // even when irrelevant vars are passed.
-    expect(t("sidebar.nav", { unused: "z" } as never)).toBe(dict.sidebar.nav);
+    expect(t("sidebar.navAria", { unused: "z" } as never)).toBe(
+      dict.sidebar.navAria,
+    );
   });
 
   it("leaves an unmatched placeholder intact when its var is absent", () => {
