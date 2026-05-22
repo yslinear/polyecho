@@ -444,7 +444,12 @@ const SidebarGroupLabel = React.forwardRef<
       data-sidebar="group-label"
       className={cn(
         "text-sidebar-foreground/70 ring-sidebar-ring flex h-8 shrink-0 items-center rounded-md px-2 text-xs font-medium outline-none transition-[margin,opacity] duration-200 ease-linear focus-visible:ring-2 [&>svg]:size-4 [&>svg]:shrink-0",
-        "group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0",
+        // In icon-collapsed mode the label is pulled up -mt-8 and faded to
+        // opacity-0. Without pointer-events-none the invisible 32px-tall box
+        // still intercepts clicks on whatever sits beneath it — i.e. the last
+        // nav item of the preceding group becomes unclickable. Required for
+        // any sidebar with multiple labelled groups.
+        "group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0 group-data-[collapsible=icon]:pointer-events-none",
         className
       )}
       {...props}
