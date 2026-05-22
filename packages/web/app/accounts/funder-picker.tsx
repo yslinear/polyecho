@@ -5,13 +5,22 @@
  *
  * GOAL: cut "which of my 4 wallets is the real one?" out of the import
  * flow. Given a typed EOA, this component:
- *   1. Calls Server Action `deriveAllFunders(eoa)` (proxies to internal
- *      `detect` container that runs the FROZEN Python derivations).
+ *   1. On an explicit 「查詢錢包餘額」 click, calls Server Action
+ *      `deriveAllFunders(eoa)` (proxies to the internal `detect`
+ *      container that runs the FROZEN Python derivations).
  *   2. For each of the 4 candidates with a non-null address, calls
  *      `probeTotalBalance(addr)` in parallel to fetch positions + idle.
  *   3. Renders 4 button rows; clicking pre-fills sigType + funder in the
  *      parent form. After pick, collapses to a single read-only line
  *      with a 重選 button.
+ *
+ * EXPLICIT TRIGGER (not auto-fire): each detect call costs ~9 outbound
+ * HTTP requests through the rate-limited gluetun path (1 detect call,
+ * which does a Polygon RPC for sig2, plus 4 balance probes). Account
+ * import is a rare, deliberate, single-account flow — the operator
+ * enters one EOA on purpose, so the lookup is gated behind a button
+ * rather than firing on every valid-shaped address. Editing the EOA
+ * resets the picker back to the un-triggered button state.
  *
  * SECURITY MODEL: still no client-side derivations. The web tier proxies
  * to the trusted Python source. Addresses shown are RENDERED ONLY — the
@@ -25,25 +34,23 @@
  *   - All 4 candidates probe to zero → show an actionable empty note
  *     telling the operator to deposit USDC first.
  *
- * DEBOUNCE: same 600ms pattern as `useAddressBalance` — fire once per
- * settled EVM address. Re-entry on EOA change cancels in-flight work via
- * stale flags + useEffect cleanup. There is no spinner anywhere; shadcn
- * `<Skeleton>` per design.md primitives ban.
+ * STALE GUARD: a run-id ref invalidates an in-flight detection if the
+ * EOA changes mid-flight, so a slow probe never writes results for a
+ * stale address.
  *
  * NO em-dashes anywhere in copy (DESIGN.md hard ban).
  */
 
 import * as React from "react";
+import { Wallet } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { t } from "@/lib/i18n";
 import type { I18nKey } from "@/lib/i18n";
 import { EVM_ADDRESS_RE, formatUsd, shortAddress } from "@/lib/format";
 import { deriveAllFunders, type FunderCandidate } from "./actions";
 import { probeTotalBalance } from "./balance";
-
-/** Debounce (ms): same as useAddressBalance — settle-once-per-edit. */
-const PICKER_DEBOUNCE_MS = 600;
 
 type BalanceState = "idle" | "probing" | "done" | "failed";
 
@@ -95,86 +102,104 @@ export function FunderPicker({ eoa, onPick }: FunderPickerProps) {
   const [rows, setRows] = React.useState<Row[] | null>(null);
   const [unavailable, setUnavailable] = React.useState<string | null>(null);
   const [picked, setPicked] = React.useState<Row | null>(null);
+  const [triggered, setTriggered] = React.useState(false);
+  // Bumped whenever the EOA changes; an in-flight detection compares its
+  // captured value against the current one and bails if they diverge.
+  const runRef = React.useRef(0);
 
-  /** Reset picked state when the EOA changes (operator edits address). */
+  /** EOA change → invalidate in-flight work + reset to the button state. */
   React.useEffect(() => {
+    runRef.current += 1;
     setPicked(null);
+    setRows(null);
+    setUnavailable(null);
+    setTriggered(false);
   }, [trimmed]);
 
-  /** Detect + probe, debounced once per settled EOA. */
-  React.useEffect(() => {
-    if (!validEoa) {
-      setRows(null);
-      setUnavailable(null);
+  async function runDetection() {
+    const myRun = runRef.current;
+    setTriggered(true);
+    setRows(null);
+    setUnavailable(null);
+
+    // Phase 1: derive the 4 candidates from `detect`.
+    const detect = await deriveAllFunders(trimmed);
+    if (runRef.current !== myRun) return;
+
+    if (!detect.ok) {
+      setUnavailable(detect.reason);
       return;
     }
 
-    let cancelled = false;
-    const handle = setTimeout(async () => {
-      // Phase 1: derive the 4 candidates from `detect`.
-      const detect = await deriveAllFunders(trimmed);
-      if (cancelled) return;
+    // Phase 2: seed all rows as "probing" so the skeleton renders for
+    // each candidate immediately, then fire probes in parallel.
+    const seeded: Row[] = detect.candidates.map((c) => ({
+      sigType: c.sigType,
+      mode: c.mode,
+      address: c.address,
+      derived: c.derived,
+      ...(c.error ? { error: c.error } : {}),
+      balanceState: c.address === null ? "done" : "probing",
+      positions: null,
+      idle: null,
+    }));
+    setRows(seeded);
 
-      if (!detect.ok) {
-        setRows(null);
-        setUnavailable(detect.reason);
-        return;
-      }
-
-      setUnavailable(null);
-
-      // Phase 2: seed all rows as "probing" so the skeleton renders for
-      // each candidate immediately, then fire probes in parallel.
-      const seeded: Row[] = detect.candidates.map((c) => ({
-        sigType: c.sigType,
-        mode: c.mode,
-        address: c.address,
-        derived: c.derived,
-        ...(c.error ? { error: c.error } : {}),
-        balanceState: c.address === null ? "done" : "probing",
-        positions: null,
-        idle: null,
-      }));
-      setRows(seeded);
-
-      await Promise.all(
-        detect.candidates.map(async (c, i) => {
-          if (c.address === null) return;
-          try {
-            const res = await probeTotalBalance(c.address);
-            if (cancelled) return;
-            setRows((prev) => {
-              if (prev === null) return prev;
-              const next = prev.slice();
-              next[i] = {
-                ...next[i],
-                balanceState: res.ok ? "done" : "failed",
-                positions: res.positionsUsd,
-                idle: res.idleUsdc,
-              };
-              return next;
-            });
-          } catch {
-            if (cancelled) return;
-            setRows((prev) => {
-              if (prev === null) return prev;
-              const next = prev.slice();
-              next[i] = { ...next[i], balanceState: "failed" };
-              return next;
-            });
-          }
-        }),
-      );
-    }, PICKER_DEBOUNCE_MS);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(handle);
-    };
-  }, [trimmed, validEoa]);
+    await Promise.all(
+      detect.candidates.map(async (c, i) => {
+        if (c.address === null) return;
+        try {
+          const res = await probeTotalBalance(c.address);
+          if (runRef.current !== myRun) return;
+          setRows((prev) => {
+            if (prev === null) return prev;
+            const next = prev.slice();
+            next[i] = {
+              ...next[i],
+              balanceState: res.ok ? "done" : "failed",
+              positions: res.positionsUsd,
+              idle: res.idleUsdc,
+            };
+            return next;
+          });
+        } catch {
+          if (runRef.current !== myRun) return;
+          setRows((prev) => {
+            if (prev === null) return prev;
+            const next = prev.slice();
+            next[i] = { ...next[i], balanceState: "failed" };
+            return next;
+          });
+        }
+      }),
+    );
+  }
 
   // Picker is HIDDEN until the EOA is valid (R22 progressive disclosure).
   if (!validEoa) return null;
+
+  // Un-triggered: an explicit lookup button. The detect + 4 balance
+  // probes only fire on this intentional click, never on every
+  // valid-shaped address the operator types.
+  if (!triggered) {
+    return (
+      <section className="space-y-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="text-xs"
+          onClick={runDetection}
+        >
+          <Wallet className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+          {t("tables.accounts.import.picker.detectButton")}
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          {t("tables.accounts.import.picker.subheading")}
+        </p>
+      </section>
+    );
+  }
 
   // Service-unavailable state: small note, no rows. Manual funder input
   // stays usable below.
@@ -198,7 +223,9 @@ export function FunderPicker({ eoa, onPick }: FunderPickerProps) {
           </span>
           <span className="font-medium">{t(modeLabelKey(picked.mode))}</span>
           <span className="font-mono text-muted-foreground">
-            {picked.address ? shortAddress(picked.address) : t("tables.accounts.import.picker.noAddress")}
+            {picked.address
+              ? shortAddress(picked.address)
+              : t("tables.accounts.import.picker.noAddress")}
           </span>
           <button
             type="button"
@@ -214,7 +241,7 @@ export function FunderPicker({ eoa, onPick }: FunderPickerProps) {
     );
   }
 
-  // Still waiting for detect to resolve.
+  // Triggered, still waiting for detect to resolve.
   if (rows === null) {
     return (
       <section className="space-y-3">

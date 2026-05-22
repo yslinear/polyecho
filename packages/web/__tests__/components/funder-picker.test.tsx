@@ -4,16 +4,17 @@ import userEvent from "@testing-library/user-event";
 
 /**
  * FunderPicker (P3) — behaviour contract for the /accounts import-form
- * client island that auto-derives 4 candidate funder addresses for the
- * typed EOA and lets the operator pick by USDC balance.
+ * client island that derives 4 candidate funder addresses for the typed
+ * EOA and lets the operator pick by USDC balance.
  *
  * Mocks the two Server Actions it depends on:
  *   - `deriveAllFunders(eoa)` (proxies to internal detect container)
  *   - `probeTotalBalance(addr)` (per-candidate USDC balance probe)
  *
- * NOTE: the component has a 600ms debounce. We do NOT use vi.useFakeTimers
- * here — fake timers break vitest+RTL waitFor under jsdom. Each `waitFor`
- * below is given a 2500ms ceiling so the debounce settles naturally.
+ * EXPLICIT TRIGGER: detection no longer auto-fires on a valid EOA. The
+ * picker first shows a 「查詢錢包餘額」 button; detection runs only on
+ * that click. `renderTriggered` below renders + clicks it so the
+ * post-trigger assertions are unchanged.
  */
 
 vi.mock("@/lib/db", () => ({ db: {} }));
@@ -38,7 +39,7 @@ const ADDR_1 = "0x2222222222222222222222222222222222222222";
 const ADDR_2 = "0x3333333333333333333333333333333333333333";
 const ADDR_3 = "0x4444444444444444444444444444444444444444";
 
-/** Ceiling for any waitFor that needs to outlast the 600ms picker debounce. */
+/** Ceiling for any waitFor that needs to outlast the async detect/probe. */
 const SETTLE = { timeout: 3000 };
 
 function mkDetectOk(opts?: { addr2Null?: boolean }) {
@@ -69,6 +70,18 @@ function mkBalance(positions: number, idle: number) {
   };
 }
 
+/**
+ * Render the picker and click the explicit 「查詢錢包餘額」 lookup button
+ * so detection fires. Detection is gated behind this button — it is NOT
+ * auto-fired on a valid EOA.
+ */
+async function renderTriggered(eoa: string, onPick: () => void = vi.fn()) {
+  const user = userEvent.setup();
+  const utils = render(<FunderPicker eoa={eoa} onPick={onPick} />);
+  await user.click(screen.getByRole("button", { name: /查詢錢包餘額/ }));
+  return { ...utils, user, onPick };
+}
+
 beforeEach(() => {
   deriveAllFunders.mockReset();
   probeTotalBalance.mockReset();
@@ -88,6 +101,26 @@ describe("FunderPicker — visibility gating", () => {
     expect(container).toBeEmptyDOMElement();
     expect(deriveAllFunders).not.toHaveBeenCalled();
   });
+
+  it("a valid EOA shows the lookup button but does NOT call deriveAllFunders until it is clicked", async () => {
+    deriveAllFunders.mockResolvedValue(mkDetectOk());
+    probeTotalBalance.mockResolvedValue(mkBalance(0, 0));
+
+    const user = userEvent.setup();
+    render(<FunderPicker eoa={VALID_EOA} onPick={vi.fn()} />);
+
+    // Button present, no rows, no Server Action call yet.
+    const lookup = screen.getByRole("button", { name: /查詢錢包餘額/ });
+    expect(lookup).toBeInTheDocument();
+    expect(screen.queryByRole("list")).not.toBeInTheDocument();
+    expect(deriveAllFunders).not.toHaveBeenCalled();
+
+    // Only the explicit click triggers detection.
+    await user.click(lookup);
+    await waitFor(() => {
+      expect(deriveAllFunders).toHaveBeenCalledWith(VALID_EOA);
+    }, SETTLE);
+  });
 });
 
 describe("FunderPicker — probing skeletons", () => {
@@ -96,7 +129,7 @@ describe("FunderPicker — probing skeletons", () => {
     // Never-resolves promise — keeps all 4 rows pinned in 'probing'.
     probeTotalBalance.mockReturnValue(new Promise(() => {}));
 
-    render(<FunderPicker eoa={VALID_EOA} onPick={vi.fn()} />);
+    await renderTriggered(VALID_EOA);
 
     // Wait until rows are seeded (4 actual button rows), past the initial
     // skeleton-only loading state which also renders 4 <li>s.
@@ -123,7 +156,7 @@ describe("FunderPicker — balance rendering", () => {
       .mockResolvedValueOnce(mkBalance(0, 0))
       .mockResolvedValueOnce(mkBalance(0, 0));
 
-    render(<FunderPicker eoa={VALID_EOA} onPick={vi.fn()} />);
+    await renderTriggered(VALID_EOA);
 
     await waitFor(() => {
       expect(screen.getAllByText(/\$123\.45/).length).toBeGreaterThan(0);
@@ -140,7 +173,7 @@ describe("FunderPicker — balance rendering", () => {
       .mockResolvedValueOnce(mkBalance(0, 0))
       .mockResolvedValueOnce(mkBalance(0, 0));
 
-    render(<FunderPicker eoa={VALID_EOA} onPick={vi.fn()} />);
+    await renderTriggered(VALID_EOA);
 
     await waitFor(() => {
       expect(screen.getAllByText(/\$42\.00/).length).toBeGreaterThan(0);
@@ -155,8 +188,7 @@ describe("FunderPicker — onPick + collapsed state", () => {
     probeTotalBalance.mockResolvedValue(mkBalance(10, 5));
 
     const onPick = vi.fn();
-    const user = userEvent.setup();
-    render(<FunderPicker eoa={VALID_EOA} onPick={onPick} />);
+    const { user } = await renderTriggered(VALID_EOA, onPick);
 
     await waitFor(() => {
       const btns = screen.getAllByRole("button");
@@ -179,8 +211,7 @@ describe("FunderPicker — onPick + collapsed state", () => {
     probeTotalBalance.mockResolvedValue(mkBalance(0, 0));
 
     const onPick = vi.fn();
-    const user = userEvent.setup();
-    render(<FunderPicker eoa={VALID_EOA} onPick={onPick} />);
+    const { user } = await renderTriggered(VALID_EOA, onPick);
 
     await waitFor(() => {
       const items = screen.getAllByRole("listitem");
@@ -200,9 +231,7 @@ describe("FunderPicker — onPick + collapsed state", () => {
     deriveAllFunders.mockResolvedValue(mkDetectOk());
     probeTotalBalance.mockResolvedValue(mkBalance(10, 5));
 
-    const onPick = vi.fn();
-    const user = userEvent.setup();
-    render(<FunderPicker eoa={VALID_EOA} onPick={onPick} />);
+    const { user } = await renderTriggered(VALID_EOA);
 
     await waitFor(() => {
       const btns = screen.getAllByRole("button");
@@ -235,7 +264,7 @@ describe("FunderPicker — service unavailable", () => {
       reason: "偵測服務無法觸及",
     });
 
-    render(<FunderPicker eoa={VALID_EOA} onPick={vi.fn()} />);
+    await renderTriggered(VALID_EOA);
 
     await waitFor(() => {
       expect(screen.getByText(/自動偵測暫不可用/)).toBeInTheDocument();
@@ -250,7 +279,7 @@ describe("FunderPicker — all-zero empty state", () => {
     deriveAllFunders.mockResolvedValue(mkDetectOk());
     probeTotalBalance.mockResolvedValue(mkBalance(0, 0));
 
-    render(<FunderPicker eoa={VALID_EOA} onPick={vi.fn()} />);
+    await renderTriggered(VALID_EOA);
 
     await waitFor(() => {
       expect(screen.getByText(/還沒入金到任何錢包/)).toBeInTheDocument();
@@ -264,8 +293,7 @@ describe("FunderPicker — keyboard + a11y", () => {
     probeTotalBalance.mockResolvedValue(mkBalance(10, 5));
 
     const onPick = vi.fn();
-    const user = userEvent.setup();
-    render(<FunderPicker eoa={VALID_EOA} onPick={onPick} />);
+    const { user } = await renderTriggered(VALID_EOA, onPick);
 
     await waitFor(() => {
       const btns = screen.getAllByRole("button");
@@ -290,7 +318,7 @@ describe("FunderPicker — keyboard + a11y", () => {
     deriveAllFunders.mockResolvedValue(mkDetectOk());
     probeTotalBalance.mockResolvedValue(mkBalance(10, 5));
 
-    render(<FunderPicker eoa={VALID_EOA} onPick={vi.fn()} />);
+    await renderTriggered(VALID_EOA);
 
     // Wait for the 4 row BUTTONS (not just listitems — the skeleton
     // loading state also has 4 <li>s without buttons).

@@ -177,6 +177,7 @@ export const tables = {
        *  Fail-soft: if detect is down, show a short note and the manual
        *  funder input stays usable. */
       picker: {
+        detectButton: "查詢錢包餘額",
         heading: "這個 EOA 可開的 4 個錢包",
         subheading: "依鏈上餘額挑你在用的",
         modeEoa: "EOA 自身",
