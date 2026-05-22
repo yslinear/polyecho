@@ -16,6 +16,7 @@
  */
 
 import Link from "next/link";
+import { Eye, RotateCw } from "lucide-react";
 
 import { t } from "@/lib/i18n";
 import { formatUsd } from "@/lib/format";
@@ -383,21 +384,28 @@ export default async function BacktestListPage({
                       {formatUsd(r.initial_capital_usd)}
                     </TableCell>
                     <TableCell className="text-right">
-                      <div className="flex justify-end gap-3">
+                      {/* Icon-only actions: a label is too wide for this
+                          column (重新執行 wrapped to 3 lines). aria-label +
+                          title keep the icon buttons accessible + hoverable. */}
+                      <div className="flex justify-end gap-1">
                         <Link
                           href={`/backtest/${r.id}`}
-                          className="text-sm font-medium text-primary underline-offset-2 hover:underline"
+                          aria-label={t("backtest.list.actions.view")}
+                          title={t("backtest.list.actions.view")}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-md text-primary transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         >
-                          {t("backtest.list.actions.view")}
+                          <Eye className="h-4 w-4" aria-hidden="true" />
                         </Link>
                         {/* Re-run is a deep-link into the create form; the
                             form pre-fill from a source id is a future
                             enhancement (NOT a write at the list level). */}
                         <Link
                           href={`/backtest/new?from=${r.id}`}
-                          className="text-sm font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                          aria-label={t("backtest.list.actions.rerun")}
+                          title={t("backtest.list.actions.rerun")}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         >
-                          {t("backtest.list.actions.rerun")}
+                          <RotateCw className="h-4 w-4" aria-hidden="true" />
                         </Link>
                       </div>
                     </TableCell>
