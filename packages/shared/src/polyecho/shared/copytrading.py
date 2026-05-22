@@ -98,6 +98,10 @@ class SkipReason(StrEnum):
     #: The operator-controlled ``auto_redeem`` toggle is OFF — the redeem
     #: was upserted for audit but no on-chain call was made.
     LIVE_LOCKED = "live_locked"
+    #: The Builder-Relayer returned a 429 quota-exceeded; a process-local
+    #: cooldown is still active so a NEW relayer redeem submission was
+    #: short-circuited rather than hammering the relayer (brief A4).
+    QUOTA_COOLDOWN = "quota_cooldown"
 
 
 class DecisionOutcome(StrEnum):

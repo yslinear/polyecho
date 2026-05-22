@@ -53,7 +53,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -70,6 +72,7 @@ from polyecho.shared.copytrading import (
     RedeemJobSpec,
     RedeemJobStatus,
     RedeemResult,
+    SkipReason,
     WalletBinding,
 )
 
@@ -77,8 +80,10 @@ __all__ = [
     "RelayerNotAvailableError",
     "RelayerCredentialsMissingError",
     "RelayerSubmissionError",
+    "RelayerQuotaExceededError",
     "RelayerCredentials",
     "PolymarketRelayerClient",
+    "QuotaCooldown",
     "encode_redeem_positions_calldata",
     "encode_unwrap_calldata",
 ]
@@ -94,6 +99,26 @@ _RETRY_BASE_S = 1.0
 _RETRY_CAP_S = 30.0
 _CB_THRESHOLD = 5
 _CB_RESET_S = 60.0
+
+# Quota-cooldown (brief A4 — relayer 429 circuit-breaker).  When the
+# Builder-Relayer returns a 429 / "quota exceeded, resets in N seconds",
+# we record a process-local cutoff and short-circuit NEW redeem submits
+# until it expires (mirrors PolyHermes' AtomicLong cutoff + isQuotaBlocked
+# check).  This sits ABOVE the existing retry/circuit logic: it prevents
+# fresh submissions; an in-flight retry is unchanged.  The default is
+# used only when the 429 body gives no parseable reset hint.
+_QUOTA_DEFAULT_COOLDOWN_S = 60.0
+# Defensive ceiling so a malformed / hostile "resets in 999999 s" hint
+# cannot wedge the redeem path open forever.
+_QUOTA_MAX_COOLDOWN_S = 3600.0
+# Patterns that match the relayer's reset hint, e.g.
+# "quota exceeded, resets in 42 seconds" / "retry after 42s".  Tried in
+# order; first hit wins.  Case-insensitive.
+_QUOTA_RESET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"resets?\s*in\s*(\d+(?:\.\d+)?)\s*s", re.IGNORECASE),
+    re.compile(r"retry[\s-]*after\s*(\d+(?:\.\d+)?)\s*s", re.IGNORECASE),
+    re.compile(r"(\d+(?:\.\d+)?)\s*seconds?", re.IGNORECASE),
+)
 
 # Polymarket signature_type for gasless SAFE wallets — the only sig the
 # upstream SDK actually exposes a submit path for (verified by
@@ -138,6 +163,27 @@ class RelayerSubmissionError(RuntimeError):
     (configuration) and :class:`RelayerNotAvailableError` (SDK missing)
     so the redeem-jobs worker can categorise the failure correctly.
     """
+
+
+class RelayerQuotaExceededError(RelayerSubmissionError):
+    """Raised when a NEW relayer redeem submission is short-circuited
+    because a 429 quota-cooldown is still active (brief A4).
+
+    Subclasses :class:`RelayerSubmissionError` so existing
+    ``except RelayerSubmissionError`` handlers in the redeem path keep
+    catching it; the dedicated type lets ``relay_redeem`` / ``relay_unwrap``
+    tag the :class:`~polyecho.shared.copytrading.RedeemResult` with
+    :attr:`~polyecho.shared.copytrading.SkipReason.QUOTA_COOLDOWN` so the
+    deferral is observable on the redeem job rather than silently swallowed.
+
+    Attributes:
+        retry_after_s: Best-effort seconds until the cooldown lifts (for
+            operator-facing logs / dashboards).
+    """
+
+    def __init__(self, message: str, *, retry_after_s: float) -> None:
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,9 +244,7 @@ def encode_redeem_positions_calldata(
     from eth_abi import encode  # type: ignore[attr-defined] # lazy
     from eth_utils import to_bytes  # type: ignore[attr-defined] # lazy
 
-    selector = _function_selector(
-        "redeemPositions(address,bytes32,bytes32,uint256[])"
-    )
+    selector = _function_selector("redeemPositions(address,bytes32,bytes32,uint256[])")
     body: bytes = encode(
         ["address", "bytes32", "bytes32", "uint256[]"],
         [
@@ -237,6 +281,104 @@ def encode_erc20_approve_calldata(*, spender: str, amount: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Quota-cooldown circuit-breaker (brief A4)
+# ---------------------------------------------------------------------------
+
+
+def _api_exception_body(exc: Exception) -> str | None:
+    """Best-effort extract of the human-readable body from a relayer
+    ``RelayerApiException``.
+
+    The upstream SDK is not strict about which attribute carries the
+    server message, so we probe the common shapes (``error_msg``,
+    ``message``, ``body``, ``text``, ``detail``) and finally fall back to
+    ``str(exc)``.  Used only to mine the "resets in N s" reset hint — a
+    miss just means the default cooldown is applied.
+    """
+    for attr in ("error_msg", "message", "body", "text", "detail"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    text = str(exc)
+    return text or None
+
+
+def _parse_reset_hint(body: str | None) -> float | None:
+    """Best-effort parse of "resets in N s" from a 429 response body.
+
+    The Builder-Relayer's 429 body may carry a human reset hint such as
+    "quota exceeded, resets in 42 seconds".  We extract the first numeric
+    seconds value; ``None`` if the body is empty or unparseable (the
+    caller then falls back to :data:`_QUOTA_DEFAULT_COOLDOWN_S`).
+    """
+    if not body:
+        return None
+    for pattern in _QUOTA_RESET_PATTERNS:
+        match = pattern.search(body)
+        if match is not None:
+            try:
+                value = float(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+    return None
+
+
+class QuotaCooldown:
+    """Process-local 429 quota-cooldown gate (brief A4).
+
+    Mirrors PolyHermes' ``AtomicLong`` cutoff + ``isQuotaBlocked()`` check.
+    On a 429 the relayer records a monotonic cutoff via :meth:`trip`; a new
+    redeem submission calls :meth:`blocked` first and is short-circuited
+    while the cutoff is still in the future.  Deliberately in-memory only
+    (no DB) — exactly like PolyHermes; a restart simply clears it, which is
+    safe because the durable ``redeem_jobs`` row stays ``pending`` and is
+    re-polled.
+
+    The gate sits ABOVE the existing retry / circuit-breaker: it prevents
+    NEW submissions; an in-flight retry inside :meth:`_run_with_retry` is
+    unchanged.
+    """
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        default_cooldown_s: float = _QUOTA_DEFAULT_COOLDOWN_S,
+        max_cooldown_s: float = _QUOTA_MAX_COOLDOWN_S,
+    ) -> None:
+        self._clock = clock
+        self._default_cooldown_s = default_cooldown_s
+        self._max_cooldown_s = max_cooldown_s
+        self._cutoff: float = 0.0  # monotonic seconds; 0 ⇒ never tripped
+
+    def trip(self, *, body: str | None = None) -> float:
+        """Record a cooldown after a 429; return the effective cooldown (s).
+
+        Parses "resets in N s" from *body* when present; otherwise uses the
+        default backoff.  The value is clamped to ``max_cooldown_s`` so a
+        malformed or hostile hint cannot wedge the redeem path shut
+        forever.  A shorter freshly-parsed hint never shortens an
+        already-longer active cutoff (we keep the later of the two).
+        """
+        hinted = _parse_reset_hint(body)
+        cooldown = self._default_cooldown_s if hinted is None else hinted
+        cooldown = max(0.0, min(cooldown, self._max_cooldown_s))
+        new_cutoff = self._clock() + cooldown
+        self._cutoff = max(self._cutoff, new_cutoff)
+        return cooldown
+
+    def blocked(self) -> bool:
+        """True iff the cooldown is still active (PolyHermes isQuotaBlocked)."""
+        return self._cutoff > self._clock()
+
+    def retry_after_s(self) -> float:
+        """Seconds remaining on the cooldown (``0.0`` once expired)."""
+        return max(0.0, self._cutoff - self._clock())
+
+
+# ---------------------------------------------------------------------------
 # Async wrapper around py-builder-relayer-client.RelayClient
 # ---------------------------------------------------------------------------
 
@@ -270,6 +412,7 @@ class PolymarketRelayerClient:
         credentials: RelayerCredentials,
         *,
         max_polls: int = 30,
+        quota_cooldown: QuotaCooldown | None = None,
     ) -> None:
         missing = [
             name
@@ -296,6 +439,11 @@ class PolymarketRelayerClient:
         # dashboards report the same shape across read + write paths.
         self._cb_failures: int = 0
         self._cb_open_until: float = 0.0  # monotonic seconds
+
+        # Quota-cooldown gate (brief A4) — process-local 429 circuit-
+        # breaker.  Tripped inside _run_with_retry on a 429; checked by
+        # submit_safe_transaction before a NEW submission.
+        self._quota: QuotaCooldown = quota_cooldown or QuotaCooldown()
 
     # ------------------------------------------------------------------
     # SDK construction (lazy — keeps import side-effect-free)
@@ -358,6 +506,37 @@ class PolymarketRelayerClient:
             )
 
     # ------------------------------------------------------------------
+    # Quota-cooldown gate (brief A4 — 429 quota circuit-breaker)
+    # ------------------------------------------------------------------
+
+    def quota_blocked(self) -> bool:
+        """True iff a 429 quota-cooldown is still active (PolyHermes
+        ``isQuotaBlocked()``).  A NEW redeem submission should be skipped /
+        deferred while this holds."""
+        return self._quota.blocked()
+
+    def quota_retry_after_s(self) -> float:
+        """Seconds remaining on the active 429 quota-cooldown (``0.0`` if
+        not blocked) — for operator-facing logs / redeem-job detail."""
+        return self._quota.retry_after_s()
+
+    def _check_quota(self) -> None:
+        """Short-circuit a NEW submission while the 429 cooldown holds.
+
+        Raised BEFORE any network round-trip — this is the whole point of
+        the breaker: stop hammering the relayer with submissions it will
+        only 429 again.  Distinct from :meth:`_check_circuit` (the generic
+        consecutive-failure breaker)."""
+        if self._quota.blocked():
+            retry_after = self._quota.retry_after_s()
+            raise RelayerQuotaExceededError(
+                f"PolymarketRelayerClient: relayer 429 quota-cooldown is "
+                f"active; new redeem submission skipped "
+                f"(retry after {retry_after:.0f}s).",
+                retry_after_s=retry_after,
+            )
+
+    # ------------------------------------------------------------------
     # Internal sync-call offloader with retry + deterministic-error gate
     # ------------------------------------------------------------------
 
@@ -382,9 +561,22 @@ class PolymarketRelayerClient:
                 status = getattr(exc, "status_code", None)
                 # Deterministic 4xx (not 429) ⇒ surface immediately.
                 if status is not None and 400 <= status < 500 and status != 429:
-                    raise RelayerSubmissionError(
-                        f"Relayer 4xx (not retried): {exc!r}"
-                    ) from exc
+                    raise RelayerSubmissionError(f"Relayer 4xx (not retried): {exc!r}") from exc
+                # 429 quota exceeded ⇒ trip the process-local cooldown so
+                # the NEXT submission is short-circuited (brief A4).  The
+                # in-flight call still finishes its retry budget below;
+                # the cooldown only gates fresh submissions.
+                if status == 429:
+                    body = _api_exception_body(exc)
+                    cooldown = self._quota.trip(body=body)
+                    logger.warning(
+                        "relayer_quota_cooldown_tripped",
+                        extra={
+                            "cooldown_s": cooldown,
+                            "parsed_hint": _parse_reset_hint(body) is not None,
+                            "fn": getattr(fn, "__name__", repr(fn)),
+                        },
+                    )
                 last_exc = exc
                 self._record_failure()
             except Exception as exc:  # transport / DNS / TLS / unexpected
@@ -429,13 +621,9 @@ class PolymarketRelayerClient:
         it for the operator-visible health probe and tests.
         """
         client = self._ensure_client()
-        payload = await self._run_with_retry(
-            client.get_nonce, signer_address, "SAFE"
-        )
+        payload = await self._run_with_retry(client.get_nonce, signer_address, "SAFE")
         if payload is None or payload.get("nonce") is None:
-            raise RelayerSubmissionError(
-                f"Relayer returned an invalid nonce payload: {payload!r}"
-            )
+            raise RelayerSubmissionError(f"Relayer returned an invalid nonce payload: {payload!r}")
         return int(payload["nonce"])
 
     async def submit_safe_transaction(
@@ -467,8 +655,18 @@ class PolymarketRelayerClient:
             Dict with at minimum ``transaction_id``, ``transaction_hash``,
             and (when ``wait_for_confirmation``) ``state`` + raw
             ``transaction`` payload from the relayer.
+
+        Raises:
+            RelayerQuotaExceededError: If a 429 quota-cooldown from a prior
+                submission is still active — the NEW submission is
+                short-circuited (brief A4) before any network round-trip.
         """
         from py_builder_relayer_client.models import OperationType, SafeTransaction
+
+        # Brief A4 — short-circuit a NEW submission while the 429 quota-
+        # cooldown holds, instead of hammering the relayer.  Checked
+        # before _ensure_client / network I/O.
+        self._check_quota()
 
         client = self._ensure_client()
         safe_tx = SafeTransaction(
@@ -478,9 +676,7 @@ class PolymarketRelayerClient:
             value=value,
         )
         # execute() does network I/O + retries via our wrapper.
-        response = await self._run_with_retry(
-            client.execute, [safe_tx], metadata
-        )
+        response = await self._run_with_retry(client.execute, [safe_tx], metadata)
         result: dict[str, Any] = {
             "transaction_id": getattr(response, "transaction_id", None),
             "transaction_hash": getattr(response, "transaction_hash", None),
@@ -492,9 +688,7 @@ class PolymarketRelayerClient:
         # /transaction every 2s up to max_polls.  Offload to a thread.
         terminal = await asyncio.to_thread(response.wait)
         result["transaction"] = terminal
-        result["state"] = (
-            terminal.get("state") if isinstance(terminal, dict) else None
-        )
+        result["state"] = terminal.get("state") if isinstance(terminal, dict) else None
         if terminal is None:
             raise RelayerSubmissionError(
                 f"Relayer transaction {result['transaction_id']!r} did not "
@@ -530,9 +724,7 @@ async def relay_redeem(
             f"(wallet_mode={binding.wallet_mode!r}) has no Builder-Relayer "
             f"SDK surface; only SAFE (signature_type=2) is concrete."
         )
-    collateral = (
-        WRAPPED_COLLATERAL_ADDRESS if spec.is_neg_risk else PUSD_ADDRESS
-    )
+    collateral = WRAPPED_COLLATERAL_ADDRESS if spec.is_neg_risk else PUSD_ADDRESS
     data = encode_redeem_positions_calldata(
         collateral=collateral,
         parent_collection_id=PARENT_COLLECTION_ID,
@@ -550,6 +742,27 @@ async def relay_redeem(
             to=CTF_ADDRESS,
             data=data,
             metadata=metadata,
+        )
+    except RelayerQuotaExceededError as exc:
+        # Brief A4 — a 429 quota-cooldown is active.  This is a DEFERRAL,
+        # not a failure: keep the job ``pending`` (not ``failed``, which
+        # would burn a retry attempt) and surface the reason so the
+        # deferral is observable on the redeem job, not silently swallowed.
+        logger.info(
+            "redeem_deferred_quota_cooldown",
+            extra={
+                "account_id": str(spec.account_id),
+                "condition_id": spec.condition_id,
+                "retry_after_s": exc.retry_after_s,
+            },
+        )
+        return RedeemResult(
+            status=RedeemJobStatus.PENDING,
+            skip_reason=SkipReason.QUOTA_COOLDOWN,
+            detail=(
+                f"redeem deferred: relayer 429 quota-cooldown active, "
+                f"retry after {exc.retry_after_s:.0f}s; no submission made."
+            ),
         )
     except RelayerSubmissionError as exc:
         return RedeemResult(
@@ -591,18 +804,34 @@ async def relay_unwrap(
             detail="relay_unwrap skipped: WCOL balance is 0",
         )
     if amount > MAX_UINT256:
-        raise RelayerSubmissionError(
-            f"relay_unwrap: amount {amount} exceeds uint256 max"
-        )
+        raise RelayerSubmissionError(f"relay_unwrap: amount {amount} exceeds uint256 max")
     data = encode_unwrap_calldata(to_address=binding.funder, amount=amount)
-    metadata = (
-        f"polyecho-unwrap funder={binding.funder} amount={amount}"
-    )
+    metadata = f"polyecho-unwrap funder={binding.funder} amount={amount}"
     try:
         resp = await relayer.submit_safe_transaction(
             to=WRAPPED_COLLATERAL_ADDRESS,
             data=data,
             metadata=metadata,
+        )
+    except RelayerQuotaExceededError as exc:
+        # Brief A4 — 429 quota-cooldown active; defer (keep ``pending``),
+        # do not mark ``failed``.  The NegRisk unwrap will be retried on a
+        # later poll once the cooldown lifts.
+        logger.info(
+            "unwrap_deferred_quota_cooldown",
+            extra={
+                "funder": binding.funder,
+                "amount": amount,
+                "retry_after_s": exc.retry_after_s,
+            },
+        )
+        return RedeemResult(
+            status=RedeemJobStatus.PENDING,
+            skip_reason=SkipReason.QUOTA_COOLDOWN,
+            detail=(
+                f"unwrap deferred: relayer 429 quota-cooldown active, "
+                f"retry after {exc.retry_after_s:.0f}s; no submission made."
+            ),
         )
     except RelayerSubmissionError as exc:
         return RedeemResult(

@@ -47,6 +47,7 @@ from polyecho.shared import constants
 from polyecho.shared.copytrading import (
     RedeemJobSpec,
     RedeemJobStatus,
+    SkipReason,
     WalletBinding,
 )
 from polyecho.shared.polymarket.redeem import (
@@ -55,8 +56,10 @@ from polyecho.shared.polymarket.redeem import (
 )
 from polyecho.shared.polymarket.relayer import (
     PolymarketRelayerClient,
+    QuotaCooldown,
     RelayerCredentials,
     RelayerCredentialsMissingError,
+    RelayerQuotaExceededError,
     RelayerSubmissionError,
     encode_redeem_positions_calldata,
     encode_unwrap_calldata,
@@ -91,12 +94,21 @@ class _FakeRelayerResponse:
 class _FakeRelayClient:
     """Mirrors ``py_builder_relayer_client.client.RelayClient``."""
 
-    def __init__(self, *, fail_4xx: bool = False, transient_then_ok: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_4xx: bool = False,
+        transient_then_ok: bool = False,
+        fail_429: bool = False,
+        quota_429_body: str = "quota exceeded",
+    ) -> None:
         self.executed: list[dict[str, Any]] = []
         self.nonce_calls: list[tuple[str, str]] = []
         self.deployed_calls: list[str] = []
         self._fail_4xx = fail_4xx
         self._transient_then_ok = transient_then_ok
+        self._fail_429 = fail_429
+        self._quota_429_body = quota_429_body
         self._attempts = 0
 
     def get_deployed(self, address: str) -> dict[str, Any]:
@@ -111,6 +123,8 @@ class _FakeRelayClient:
         self._attempts += 1
         if self._fail_4xx:
             raise _make_api_exception(status_code=400, msg="bad nonce")
+        if self._fail_429:
+            raise _make_api_exception(status_code=429, msg=self._quota_429_body)
         if self._transient_then_ok and self._attempts == 1:
             raise _make_api_exception(status_code=503, msg="upstream down")
         first = transactions[0]
@@ -173,9 +187,7 @@ def _install_fake_sdk(relay_client: _FakeRelayClient) -> None:
     exc_mod = types.ModuleType("py_builder_relayer_client.exceptions")
 
     class _RelayerApiException(Exception):
-        def __init__(
-            self, *, status_code: int | None = None, error_msg: str | None = None
-        ) -> None:
+        def __init__(self, *, status_code: int | None = None, error_msg: str | None = None) -> None:
             super().__init__(error_msg or "")
             self.status_code = status_code
             self.error_msg = error_msg
@@ -222,9 +234,7 @@ def _make_api_exception(*, status_code: int, msg: str) -> Exception:
     so the retry path still surfaces it."""
     exc_mod = sys.modules.get("py_builder_relayer_client.exceptions")
     if exc_mod is not None and hasattr(exc_mod, "RelayerApiException"):
-        exc: Exception = exc_mod.RelayerApiException(
-            status_code=status_code, error_msg=msg
-        )
+        exc: Exception = exc_mod.RelayerApiException(status_code=status_code, error_msg=msg)
         return exc
     err = RuntimeError(msg)
     err.status_code = status_code  # type: ignore[attr-defined]
@@ -344,9 +354,7 @@ def test_submit_safe_transaction_calls_sdk_with_safetransaction(fake_sdk: _FakeR
 def test_submit_retries_on_transient_5xx(fake_sdk: _FakeRelayClient) -> None:
     fake_sdk._transient_then_ok = True
     client = PolymarketRelayerClient(_creds())
-    result = run(
-        client.submit_safe_transaction(to=constants.CTF_ADDRESS, data="0x")
-    )
+    result = run(client.submit_safe_transaction(to=constants.CTF_ADDRESS, data="0x"))
     # First attempt 503, second succeeds.
     assert result["state"] == "STATE_CONFIRMED"
 
@@ -427,9 +435,7 @@ def test_relay_redeem_safe_negrisk_uses_wcol(fake_sdk: _FakeRelayClient) -> None
     assert result.status == RedeemJobStatus.CONFIRMED
     call = fake_sdk.executed[0]
     addr_word = call["data"][2 + 8 : 2 + 8 + 64]
-    assert addr_word.lower().endswith(
-        constants.WRAPPED_COLLATERAL_ADDRESS[2:].lower()
-    )
+    assert addr_word.lower().endswith(constants.WRAPPED_COLLATERAL_ADDRESS[2:].lower())
 
 
 def test_relay_redeem_magic_rejected_no_sdk_surface(fake_sdk: _FakeRelayClient) -> None:
@@ -505,9 +511,7 @@ def test_sig0_eoa_path_unchanged_when_relayer_injected(
     _enable_lock(monkeypatch)
     relayer = PolymarketRelayerClient(_creds())
     web3 = _FakeWeb3()
-    client = Web3RedeemClient(
-        web3=web3, private_key_resolver=_key, relayer=relayer
-    )
+    client = Web3RedeemClient(web3=web3, private_key_resolver=_key, relayer=relayer)
     result = run(client.redeem(_spec(is_neg_risk=False), binding=_EOA))
     assert result.status == RedeemJobStatus.CONFIRMED
     # EOA path uses the web3 backend; relayer SDK must be untouched.
@@ -522,9 +526,7 @@ def test_sig2_safe_dispatches_to_relayer(
     _enable_lock(monkeypatch)
     relayer = PolymarketRelayerClient(_creds())
     web3 = _FakeWeb3()
-    client = Web3RedeemClient(
-        web3=web3, private_key_resolver=_key, relayer=relayer
-    )
+    client = Web3RedeemClient(web3=web3, private_key_resolver=_key, relayer=relayer)
     result = run(client.redeem(_spec(is_neg_risk=False), binding=_SAFE))
     assert result.status == RedeemJobStatus.CONFIRMED
     # Relayer SDK is hit; web3 backend untouched.
@@ -538,9 +540,7 @@ def test_sig2_safe_unwrap_dispatches_to_relayer(
 ) -> None:
     _enable_lock(monkeypatch)
     relayer = PolymarketRelayerClient(_creds())
-    client = Web3RedeemClient(
-        web3=_FakeWeb3(), private_key_resolver=_key, relayer=relayer
-    )
+    client = Web3RedeemClient(web3=_FakeWeb3(), private_key_resolver=_key, relayer=relayer)
     result = run(client.unwrap_collateral(binding=_SAFE, amount=42))
     assert result.status == RedeemJobStatus.CONFIRMED
     assert fake_sdk.executed[0]["to"] == constants.WRAPPED_COLLATERAL_ADDRESS
@@ -587,3 +587,144 @@ def test_sig2_without_relayer_fails_closed(
         run(client.redeem(_spec(is_neg_risk=False), binding=_SAFE))
 
 
+# ---------------------------------------------------------------------------
+# Quota-cooldown circuit-breaker (brief A4 — relayer 429)
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """Manually-advanced monotonic clock for deterministic cooldown tests."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_quota_cooldown_parses_resets_in_n_seconds() -> None:
+    """A 429 body with "resets in N seconds" sets the cooldown to N."""
+    clock = _FakeClock()
+    cd = QuotaCooldown(clock=clock)
+    cooldown = cd.trip(body="quota exceeded, resets in 42 seconds")
+    assert cooldown == 42.0
+    assert cd.blocked() is True
+    assert cd.retry_after_s() == 42.0
+
+
+def test_quota_cooldown_default_when_body_has_no_hint() -> None:
+    """No parseable hint ⇒ the default backoff is used (not zero)."""
+    clock = _FakeClock()
+    cd = QuotaCooldown(clock=clock, default_cooldown_s=60.0)
+    cooldown = cd.trip(body="too many requests")
+    assert cooldown == 60.0
+    assert cd.blocked() is True
+
+
+def test_quota_cooldown_clamped_to_max() -> None:
+    """A hostile / huge reset hint is clamped to the defensive ceiling."""
+    clock = _FakeClock()
+    cd = QuotaCooldown(clock=clock, max_cooldown_s=3600.0)
+    cooldown = cd.trip(body="resets in 999999 seconds")
+    assert cooldown == 3600.0
+
+
+def test_quota_cooldown_expires_after_window() -> None:
+    """Once the clock passes the cutoff, the gate unblocks."""
+    clock = _FakeClock()
+    cd = QuotaCooldown(clock=clock)
+    cd.trip(body="resets in 30 s")
+    assert cd.blocked() is True
+    clock.advance(29.0)
+    assert cd.blocked() is True
+    clock.advance(2.0)  # now 31s elapsed > 30s cutoff
+    assert cd.blocked() is False
+    assert cd.retry_after_s() == 0.0
+
+
+def test_429_sets_cooldown_and_next_submit_is_skipped(
+    fake_sdk: _FakeRelayClient,
+) -> None:
+    """A 429 on submit trips the cooldown; the SUBSEQUENT submit within
+    the window is short-circuited (no second relayer call)."""
+    clock = _FakeClock()
+    fake_sdk._fail_429 = True
+    fake_sdk._quota_429_body = "quota exceeded, resets in 50 seconds"
+    relayer = PolymarketRelayerClient(_creds(), quota_cooldown=QuotaCooldown(clock=clock))
+    # First submit: the 429 is retried (3 attempts) then surfaces as a
+    # RelayerSubmissionError — and trips the cooldown along the way.
+    with pytest.raises(RelayerSubmissionError):
+        run(client_submit(relayer))
+    assert relayer.quota_blocked() is True
+    attempts_after_first = fake_sdk._attempts
+    assert attempts_after_first >= 1
+
+    # Second submit WITHIN the window: short-circuited before any SDK
+    # call — the relayer's execute() attempt counter must NOT advance.
+    with pytest.raises(RelayerQuotaExceededError) as exc_info:
+        run(client_submit(relayer))
+    assert exc_info.value.retry_after_s > 0
+    assert fake_sdk._attempts == attempts_after_first  # no new call
+
+
+def test_submit_resumes_after_cooldown_expires(
+    fake_sdk: _FakeRelayClient,
+) -> None:
+    """After the cooldown window elapses, submissions resume normally."""
+    clock = _FakeClock()
+    fake_sdk._fail_429 = True
+    fake_sdk._quota_429_body = "resets in 40 seconds"
+    relayer = PolymarketRelayerClient(_creds(), quota_cooldown=QuotaCooldown(clock=clock))
+    with pytest.raises(RelayerSubmissionError):
+        run(client_submit(relayer))
+    assert relayer.quota_blocked() is True
+
+    # Advance past the window and let the relayer succeed this time.
+    clock.advance(41.0)
+    assert relayer.quota_blocked() is False
+    fake_sdk._fail_429 = False
+    result = run(client_submit(relayer))
+    assert result["state"] == "STATE_CONFIRMED"
+
+
+def test_relay_redeem_quota_cooldown_surfaces_skip_reason(
+    fake_sdk: _FakeRelayClient,
+) -> None:
+    """relay_redeem under an active cooldown returns a PENDING result
+    tagged QUOTA_COOLDOWN — the deferral is observable on the redeem job,
+    not silently swallowed, and no retry budget is burned (not FAILED)."""
+    clock = _FakeClock()
+    relayer = PolymarketRelayerClient(_creds(), quota_cooldown=QuotaCooldown(clock=clock))
+    # Pre-trip the cooldown so the next relay_redeem is short-circuited.
+    relayer._quota.trip(body="resets in 60 seconds")
+    result = run(relay_redeem(relayer, _spec(is_neg_risk=False), binding=_SAFE))
+    assert result.status == RedeemJobStatus.PENDING
+    assert result.skip_reason == SkipReason.QUOTA_COOLDOWN
+    assert "quota-cooldown" in (result.detail or "")
+    # No submission reached the SDK.
+    assert fake_sdk.executed == []
+
+
+def test_relay_unwrap_quota_cooldown_surfaces_skip_reason(
+    fake_sdk: _FakeRelayClient,
+) -> None:
+    """relay_unwrap under an active cooldown likewise defers (PENDING +
+    QUOTA_COOLDOWN) rather than marking the job FAILED."""
+    clock = _FakeClock()
+    relayer = PolymarketRelayerClient(_creds(), quota_cooldown=QuotaCooldown(clock=clock))
+    relayer._quota.trip(body=None)  # default backoff
+    result = run(relay_unwrap(relayer, binding=_SAFE, amount=1000))
+    assert result.status == RedeemJobStatus.PENDING
+    assert result.skip_reason == SkipReason.QUOTA_COOLDOWN
+    assert fake_sdk.executed == []
+
+
+def client_submit(relayer: PolymarketRelayerClient) -> Any:
+    """Helper: a minimal submit_safe_transaction coroutine for the
+    quota-cooldown tests (CTF target, throwaway calldata)."""
+    return relayer.submit_safe_transaction(
+        to=constants.CTF_ADDRESS, data="0x", metadata="quota-probe"
+    )
