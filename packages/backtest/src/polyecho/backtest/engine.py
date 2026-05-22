@@ -16,11 +16,27 @@ Simulation steps (PRD §5.4):
       slippage proxy: delay_slippage_bps = execution_delay_seconds × 0.5 bps/s,
       so a 30 s delay adds another 15 bps on top of slippage_bps. Documented
       as ASSUMPTION-DELAY below.
-   g. PnL for BUY trades: realised when next matching SELL on the same
-      condition_id appears, or mark-to-market at end.
-3. Mark-to-market all still-open positions using get_positions() current_value
-   as a proxy for last known price.
+   g. PnL for BUY trades: each BUY opens a FIFO lot at its own fill price;
+      a SELL consumes the oldest still-open lots first (strict FIFO cost
+      basis, PolyHermes' SellMatchDetail). Realised PnL is the sum over the
+      consumed lots of (sell_price - lot_buy_price) * matched_qty. A SELL
+      larger than the remaining open lots is matched only up to the open
+      quantity (the surplus is dropped, not shorted). Any lots still open at
+      period end are marked-to-market.
+3. Mark-to-market all still-open lots using the last in-window fill price as
+   a proxy for last known price (look-ahead-bias-safe).
 4. Compute daily cumulative PnL curve + summary statistics.
+
+FIFO lot model (B5, PolyHermes deep-dive):
+  A leader who layers partial BUYs at different prices and then partial
+  SELLs cannot be priced by a single whole-position close keyed on
+  condition_id: the cost basis of each closed slice depends on WHICH lot it
+  consumed. The engine therefore tracks, per condition_id, an ordered list
+  of open lots (each = one BUY's residual shares + that BUY's fill price +
+  its committed notional). A SELL walks that list oldest-first, consuming
+  shares lot by lot until the SELL size is exhausted or all lots are empty,
+  and the realised PnL is the per-lot sum. This is fully consistent with
+  the existing slippage / per-leg fee / 3-scenario modelling.
 
 Key modeling assumptions (labelled inline):
   ASSUMPTION-DELAY   : No intra-bar fill-price movement available; execution
@@ -212,6 +228,11 @@ class BacktestResult:
                 "total_fees_usd": self.total_fees_usd,
             },
             "skip_analysis": self.skip_stats.to_dict(),
+            # B1 (PolyHermes deep-dive): the full per-fill trade log is
+            # emitted here so the jobs path can fan it out into the
+            # backtest_trades per-fill ledger table. Additive — every
+            # existing ``result`` JSONB consumer keeps working unchanged.
+            "trade_log": list(self.trade_log),
             "leader_vs_copy": {
                 "leader_pnl_curve": series_to_list(self.leader_pnl_curve),
                 "leader_total_return_usd": self.leader_total_return_usd,
@@ -374,6 +395,116 @@ def compute_max_drawdown(cumulative_pnl: list[float]) -> float:
 
 
 # ---------------------------------------------------------------------------
+# FIFO lot-level cost basis (B5, PolyHermes' SellMatchDetail)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Lot:
+    """One still-open BUY lot inside a FIFO position (B5).
+
+    A position on a single ``condition_id`` is an *ordered* list of these
+    lots — each is one BUY's residual (not-yet-sold) shares, the price that
+    BUY filled at, and the USDC notional that BUY committed.  A SELL consumes
+    lots oldest-first; ``shares`` shrinks as a lot is partially matched and
+    the lot is dropped once it reaches zero.
+
+    Attributes:
+        shares:    Residual unmatched shares of this lot (>= 0).
+        fill_price: The BUY fill price for this lot (cost basis, 0-1).
+        copy_usdc: USDC notional this BUY committed for these shares.  When a
+                   lot is partially closed the proportional share of this
+                   notional is returned to capital (see :meth:`notional_for`).
+        opened_at: Timestamp of the BUY that opened this lot.
+    """
+
+    shares: float
+    fill_price: float
+    copy_usdc: float
+    opened_at: datetime
+
+    def notional_for(self, matched_qty: float) -> float:
+        """USDC notional attributable to ``matched_qty`` shares of this lot.
+
+        The lot's ``copy_usdc`` is the BUY notional for its *original* share
+        count; a partial close returns only the proportional slice so
+        ``capital_remaining`` stays exact across layered partial exits.
+        """
+        if self.shares <= 0.0:
+            return 0.0
+        frac = max(0.0, min(1.0, matched_qty / self.shares))
+        return self.copy_usdc * frac
+
+
+@dataclass
+class SellMatch:
+    """Result of matching one SELL against a FIFO lot list (B5).
+
+    Attributes:
+        matched_shares: Total shares the SELL actually closed (bounded by the
+                        open lot quantity — a SELL larger than the open
+                        position closes only the open part).
+        gross_pnl:      Sum over consumed lots of
+                        ``(sell_price - lot.fill_price) * matched_qty``.
+        returned_notional: Sum of the per-lot proportional BUY notionals
+                        returned to capital.
+        oldest_opened_at: ``opened_at`` of the OLDEST lot the SELL touched
+                        (used for the hold-time metric); None if nothing
+                        matched.
+    """
+
+    matched_shares: float = 0.0
+    gross_pnl: float = 0.0
+    returned_notional: float = 0.0
+    oldest_opened_at: datetime | None = None
+
+
+def match_fifo_sell(lots: list[Lot], sell_shares: float, sell_price: float) -> SellMatch:
+    """Consume ``sell_shares`` from ``lots`` oldest-first (strict FIFO).
+
+    PolyHermes' ``SellMatchDetail``: a SELL is filled against the open BUY
+    lots in the order they were opened.  Each lot contributes
+    ``(sell_price - lot.fill_price) * matched_qty`` to gross realised PnL and
+    its proportional BUY notional to the capital returned.  Fully-consumed
+    lots are removed from ``lots`` IN PLACE; a partially-consumed lot's
+    ``shares`` and ``copy_usdc`` are reduced to the residual.
+
+    A SELL larger than the total open quantity matches only up to that
+    quantity (the surplus is dropped — the engine never models a short).
+
+    Args:
+        lots:        Ordered open-lot list for one condition_id (oldest first).
+                     MUTATED in place: consumed lots are removed / shrunk.
+        sell_shares: Shares the SELL wants to close (>= 0).
+        sell_price:  The (already slippage-adjusted) SELL fill price.
+
+    Returns:
+        A :class:`SellMatch` describing the matched quantity, gross PnL and
+        returned notional.
+    """
+    match = SellMatch()
+    remaining = max(0.0, sell_shares)
+    while remaining > 0.0 and lots:
+        lot = lots[0]
+        take = min(remaining, lot.shares)
+        if take <= 0.0:
+            lots.pop(0)
+            continue
+        if match.oldest_opened_at is None:
+            match.oldest_opened_at = lot.opened_at
+        match.matched_shares += take
+        match.gross_pnl += take * (sell_price - lot.fill_price)
+        match.returned_notional += lot.notional_for(take)
+        # Shrink the lot's notional proportionally BEFORE shrinking shares.
+        lot.copy_usdc = max(0.0, lot.copy_usdc - lot.notional_for(take))
+        lot.shares -= take
+        remaining -= take
+        if lot.shares <= 1e-12:
+            lots.pop(0)
+    return match
+
+
+# ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
 
@@ -455,8 +586,12 @@ class BacktestEngine:
 
         # State
         capital_remaining = params.initial_capital_usd
-        # open_positions: condition_id → {size, fill_price, opened_at, side}
-        open_positions: dict[str, dict[str, Any]] = {}
+        # open_positions: condition_id → ordered list of FIFO Lots (B5).
+        # A BUY appends a Lot; a SELL consumes the oldest lots first via
+        # match_fifo_sell.  A condition_id with an empty list == no open
+        # position (the key is pruned so len(open_positions) stays an exact
+        # open-position count for the max-concurrent-positions gate).
+        open_positions: dict[str, list[Lot]] = {}
         # daily_loss: date → cumulative loss (positive = loss)
         daily_loss: dict[date, float] = defaultdict(float)
         # halted_days: days where risk limit was hit
@@ -555,21 +690,18 @@ class BacktestEngine:
             # SELL close deducts from realised PnL.  A pure cost — never
             # improves PnL — so high fee_bps must monotonically reduce return.
             #
-            # CRIT-2: the *fee notional* must stay consistent with the shares
-            # actually transacted on this leg.  For a BUY this is ``copy_usdc``
-            # (the opened notional).  For a SELL the gross PnL below is based on
-            # ``min(copy_shares, entry_shares)`` against the position's stored
-            # entry — i.e. at most the position's BUY notional.  Computing the
-            # SELL-leg fee on the freshly-recomputed SELL-side ``copy_usdc``
-            # (which is the leader's SELL notional × ratio and may exceed or
-            # undershoot the BUY notional on a partial close) made the fee
-            # inconsistent with the entry/shares.  The SELL-leg fee is
-            # therefore charged on the *stored* BUY notional, bounded by the
-            # SELL-side notional so a genuine partial close (leader SELL <
-            # leader BUY) is fee-charged only on the portion actually closed.
+            # CRIT-2 / B5: the *fee notional* must stay consistent with the
+            # shares actually transacted on this leg.  For a BUY this is
+            # ``copy_usdc`` (the opened notional).  For a SELL under FIFO the
+            # gross PnL is matched only against the open lots, so the SELL-leg
+            # fee is charged on the SELL-side notional bounded by the *total
+            # open lot notional* on this condition_id — a SELL larger than the
+            # open position is fee-charged only on the portion actually
+            # closed, and a SELL that consumes layered lots at different
+            # prices is fee-charged on the genuinely-matched notional.
             if side == "SELL" and cond_id in open_positions:
-                _stored_usdc = float(open_positions[cond_id]["copy_usdc"])
-                fee_notional = min(copy_usdc, _stored_usdc)
+                _open_usdc = sum(lot.copy_usdc for lot in open_positions[cond_id])
+                fee_notional = min(copy_usdc, _open_usdc)
             else:
                 fee_notional = copy_usdc
             fee_usd = compute_fee(fee_notional, params.fee_bps)
@@ -595,28 +727,37 @@ class BacktestEngine:
             opened_at: datetime | None = None
 
             if side == "SELL" and cond_id in open_positions:
-                # Close existing BUY position
-                pos = open_positions.pop(cond_id)
-                entry_price = pos["fill_price"]
-                entry_shares = pos["shares"]
-                opened_at = pos["opened_at"]
-                # Sell at worse (lower) price → gross PnL = shares ×
-                # (sell_price - buy_price).  The SELL-leg fee is then deducted
-                # so the *net* realised PnL (and daily-loss tracking) reflects
-                # the true cost of the round-trip.
-                gross_pnl = min(copy_shares, entry_shares) * (fill_price - entry_price)
+                # B5: close against the FIFO lot list, oldest lots first.
+                # match_fifo_sell mutates the lot list in place (consumed
+                # lots removed / shrunk) and returns the per-lot gross PnL +
+                # the proportional BUY notional returned to capital.
+                lots = open_positions[cond_id]
+                sell_match = match_fifo_sell(lots, copy_shares, fill_price)
+                opened_at = sell_match.oldest_opened_at
+                # Gross PnL = Σ over consumed lots of
+                # (sell_price - lot_buy_price) * matched_qty.  The SELL-leg
+                # fee is then deducted so the *net* realised PnL (and
+                # daily-loss tracking) reflects the true round-trip cost.
+                gross_pnl = sell_match.gross_pnl
                 pnl_usd = gross_pnl - fee_usd
-                # CRIT-1: the *principal returned to capital* is the notional
-                # that was actually committed at BUY time — ``pos["copy_usdc"]``
-                # stored on the open position — NOT the freshly-recomputed
+                # CRIT-1 / B5: the *principal returned to capital* is the sum
+                # of the per-lot proportional BUY notionals that were
+                # actually committed at BUY time — NOT the freshly-recomputed
                 # SELL-side ``copy_usdc`` (= leader SELL notional × ratio).
-                # When the leader's SELL notional ≠ their BUY notional (a
-                # partial close, or simply a different SELL price) the SELL-side
-                # ``copy_usdc`` is the wrong principal and silently mis-states
-                # capital_remaining for the rest of the run.  Return the stored
-                # BUY notional plus this round-trip's net PnL.
-                capital_remaining += float(pos["copy_usdc"]) + pnl_usd
+                # match_fifo_sell already proportions each consumed lot's
+                # notional, so a partial close returns exactly the slice that
+                # was closed; capital_remaining stays exact across layered
+                # partial exits.
+                capital_remaining += sell_match.returned_notional + pnl_usd
+                # B5: a SELL that fully drains every lot leaves an empty
+                # list — prune the key so len(open_positions) stays an exact
+                # open-position count for the max-concurrent gate.
+                if not lots:
+                    del open_positions[cond_id]
                 closed_at = trade.timestamp
+                # Carry the matched share count onto the trade-log entry so
+                # downstream consumers see what the SELL actually closed.
+                copy_shares = sell_match.matched_shares
 
                 # Update daily loss tracking (loss = negative pnl)
                 if pnl_usd < 0.0:
@@ -645,12 +786,18 @@ class BacktestEngine:
                 # PnL is independent of this entry, so there is no double count
                 # (BUY fee here, SELL fee on the SELL entry).
                 pnl_usd = -fee_usd
-                open_positions[cond_id] = {
-                    "shares": copy_shares,
-                    "fill_price": fill_price,
-                    "opened_at": trade.timestamp,
-                    "copy_usdc": copy_usdc,
-                }
+                # B5: every BUY opens its OWN FIFO lot at its own fill price.
+                # Layered partial BUYs on the same condition_id therefore
+                # accumulate as separate lots, each with an independent cost
+                # basis, and a later SELL consumes them oldest-first.
+                open_positions.setdefault(cond_id, []).append(
+                    Lot(
+                        shares=copy_shares,
+                        fill_price=fill_price,
+                        copy_usdc=copy_usdc,
+                        opened_at=trade.timestamp,
+                    )
+                )
 
             entry = {
                 "timestamp": trade.timestamp.isoformat(),
@@ -689,36 +836,48 @@ class BacktestEngine:
         # (0.05, 0.95); a voided/invalid market unwinds at entry (zero MTM).
         last_in_window_price = self._derive_last_known_prices(trade_log)
         mtm_pnl = 0.0
-        for cond_id, pos in open_positions.items():
-            last_price = self._get_mtm_price(cond_id, pos, last_in_window_price, positions_map)
+        for cond_id, lots in open_positions.items():
+            # B5: each still-open lot is MTM'd against ITS OWN cost basis.
+            # The settlement snap (a market-level resolution) and the
+            # last-in-window price are shared across the condition_id, but
+            # the PnL is per-lot because layered lots have different entries.
             resolved, voided = self._resolution_flags(cond_id, positions_map)
-            settle_price = compute_settlement_price(
-                last_price,
-                resolved=resolved,
-                voided=voided,
-                entry_price=pos["fill_price"],
-            )
-            mtm = pos["shares"] * (settle_price - pos["fill_price"])
-            mtm_pnl += mtm
-            trade_log.append(
-                {
-                    "timestamp": datetime.combine(params.end_date, datetime.min.time())
-                    .replace(tzinfo=UTC)
-                    .isoformat(),
-                    "date": str(params.end_date),
-                    "condition_id": cond_id,
-                    "side": "MTM",
-                    "leader_price": pos["fill_price"],
-                    "fill_price": settle_price,
-                    "copy_usdc": pos["copy_usdc"],
-                    "copy_shares": pos["shares"],
-                    "pnl_usd": mtm,
-                    "fee_usd": 0.0,
-                    "opened_at": pos["opened_at"].isoformat() if pos.get("opened_at") else None,
-                    "closed_at": str(params.end_date),
-                    "skipped": False,
-                }
-            )
+            for lot in lots:
+                if lot.shares <= 0.0:
+                    continue
+                last_price = self._get_mtm_price(
+                    cond_id,
+                    {"fill_price": lot.fill_price},
+                    last_in_window_price,
+                    positions_map,
+                )
+                settle_price = compute_settlement_price(
+                    last_price,
+                    resolved=resolved,
+                    voided=voided,
+                    entry_price=lot.fill_price,
+                )
+                mtm = lot.shares * (settle_price - lot.fill_price)
+                mtm_pnl += mtm
+                trade_log.append(
+                    {
+                        "timestamp": datetime.combine(params.end_date, datetime.min.time())
+                        .replace(tzinfo=UTC)
+                        .isoformat(),
+                        "date": str(params.end_date),
+                        "condition_id": cond_id,
+                        "side": "MTM",
+                        "leader_price": lot.fill_price,
+                        "fill_price": settle_price,
+                        "copy_usdc": lot.copy_usdc,
+                        "copy_shares": lot.shares,
+                        "pnl_usd": mtm,
+                        "fee_usd": 0.0,
+                        "opened_at": lot.opened_at.isoformat() if lot.opened_at else None,
+                        "closed_at": str(params.end_date),
+                        "skipped": False,
+                    }
+                )
 
         # ---- 5. Build PnL curve --------------------------------------------
         pnl_curve = self._build_pnl_curve(

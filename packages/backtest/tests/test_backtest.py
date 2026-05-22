@@ -29,11 +29,13 @@ import pytest
 from polyecho.backtest.engine import (
     BacktestEngine,
     BacktestParams,
+    Lot,
     apply_slippage,
     compute_fee,
     compute_max_drawdown,
     compute_settlement_price,
     compute_sharpe,
+    match_fifo_sell,
 )
 from polyecho.backtest.scenarios import run_triple
 from polyecho.shared.datasource import FixtureDataSource
@@ -522,11 +524,34 @@ def _patch_status_recorder(
         *,
         progress: float | None = None,
         result: dict[str, object] | None = None,
+        summary: dict[str, object] | None = None,
     ) -> None:
-        transitions.append({"status": status, "progress": progress, "result": result})
+        # B1: ``summary`` carries the denormalised neutral-scenario stat
+        # columns; recorded alongside the rest of the transition so the
+        # lifecycle tests can assert on it when relevant.
+        transitions.append(
+            {
+                "status": status,
+                "progress": progress,
+                "result": result,
+                "summary": summary,
+            }
+        )
+
+    async def _noop_persist_artifacts(
+        session: object,
+        job_id: object,
+        all_results: dict[str, object],
+        initial_capital_usd: float,
+    ) -> None:
+        # B1: the per-fill ledger write needs a real DB session; the
+        # lifecycle tests run without one, so it is stubbed to a no-op
+        # (it is already best-effort / isolated from the job outcome).
+        return None
 
     monkeypatch.setattr(jobs_mod, "session_scope", _fake_scope)
     monkeypatch.setattr(jobs_mod, "_set_status", _record_set_status)
+    monkeypatch.setattr(jobs_mod, "_persist_backtest_artifacts", _noop_persist_artifacts)
 
 
 @pytest.mark.asyncio
@@ -1479,17 +1504,21 @@ def _e_params(**over: Any) -> BacktestParams:
 
 
 @pytest.mark.asyncio
-async def test_crit1_sell_returns_stored_buy_notional_on_partial_close() -> None:
-    """CRIT-1: a SELL whose leader notional ≠ the BUY notional (partial /
-    different-price close) must return the *stored BUY* principal to capital,
-    not the freshly-recomputed SELL-side copy_usdc.
+async def test_crit1_sell_returns_proportional_lot_notional_on_partial_close() -> None:
+    """CRIT-1 / B5: a SELL that closes only PART of an open FIFO lot must
+    return the *proportional* committed principal of the matched shares to
+    capital — not the freshly-recomputed SELL-side copy_usdc.
 
-    BUY 100 USDC @ 0.50 → 200 shares, capital 1000→900.
-    Leader SELLs only 40 USDC notional @ 0.50 (partial close, 80 shares).
-    gross_pnl = min(80, 200) * (0.50 - 0.50) = 0.
-    Correct capital return = stored BUY notional (100) + 0 = capital back to
-    1000.  The buggy code returned the SELL-side copy_usdc (40), stranding
-    60 USDC of principal.
+    BUY 100 USDC @ 0.50 → 200-share lot, capital 1000→900.
+    Leader SELLs 40 USDC notional @ 0.50 → 80 copy shares (a genuine partial
+    close of the 200-share lot under strict FIFO; B5 no longer whole-closes).
+    The 80 matched shares carry a proportional 80/200 * 100 = 40 USDC of the
+    lot's principal; gross_pnl = 80 * (0.50 - 0.50) = 0 → capital += 40.
+    The residual 120-share lot stays open and is marked-to-market at the
+    flat 0.50 price → 0 MTM PnL.  Net: realised SELL PnL == 0 and
+    total_return == 0 (no slippage, no fee, flat price) with NO principal
+    stranded.  The pre-B5 bug returned the SELL-side copy_usdc (40) by luck
+    here but mis-priced layered lots in general.
     """
     eng = _scripted_engine(
         [
@@ -1501,13 +1530,14 @@ async def test_crit1_sell_returns_stored_buy_notional_on_partial_close() -> None
 
     sells = [e for e in result.trade_log if e.get("side") == "SELL" and not e.get("skipped")]
     assert len(sells) == 1
-    # Round-trip net PnL is exactly 0 (no slippage, no fee, flat price).
+    # Round-trip net PnL on the matched 80 shares is exactly 0.
     assert sells[0]["pnl_usd"] == pytest.approx(0.0, abs=1e-9)
-    # total_return must be ~0 — principal fully restored.  Under the bug the
-    # stranded 60 USDC never returned, but total_return is curve-based so the
-    # decisive check is that the realised SELL PnL is exactly 0 AND no MTM
-    # row exists (position fully closed by the SELL).
-    assert not any(e.get("side") == "MTM" for e in result.trade_log)
+    # B5: a partial-share SELL leaves the residual lot open → exactly one MTM
+    # row (the unsold 120 shares), priced at the flat 0.50 → 0 MTM PnL.
+    mtms = [e for e in result.trade_log if e.get("side") == "MTM"]
+    assert len(mtms) == 1
+    assert mtms[0]["pnl_usd"] == pytest.approx(0.0, abs=1e-9)
+    # total_return is ~0 — realised SELL PnL 0 + MTM 0, no stranded principal.
     assert result.total_return_usd == pytest.approx(0.0, abs=1e-9)
 
 
@@ -1571,14 +1601,20 @@ async def test_imp2_win_rate_excludes_mtm_entries() -> None:
     """IMP-2: win-rate denominator must be SELL-only; MTM (unrealised) rows
     must not dilute/inflate it.
 
-    Scripted: one realised winning round-trip (SELL > BUY) on cond A, plus a
-    standalone BUY on cond B left open → end-of-period MTM row.  win_rate
-    must be 1.0 (1 win / 1 SELL), NOT 0.5 (1 win / {1 SELL + 1 MTM}).
+    Scripted: one realised winning round-trip (SELL > BUY) on cond A that
+    fully closes the FIFO lot, plus a standalone BUY on cond B left open →
+    end-of-period MTM row.  win_rate must be 1.0 (1 win / 1 SELL), NOT 0.5
+    (1 win / {1 SELL + 1 MTM}).
+
+    B5: the cond-A SELL notional (150 USDC @ 0.60 = 250 copy shares) is
+    sized to match the cond-A BUY's 250 shares (100 USDC @ 0.40) exactly so
+    the FIFO lot is fully drained — leaving precisely ONE open position
+    (cond B) and therefore exactly ONE MTM row.
     """
     eng = _scripted_engine(
         [
             _trade("BUY", 0.40, 100.0, cond="0xA", when="2026-03-01T00:00:00+00:00"),
-            _trade("SELL", 0.60, 100.0, cond="0xA", when="2026-03-02T00:00:00+00:00"),
+            _trade("SELL", 0.60, 150.0, cond="0xA", when="2026-03-02T00:00:00+00:00"),
             _trade("BUY", 0.50, 100.0, cond="0xB", when="2026-03-03T00:00:00+00:00"),
         ]
     )
@@ -1587,10 +1623,222 @@ async def test_imp2_win_rate_excludes_mtm_entries() -> None:
     sells = [e for e in result.trade_log if e.get("side") == "SELL"]
     mtms = [e for e in result.trade_log if e.get("side") == "MTM"]
     assert len(sells) == 1
-    assert len(mtms) == 1  # cond B left open → MTM row present
+    assert len(mtms) == 1  # cond A fully closed; only cond B left open
     assert sells[0]["pnl_usd"] > 0.0  # the SELL is a winner
     # 1 winning SELL / 1 SELL == 1.0 — MTM excluded from the denominator.
     assert result.win_rate == pytest.approx(1.0)
+
+
+# --- B5: FIFO lot-level cost basis -----------------------------------------
+
+
+def _dt(s: str) -> datetime:
+    return datetime.fromisoformat(s)
+
+
+def test_b5_match_fifo_sell_consumes_oldest_lot_first() -> None:
+    """B5: match_fifo_sell consumes the OLDEST lot first (strict FIFO).
+
+    Two lots: 100 sh @ 0.30 (older), 100 sh @ 0.50 (newer). A 100-share SELL
+    @ 0.60 must match ENTIRELY against the 0.30 lot → gross = 100*(0.6-0.3)
+    = 30, NOT 100*(0.6-0.5)=10 (which would be LIFO).
+    """
+    lots = [
+        Lot(
+            shares=100.0,
+            fill_price=0.30,
+            copy_usdc=30.0,
+            opened_at=_dt("2026-03-01T00:00:00+00:00"),
+        ),
+        Lot(
+            shares=100.0,
+            fill_price=0.50,
+            copy_usdc=50.0,
+            opened_at=_dt("2026-03-02T00:00:00+00:00"),
+        ),
+    ]
+    m = match_fifo_sell(lots, 100.0, 0.60)
+    assert m.matched_shares == pytest.approx(100.0)
+    assert m.gross_pnl == pytest.approx(30.0)
+    assert m.returned_notional == pytest.approx(30.0)
+    # The older lot is fully drained → only the 0.50 lot remains.
+    assert len(lots) == 1
+    assert lots[0].fill_price == pytest.approx(0.50)
+    assert lots[0].shares == pytest.approx(100.0)
+
+
+def test_b5_match_fifo_sell_spans_multiple_lots() -> None:
+    """B5: a SELL larger than the oldest lot spills into the next lot(s).
+
+    Lots: 100 sh @ 0.30, 100 sh @ 0.50. A 150-share SELL @ 0.60 consumes all
+    100 of the 0.30 lot + 50 of the 0.50 lot:
+      gross = 100*(0.6-0.3) + 50*(0.6-0.5) = 30 + 5 = 35.
+    """
+    lots = [
+        Lot(
+            shares=100.0,
+            fill_price=0.30,
+            copy_usdc=30.0,
+            opened_at=_dt("2026-03-01T00:00:00+00:00"),
+        ),
+        Lot(
+            shares=100.0,
+            fill_price=0.50,
+            copy_usdc=50.0,
+            opened_at=_dt("2026-03-02T00:00:00+00:00"),
+        ),
+    ]
+    m = match_fifo_sell(lots, 150.0, 0.60)
+    assert m.matched_shares == pytest.approx(150.0)
+    assert m.gross_pnl == pytest.approx(35.0)
+    # Returned notional = 30 (whole lot1) + 25 (half of lot2's 50) = 55.
+    assert m.returned_notional == pytest.approx(55.0)
+    # lot1 drained; lot2 has 50 shares + 25 USDC notional left.
+    assert len(lots) == 1
+    assert lots[0].shares == pytest.approx(50.0)
+    assert lots[0].copy_usdc == pytest.approx(25.0)
+
+
+def test_b5_match_fifo_sell_oversized_sell_caps_at_open_quantity() -> None:
+    """B5: a SELL larger than ALL open lots matches only the open quantity
+    (the engine never models a short — the surplus is dropped)."""
+    lots = [
+        Lot(
+            shares=100.0,
+            fill_price=0.40,
+            copy_usdc=40.0,
+            opened_at=_dt("2026-03-01T00:00:00+00:00"),
+        ),
+    ]
+    m = match_fifo_sell(lots, 250.0, 0.60)
+    assert m.matched_shares == pytest.approx(100.0)  # capped, not 250
+    assert m.gross_pnl == pytest.approx(100.0 * (0.60 - 0.40))
+    assert len(lots) == 0  # the single lot is fully drained
+
+
+@pytest.mark.asyncio
+async def test_b5_layered_buys_then_sells_use_per_lot_cost_basis() -> None:
+    """B5 end-to-end: a leader who layers two BUYs at DIFFERENT prices then
+    SELLs in two slices must be priced per-lot, oldest-first.
+
+    BUY1 60 USDC @ 0.30 → 200 sh lot @ 0.30.
+    BUY2 80 USDC @ 0.40 → 200 sh lot @ 0.40.
+    SELL1 90 USDC @ 0.45 → 200 sh: fully consumes lot1 (the 0.30 lot)
+          → realised = 200*(0.45-0.30) = 30.
+    SELL2 90 USDC @ 0.50 → 180 sh: consumes 180 of lot2 (the 0.40 lot)
+          → realised = 180*(0.50-0.40) = 18.
+    A whole-position close keyed on condition_id (the pre-B5 bug) would have
+    mis-priced both slices against a blended/single entry.
+    """
+    eng = _scripted_engine(
+        [
+            _trade("BUY", 0.30, 60.0, when="2026-03-01T00:00:00+00:00"),
+            _trade("BUY", 0.40, 80.0, when="2026-03-02T00:00:00+00:00"),
+            _trade("SELL", 0.45, 90.0, when="2026-03-03T00:00:00+00:00"),
+            _trade("SELL", 0.50, 90.0, when="2026-03-04T00:00:00+00:00"),
+        ]
+    )
+    result = await eng.run(_e_params())
+
+    sells = sorted(
+        (e for e in result.trade_log if e.get("side") == "SELL" and not e.get("skipped")),
+        key=lambda e: str(e["timestamp"]),
+    )
+    assert len(sells) == 2
+    # SELL1 fully consumes the 0.30 lot at 0.45 → 200 * 0.15 = 30.
+    assert sells[0]["pnl_usd"] == pytest.approx(30.0, abs=1e-6)
+    # SELL2 consumes 180 sh of the 0.40 lot at 0.50 → 180 * 0.10 = 18.
+    assert sells[1]["pnl_usd"] == pytest.approx(18.0, abs=1e-6)
+
+
+# --- B1: per-trade ledger + denormalised columns ---------------------------
+
+
+def test_b1_extract_summary_promotes_neutral_stats() -> None:
+    """B1: _extract_summary projects the neutral-scenario stats onto the
+    denormalised column dict; total_return_pct is return_usd / capital."""
+    from polyecho.backtest.jobs import _extract_summary
+
+    all_results = {
+        "0xL": {
+            "neutral": {
+                "params": {"initial_capital_usd": 1000.0},
+                "stats": {
+                    "total_return_usd": 150.0,
+                    "win_rate": 0.6,
+                    "max_drawdown_pct": 12.5,
+                    "sharpe_ratio": 1.8,
+                    "total_fees_usd": 4.0,
+                },
+                "trade_log": [
+                    {"side": "BUY", "skipped": False},
+                    {"side": "SELL", "skipped": False},
+                    {"side": "BUY", "skipped": True},  # skip excluded
+                ],
+            },
+        }
+    }
+    summary = _extract_summary(all_results)
+    assert summary["total_return_pct"] == pytest.approx(15.0)  # 150/1000*100
+    assert summary["win_rate"] == pytest.approx(0.6)
+    assert summary["max_drawdown_pct"] == pytest.approx(12.5)
+    assert summary["sharpe_ratio"] == pytest.approx(1.8)
+    assert summary["total_fees_usd"] == pytest.approx(4.0)
+    assert summary["total_trades"] == 2  # 2 non-skipped fills
+
+
+def test_b1_extract_summary_all_null_when_every_leader_errored() -> None:
+    """B1: a job whose every leader errored yields an all-NULL summary."""
+    from polyecho.backtest.jobs import _extract_summary
+
+    summary = _extract_summary({"0xL": {"error": "boom"}})
+    assert all(v is None for v in summary.values())
+
+
+def test_b1_build_trade_rows_carries_equity_curve() -> None:
+    """B1: _build_trade_rows fans the trade_log into per-fill rows with a
+    monotonic order_index and a running equity_after curve."""
+    from polyecho.backtest.jobs import _build_trade_rows
+
+    job_id = __import__("uuid").uuid4()
+    all_results = {
+        "0xL": {
+            "neutral": {
+                "trade_log": [
+                    {
+                        "side": "BUY",
+                        "condition_id": "0xC",
+                        "pnl_usd": -1.0,
+                        "fill_price": 0.5,
+                        "copy_shares": 100.0,
+                        "fee_usd": 1.0,
+                        "timestamp": "2026-03-01T00:00:00+00:00",
+                        "skipped": False,
+                    },
+                    {
+                        "side": "SELL",
+                        "condition_id": "0xC",
+                        "pnl_usd": 25.0,
+                        "fill_price": 0.6,
+                        "copy_shares": 100.0,
+                        "fee_usd": 0.0,
+                        "closed_at": "2026-03-02T00:00:00+00:00",
+                        "skipped": False,
+                    },
+                    {"side": "BUY", "skipped": True},  # skip excluded
+                ],
+            },
+        }
+    }
+    rows = _build_trade_rows(job_id, all_results, initial_capital_usd=1000.0)
+    assert len(rows) == 2  # the skipped row is dropped
+    assert [r["order_index"] for r in rows] == [0, 1]
+    # equity curve: 1000 - 1 = 999, then 999 + 25 = 1024.
+    assert rows[0]["equity_after"] == pytest.approx(999.0)
+    assert rows[1]["equity_after"] == pytest.approx(1024.0)
+    assert rows[0]["side"] == "BUY" and rows[1]["side"] == "SELL"
+    assert all(r["backtest_job_id"] == job_id for r in rows)
+    assert rows[1]["scenario"] == "neutral"
 
 
 # --- jobs.py R12 fixes -----------------------------------------------------

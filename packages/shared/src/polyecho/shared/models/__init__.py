@@ -15,10 +15,12 @@ Table → PRD purpose summary
 * :class:`CopyTemplate`           — risk / copy-ratio presets (PRD §5.6)
 * :class:`FollowRelation`         — active leader → account → template links (PRD §5.5)
 * :class:`LeaderTrade`            — cached leader on-chain trades (PRD §5.5)
+* :class:`Market`                 — persisted market-metadata cache (C4, deep-dive)
 * :class:`MyTrade`                — your own copy-trades (PRD §5.5)
 * :class:`RedeemJob`              — durable claim-winnings queue (brief §9)
 * :class:`Setting`                — key/value store for runtime config (PRD §5.7)
 * :class:`BacktestJob`            — backtest task queue (PRD §5.4)
+* :class:`BacktestTrade`          — per-fill backtest ledger (B1, deep-dive)
 * :class:`PendingAction`          — dangerous operations awaiting confirmation (PRD §5.7)
 * :class:`PushSubscription`       — Web Push endpoint registrations (PRD §5.8)
 * :class:`Event`                  — system events for the push-sender (PRD §5.8)
@@ -26,6 +28,7 @@ Table → PRD purpose summary
 
 from polyecho.shared.models.account import Account
 from polyecho.shared.models.backtest_job import BacktestJob
+from polyecho.shared.models.backtest_trade import BacktestTrade
 from polyecho.shared.models.candidate_leader import CandidateLeader
 from polyecho.shared.models.candidate_score_history import CandidateScoreHistory
 from polyecho.shared.models.copy_skip import CopySkip
@@ -33,6 +36,7 @@ from polyecho.shared.models.copy_template import CopyTemplate
 from polyecho.shared.models.event import Event
 from polyecho.shared.models.follow_relation import FollowRelation
 from polyecho.shared.models.leader_trade import LeaderTrade
+from polyecho.shared.models.market import Market
 from polyecho.shared.models.my_trade import MyTrade
 from polyecho.shared.models.pending_action import PendingAction
 from polyecho.shared.models.push_subscription import PushSubscription
@@ -42,6 +46,7 @@ from polyecho.shared.models.setting import Setting
 __all__ = [
     "Account",
     "BacktestJob",
+    "BacktestTrade",
     "CandidateLeader",
     "CandidateScoreHistory",
     "CopySkip",
@@ -49,6 +54,7 @@ __all__ = [
     "Event",
     "FollowRelation",
     "LeaderTrade",
+    "Market",
     "MyTrade",
     "PendingAction",
     "PushSubscription",

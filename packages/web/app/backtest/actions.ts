@@ -6,7 +6,7 @@
  */
 
 import { redirect } from "next/navigation";
-import { desc, eq } from "drizzle-orm";
+import { asc, desc, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { backtestJobs } from "@/lib/db/schema";
 
@@ -42,8 +42,45 @@ export interface BacktestJobSummary {
   progress: string;
   /** Number of top-level keys in `result` jsonb (0 if NULL). */
   result_keys: number;
+  /**
+   * B1 (PolyHermes deep-dive): denormalised neutral-scenario summary stats,
+   * read straight off the `backtest_jobs` columns so the list can sort and
+   * filter without unpacking the `result` jsonb. NULL for any job that has
+   * not completed (or whose every leader errored).
+   */
+  total_return_pct: string | null;
+  win_rate: string | null;
+  max_drawdown_pct: string | null;
+  total_trades: number | null;
+  sharpe_ratio: string | null;
+  total_fees_usd: string | null;
   created_at: Date;
 }
+
+/**
+ * B1: columns the `/backtest` list can sort on. `created_at` is the default
+ * (newest first). The five denormalised stat columns are sortable so an
+ * operator can rank jobs by return / risk without opening each one.
+ */
+export type BacktestSortKey =
+  | "created_at"
+  | "total_return_pct"
+  | "win_rate"
+  | "max_drawdown_pct"
+  | "sharpe_ratio"
+  | "total_trades";
+
+const SORTABLE: Record<
+  BacktestSortKey,
+  (typeof backtestJobs)["_"]["columns"][keyof (typeof backtestJobs)["_"]["columns"]]
+> = {
+  created_at: backtestJobs.created_at,
+  total_return_pct: backtestJobs.total_return_pct,
+  win_rate: backtestJobs.win_rate,
+  max_drawdown_pct: backtestJobs.max_drawdown_pct,
+  sharpe_ratio: backtestJobs.sharpe_ratio,
+  total_trades: backtestJobs.total_trades,
+};
 
 /**
  * listBacktestJobs — read-only list query for the `/backtest` page.
@@ -60,6 +97,10 @@ export interface BacktestJobSummary {
 export async function listBacktestJobs(opts?: {
   limit?: number;
   statusFilter?: BacktestJobStatus;
+  /** B1: column to sort by (default created_at). */
+  sortBy?: BacktestSortKey;
+  /** B1: sort direction (default descending). */
+  sortDir?: "asc" | "desc";
 }): Promise<BacktestJobSummary[]> {
   const limit = Math.max(1, Math.min(opts?.limit ?? 50, 200));
 
@@ -73,9 +114,21 @@ export async function listBacktestJobs(opts?: {
       status: backtestJobs.status,
       progress: backtestJobs.progress,
       result: backtestJobs.result,
+      // B1: denormalised neutral-scenario summary columns.
+      total_return_pct: backtestJobs.total_return_pct,
+      win_rate: backtestJobs.win_rate,
+      max_drawdown_pct: backtestJobs.max_drawdown_pct,
+      total_trades: backtestJobs.total_trades,
+      sharpe_ratio: backtestJobs.sharpe_ratio,
+      total_fees_usd: backtestJobs.total_fees_usd,
       created_at: backtestJobs.created_at,
     })
     .from(backtestJobs);
+
+  // B1: resolve the sort column from the allowlist (a public Server Action
+  // must never interpolate an arbitrary column name) — default created_at.
+  const sortCol = SORTABLE[opts?.sortBy ?? "created_at"];
+  const orderBy = opts?.sortDir === "asc" ? asc(sortCol) : desc(sortCol);
 
   // Drizzle's chain typing keeps `where` optional; the SQL builder accepts
   // calling .where(eq(...)) only when a status filter is requested.
@@ -83,7 +136,7 @@ export async function listBacktestJobs(opts?: {
     ? base.where(eq(backtestJobs.status, opts.statusFilter))
     : base
   )
-    .orderBy(desc(backtestJobs.created_at))
+    .orderBy(orderBy)
     .limit(limit);
 
   return rows.map((r) => {
@@ -101,6 +154,12 @@ export async function listBacktestJobs(opts?: {
       status: r.status,
       progress: r.progress,
       result_keys,
+      total_return_pct: r.total_return_pct,
+      win_rate: r.win_rate,
+      max_drawdown_pct: r.max_drawdown_pct,
+      total_trades: r.total_trades,
+      sharpe_ratio: r.sharpe_ratio,
+      total_fees_usd: r.total_fees_usd,
       created_at: r.created_at,
     };
   });

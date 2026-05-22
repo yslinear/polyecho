@@ -25,7 +25,7 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polyecho.backtest._heartbeat import (
@@ -38,7 +38,7 @@ from polyecho.backtest.engine import BacktestEngine, BacktestParams
 from polyecho.backtest.scenarios import run_triple
 from polyecho.shared.datasource import DataSource
 from polyecho.shared.db import session_scope
-from polyecho.shared.models import BacktestJob
+from polyecho.shared.models import BacktestJob, BacktestTrade
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,153 @@ def _build_params(job: BacktestJob, leader_address: str) -> BacktestParams:
     )
 
 
+# ---------------------------------------------------------------------------
+# B1 (PolyHermes deep-dive): denormalised summary + per-fill ledger extraction
+# ---------------------------------------------------------------------------
+
+# Scenario whose stats are promoted onto the backtest_jobs denormalised
+# columns. Neutral is the PRD §5.4 primary baseline (default slippage/delay).
+_PRIMARY_SCENARIO = "neutral"
+
+
+def _num(v: Any) -> float | None:
+    """Coerce a JSON scalar to a finite float, else None (NULL-safe)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and f not in (float("inf"), float("-inf")) else None
+
+
+def _extract_summary(all_results: dict[str, Any]) -> dict[str, Any]:
+    """Pull the denormalised neutral-scenario summary off the job results.
+
+    B1: ``backtest_jobs`` carries six read-optimised columns mirroring the
+    neutral scenario of the *first* leader so the ``/backtest`` list can
+    sort/filter without unpacking the ``result`` JSONB. The JSONB stays the
+    full source of truth; this is an additive projection. A job with no
+    usable neutral result (every leader errored) yields an all-NULL summary.
+
+    ``total_return_pct`` is derived from the engine's USD return over the
+    run's initial capital (the engine reports ``total_return_usd``); the
+    other five stats are read straight off the neutral ``stats`` block.
+    """
+    summary: dict[str, Any] = {
+        "total_return_pct": None,
+        "win_rate": None,
+        "max_drawdown_pct": None,
+        "total_trades": None,
+        "sharpe_ratio": None,
+        "total_fees_usd": None,
+    }
+    for leader_result in all_results.values():
+        if not isinstance(leader_result, dict) or "error" in leader_result:
+            continue
+        scenario = leader_result.get(_PRIMARY_SCENARIO)
+        if not isinstance(scenario, dict):
+            continue
+        stats = scenario.get("stats")
+        if not isinstance(stats, dict):
+            continue
+        trade_log = scenario.get("trade_log")
+        params = scenario.get("params")
+        capital = _num(params.get("initial_capital_usd")) if isinstance(params, dict) else None
+        total_return_usd = _num(stats.get("total_return_usd"))
+        if total_return_usd is not None and capital is not None and capital != 0.0:
+            summary["total_return_pct"] = total_return_usd / capital * 100.0
+        summary["win_rate"] = _num(stats.get("win_rate"))
+        summary["max_drawdown_pct"] = _num(stats.get("max_drawdown_pct"))
+        summary["sharpe_ratio"] = _num(stats.get("sharpe_ratio"))
+        summary["total_fees_usd"] = _num(stats.get("total_fees_usd"))
+        # total_trades = the count of non-skipped fills in the neutral log.
+        if isinstance(trade_log, list):
+            summary["total_trades"] = sum(
+                1 for e in trade_log if isinstance(e, dict) and not e.get("skipped")
+            )
+        # Only the FIRST non-errored leader populates the denormalised
+        # columns (a multi-leader job has no single summary).
+        break
+    return summary
+
+
+def _build_trade_rows(
+    job_id: uuid.UUID,
+    all_results: dict[str, Any],
+    initial_capital_usd: float,
+) -> list[dict[str, Any]]:
+    """Fan every scenario's trade_log out into backtest_trades row dicts.
+
+    B1: one row per non-skipped fill (BUY / SELL / MTM) of every leader x
+    scenario, carrying ``equity_after`` (initial capital + cumulative PnL)
+    so the equity curve is queryable without unpacking ``result`` JSONB.
+    ``order_index`` is the monotonic per-(leader, scenario) fill index.
+    Skipped trade-log entries are excluded — they are not fills.
+    """
+    rows: list[dict[str, Any]] = []
+    for leader, leader_result in all_results.items():
+        if not isinstance(leader_result, dict) or "error" in leader_result:
+            continue
+        for scenario_name, scenario in leader_result.items():
+            if not isinstance(scenario, dict):
+                continue
+            trade_log = scenario.get("trade_log")
+            if not isinstance(trade_log, list):
+                continue
+            equity = float(initial_capital_usd)
+            order_index = 0
+            for entry in trade_log:
+                if not isinstance(entry, dict) or entry.get("skipped"):
+                    continue
+                pnl = _num(entry.get("pnl_usd")) or 0.0
+                equity += pnl
+                ts_raw = entry.get("closed_at") or entry.get("timestamp")
+                ts_val: datetime | None = None
+                if isinstance(ts_raw, str):
+                    try:
+                        ts_val = datetime.fromisoformat(ts_raw)
+                    except ValueError:
+                        ts_val = None
+                rows.append(
+                    {
+                        "backtest_job_id": job_id,
+                        "leader_address": str(leader),
+                        "scenario": str(scenario_name),
+                        "order_index": order_index,
+                        "side": str(entry.get("side") or ""),
+                        "condition_id": entry.get("condition_id") or None,
+                        "shares": _num(entry.get("copy_shares")),
+                        "price": _num(entry.get("fill_price")),
+                        "fee": _num(entry.get("fee_usd")) or 0.0,
+                        "pnl": pnl,
+                        "equity_after": equity,
+                        "ts": ts_val,
+                    }
+                )
+                order_index += 1
+    return rows
+
+
+async def _persist_backtest_artifacts(
+    session: AsyncSession,
+    job_id: uuid.UUID,
+    all_results: dict[str, Any],
+    initial_capital_usd: float,
+) -> None:
+    """B1: write the per-fill ledger rows for one completed job.
+
+    Idempotent on re-run: any prior ``backtest_trades`` rows for this job are
+    deleted first (a stale-recovery re-run of the same job must not
+    accumulate duplicate ledger rows), then the fresh rows are inserted.
+    The denormalised ``backtest_jobs`` columns are written by ``_set_status``
+    alongside the ``result`` JSONB, so this helper only owns the child table.
+    """
+    await session.execute(delete(BacktestTrade).where(BacktestTrade.backtest_job_id == job_id))
+    rows = _build_trade_rows(job_id, all_results, initial_capital_usd)
+    if rows:
+        await session.execute(insert(BacktestTrade), rows)
+    await session.commit()
+
+
 async def _set_status(
     session: AsyncSession,
     job_id: uuid.UUID,
@@ -108,16 +255,21 @@ async def _set_status(
     *,
     progress: float | None = None,
     result: dict[str, Any] | None = None,
+    summary: dict[str, Any] | None = None,
 ) -> None:
-    """Update job status (and optionally progress/result) in place."""
+    """Update job status (and optionally progress/result/summary) in place.
+
+    B1: ``summary`` carries the denormalised neutral-scenario stat columns
+    (total_return_pct, win_rate, ...) written atomically with status/result.
+    """
     values: dict[str, Any] = {"status": status}
     if progress is not None:
         values["progress"] = progress
     if result is not None:
         values["result"] = result
-    await session.execute(
-        update(BacktestJob).where(BacktestJob.id == job_id).values(**values)
-    )
+    if summary is not None:
+        values.update(summary)
+    await session.execute(update(BacktestJob).where(BacktestJob.id == job_id).values(**values))
     await session.commit()
 
 
@@ -174,6 +326,12 @@ async def _process_job(job: BacktestJob, engine: BacktestEngine) -> None:
         for leader_result in all_results.values()
     )
     final_status = "failed" if has_error else "completed"
+    # B1 (PolyHermes deep-dive): derive the denormalised neutral-scenario
+    # summary columns from the just-computed results. Written atomically with
+    # status/result so the /backtest list page can sort/filter on them
+    # without unpacking the result JSONB (which stays the full source of
+    # truth). A failed job (every leader errored) yields an all-NULL summary.
+    summary = _extract_summary(all_results)
     async with session_scope() as session:
         await _set_status(
             session,
@@ -181,6 +339,23 @@ async def _process_job(job: BacktestJob, engine: BacktestEngine) -> None:
             final_status,
             progress=100.0,
             result={"leaders": all_results},
+            summary=summary,
+        )
+    # B1: fan the per-fill trade logs out into the backtest_trades ledger
+    # table (each fill + equity_after curve). Best-effort and isolated from
+    # the job outcome — the job is ALREADY marked completed/failed above, so
+    # a ledger-write failure must NEVER reopen or fail the job. The result
+    # JSONB still carries the full trade_log, so the ledger is a pure
+    # read-optimised mirror.
+    try:
+        async with session_scope() as session:
+            await _persist_backtest_artifacts(
+                session, job_id, all_results, float(job.initial_capital_usd)
+            )
+    except Exception as exc:  # noqa: BLE001 - ledger write is best-effort
+        logger.warning(
+            "jobs.trade_ledger_write_failed",
+            extra={"job_id": str(job_id), "error": type(exc).__name__},
         )
     # Best-effort backtest-duration observability — wrapped so a
     # timing/log failure can NEVER affect the completed job outcome.

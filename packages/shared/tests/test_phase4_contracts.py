@@ -90,9 +90,26 @@ class TestSchemaDeltas:
         cols = _tbl(LeaderTrade).c
         assert "tx_hash" in cols
         assert cols["tx_hash"].nullable is True
-        assert ("leader_address", "tx_hash") in _unique_colsets(
-            _tbl(LeaderTrade)
-        )
+        assert ("leader_address", "tx_hash") in _unique_colsets(_tbl(LeaderTrade))
+
+    def test_leader_trades_status_column_a3(self) -> None:
+        """A3 (PolyHermes deep-dive): the durable copy-attempt outcome
+        slot — a NULLable ``status`` text column + ``processed_at``, plus
+        the ``ck_leader_trades_status`` CHECK, all on the ORM model."""
+        cols = _tbl(LeaderTrade).c
+        assert "status" in cols
+        assert cols["status"].nullable is True
+        assert cols["status"].type.__class__.__name__ == "Text"
+        assert "processed_at" in cols
+        assert cols["processed_at"].nullable is True
+        assert cols["processed_at"].type.__class__.__name__ == "DateTime"
+        # 3-way mirror of the SQL ck_leader_trades_status.
+        check_names = {
+            con.name
+            for con in _tbl(LeaderTrade).constraints
+            if con.__class__.__name__ == "CheckConstraint"
+        }
+        assert "ck_leader_trades_status" in check_names
 
     def test_follow_relations_last_seen_ts(self) -> None:
         col = _tbl(FollowRelation).c["last_seen_ts"]
@@ -209,9 +226,7 @@ class TestResolveWallet:
 
     def test_magic_prefers_explicit_operator_funder(self) -> None:
         op = "0x00000000000000000000000000000000CAfeBabe"
-        b = run(
-            resolve_wallet(_FakeAccount(mode=WalletMode.MAGIC, funder=op))
-        )
+        b = run(resolve_wallet(_FakeAccount(mode=WalletMode.MAGIC, funder=op)))
         assert b.funder == op.lower()
         assert b.derived is False  # operator-confirmed, not derived
 
@@ -238,11 +253,7 @@ class TestResolveWallet:
 
     def test_poly1271_requires_explicit_funder(self) -> None:
         op = "0x000000000000000000000000000000000000F00D"
-        b = run(
-            resolve_wallet(
-                _FakeAccount(mode=WalletMode.POLY_1271, funder=op)
-            )
-        )
+        b = run(resolve_wallet(_FakeAccount(mode=WalletMode.POLY_1271, funder=op)))
         assert b.signature_type == 3
         assert b.funder == op.lower()
         assert b.derived is False
@@ -346,22 +357,13 @@ class TestConstants:
     def test_brief_section9_addresses(self) -> None:
         assert constants.CTF_ADDRESS == "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
         assert constants.PUSD_ADDRESS == "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
-        assert (
-            constants.WRAPPED_COLLATERAL_ADDRESS
-            == "0x3A3BD7bb9528E159577F7C2e685CC81A765002E2"
-        )
-        assert (
-            constants.MAGIC_PROXY_FACTORY
-            == "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"
-        )
+        assert constants.WRAPPED_COLLATERAL_ADDRESS == "0x3A3BD7bb9528E159577F7C2e685CC81A765002E2"
+        assert constants.MAGIC_PROXY_FACTORY == "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"
         assert (
             constants.MAGIC_PROXY_INIT_CODE_HASH
             == "0xd21df8dc65880a8606f09fe0ce3df9b8869287ab0b058be05aa9e8af6330a00b"
         )
-        assert (
-            constants.SAFE_PROXY_FACTORY
-            == "0xaacFeEa03eb1561C4e67d661e40682Bd20E3541b"
-        )
+        assert constants.SAFE_PROXY_FACTORY == "0xaacFeEa03eb1561C4e67d661e40682Bd20E3541b"
         assert constants.POLYGON_CHAIN_ID == 137
         assert constants.MAX_UINT256 == (1 << 256) - 1
         assert constants.PARENT_COLLECTION_ID == "0x" + "0" * 64
@@ -373,10 +375,7 @@ class TestConstants:
 class TestRedeem:
     def test_collateral_for_neg_risk_vs_normal(self) -> None:
         assert collateral_for(is_neg_risk=False) == constants.PUSD_ADDRESS
-        assert (
-            collateral_for(is_neg_risk=True)
-            == constants.WRAPPED_COLLATERAL_ADDRESS
-        )
+        assert collateral_for(is_neg_risk=True) == constants.WRAPPED_COLLATERAL_ADDRESS
 
     def test_index_set_is_power_of_two(self) -> None:
         assert index_set_for(0) == 1
@@ -394,9 +393,7 @@ class TestRedeem:
             index_set=2,
             is_neg_risk=True,
         )
-        binding = WalletBinding(
-            signature_type=1, funder="0xabc", wallet_mode="magic", derived=True
-        )
+        binding = WalletBinding(signature_type=1, funder="0xabc", wallet_mode="magic", derived=True)
         client = BaseRedeemClient()
         # The base ``_do_*`` hooks raise NotImplementedError (subclass
         # contract) — we assert the dispatch reaches them rather than the
@@ -412,9 +409,7 @@ class TestRedeem:
 # ---------------------------------------------------------------------------
 class TestFrozenContracts:
     def test_decision_skip_and_copy(self) -> None:
-        skip = Decision(
-            outcome=DecisionOutcome.SKIP, skip_reason=SkipReason.DUP
-        )
+        skip = Decision(outcome=DecisionOutcome.SKIP, skip_reason=SkipReason.DUP)
         assert skip.outcome is DecisionOutcome.SKIP
         copy = Decision(
             outcome=DecisionOutcome.COPY,

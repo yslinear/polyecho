@@ -41,6 +41,7 @@ from polyecho.core.wiring import (
     make_cursor_writer,
     make_global_pause_writer,
     make_heartbeat_writer,
+    make_trade_recorder,
     run_supervised,
 )
 from polyecho.shared.config import get_settings
@@ -82,6 +83,14 @@ async def main(argv: list[str] | None = None) -> int:
         follows=follows,
         heartbeat_writer=make_heartbeat_writer(),
         cursor_writer=make_cursor_writer(),
+        # A3 (PolyHermes deep-dive): the trade recorder persists a durable
+        # ``leader_trades`` row for EVERY copy attempt — placed
+        # (status=success) AND failed-to-place (status=failed) — keyed
+        # idempotently on the existing (leader_address, tx_hash) UNIQUE.
+        # This was injectable-and-not-injected (dormant): without it a
+        # failed copy left no durable "do not retry" marker. Best-effort
+        # (a write failure is logged, never crashes the loop).
+        trade_recorder=make_trade_recorder(),
         # C5: the geo-restriction emergency-stop writes the documented
         # ``global_paused`` soft-pause row when a CLOB call reports
         # trading is region-blocked.  Best-effort (the in-proc latch

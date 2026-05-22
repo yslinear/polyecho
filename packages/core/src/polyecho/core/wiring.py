@@ -168,6 +168,117 @@ def make_global_pause_writer() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# 1c. TradeRecorder — persist a durable ``leader_trades`` row per copy
+#     attempt (A3, PolyHermes deep-dive — the processed_trade.status slot).
+# ---------------------------------------------------------------------------
+def make_trade_recorder() -> Any:
+    """Build a real ``TradeRecorder`` (A3 — durable per-trade copy record).
+
+    The ``leader_trades`` table + :class:`LeaderTrade` ORM model existed
+    but were NEVER written: a copy attempt — success OR failure — left no
+    durable per-trade record, so only the in-process LRU + the
+    ``follow_relations.last_seen_ts`` cursor guarded against a re-attempt
+    of a *failed* trade.  This factory closes that gap (A3 in
+    ``docs/reference/polyhermes-deep-dive.md``): the returned
+    ``async (evaluated, info) -> None`` hook is invoked by
+    :meth:`TraderCore._record_trade` on BOTH the placed and the
+    failed-attempt path and upserts one ``leader_trades`` row carrying the
+    copy-attempt ``status`` (``"success"`` / ``"failed"``).
+
+    Idempotency — the write is an ``ON CONFLICT DO UPDATE`` keyed on the
+    existing ``(leader_address, tx_hash)`` UNIQUE (``uq_leader_trades_leader_tx``),
+    the SAME dedup anchor detection.py documents.  A WS/poll redelivery of
+    the same tx therefore never double-inserts; a row already marked
+    ``status="failed"`` is the durable "do not retry" marker PolyHermes'
+    ``processed_trade`` has and PolyEcho previously lacked.  We do NOT
+    change the dedup key.
+
+    Best-effort: any DB error is logged and swallowed — a trade-record
+    write must NEVER crash or stall the trading loop.  The durable record
+    is for forensics + the cross-restart dup guard; the in-proc LRU + the
+    persisted reconcile cursor still bound re-attempts even if this write
+    transiently fails.
+    """
+
+    async def _write(evaluated: Any, info: dict[str, Any]) -> None:
+        try:
+            from datetime import UTC, datetime
+            from decimal import Decimal, InvalidOperation
+
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+            from polyecho.shared.db import session_scope
+            from polyecho.shared.models import LeaderTrade
+
+            leader_address = str(getattr(evaluated, "leader_address", "")).lower()
+            tx_hash = str(info.get("tx_hash") or getattr(evaluated, "tx_hash", "") or "")
+            if not leader_address or not tx_hash:
+                logger.warning(
+                    "leader_trade_record_skipped_missing_key",
+                    extra={"leader": leader_address, "tx_hash": tx_hash},
+                )
+                return
+
+            status = info.get("status")
+            if status not in ("success", "failed"):
+                # Defence-in-depth: never write a value the CHECK rejects.
+                status = "failed"
+
+            def _num(key: str) -> Decimal | None:
+                raw = info.get(key)
+                if raw is None:
+                    return None
+                try:
+                    return Decimal(str(raw))
+                except (InvalidOperation, ValueError, TypeError):
+                    return None
+
+            now = datetime.now(tz=UTC)
+            values: dict[str, Any] = {
+                # trade_id has its own UNIQUE; the detected-trade tx_hash
+                # IS the fixture/live trade id (detection.py sets both
+                # equal), so reuse it — keeps the row self-consistent.
+                "trade_id": tx_hash,
+                "leader_address": leader_address,
+                "condition_id": str(getattr(evaluated, "condition_id", "") or "") or None,
+                "market_id": str(getattr(evaluated, "condition_id", "") or "") or None,
+                "tx_hash": tx_hash,
+                "side": info.get("side"),
+                "size": _num("size"),
+                "price": _num("price"),
+                "timestamp": now,
+                "status": status,
+                "processed_at": now,
+                "raw": dict(getattr(evaluated, "raw", {}) or {}),
+            }
+            # Idempotent on the EXISTING (leader_address, tx_hash) UNIQUE —
+            # a redelivery updates the outcome in place, never duplicates.
+            stmt = (
+                pg_insert(LeaderTrade)
+                .values(**values)
+                .on_conflict_do_update(
+                    constraint="uq_leader_trades_leader_tx",
+                    set_={
+                        "status": status,
+                        "processed_at": now,
+                        "side": values["side"],
+                        "size": values["size"],
+                        "price": values["price"],
+                    },
+                )
+            )
+            async with session_scope() as session:
+                await session.execute(stmt)
+        except Exception as exc:  # noqa: BLE001 - best-effort durable record
+            logger.warning(
+                "leader_trade_record_write_failed_continuing",
+                extra={"error": str(exc)},
+            )
+
+    return _write
+
+
+# ---------------------------------------------------------------------------
 # 2. CursorWriter — persist ``follow_relations.last_seen_ts``
 # ---------------------------------------------------------------------------
 def make_cursor_writer() -> Any:
@@ -697,6 +808,7 @@ __all__ = [
     "make_cursor_writer",
     "make_global_pause_writer",
     "make_heartbeat_writer",
+    "make_trade_recorder",
     "run_supervised",
     "startup_reconcile",
 ]

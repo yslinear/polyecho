@@ -103,8 +103,27 @@ CREATE TABLE IF NOT EXISTS copy_templates (
   daily_loss_limit_usd    NUMERIC(12,2),
   category_whitelist      TEXT[],
   exclude_short_markets   BOOLEAN     DEFAULT false,
-  use_fok_orders          BOOLEAN     DEFAULT true
+  use_fok_orders          BOOLEAN     DEFAULT true,
+  -- Tri-mode keyword filter + upper market-end bound (PolyHermes deep-dive
+  -- B4). keyword_filter_mode is disabled | whitelist | blacklist; keywords
+  -- is the operator term list matched against a market title/category.
+  -- market_max_end_seconds mirrors the existing lower bound as a ceiling.
+  keyword_filter_mode     TEXT        DEFAULT 'disabled',
+  keywords                TEXT[],
+  market_max_end_seconds  INTEGER
 );
+
+-- Idempotent forward-fill for DBs created before the B4 keyword-filter /
+-- upper-end-bound columns existed. CREATE TABLE IF NOT EXISTS above is a
+-- no-op on a warm DB, so these guarded ADD COLUMNs bring an already-existing
+-- copy_templates up to the current shape — same warm-volume-safe pattern as
+-- the redeem_jobs.attempts / leader_trades.status / backtest_jobs blocks.
+ALTER TABLE copy_templates
+  ADD COLUMN IF NOT EXISTS keyword_filter_mode    TEXT DEFAULT 'disabled';
+ALTER TABLE copy_templates
+  ADD COLUMN IF NOT EXISTS keywords               TEXT[];
+ALTER TABLE copy_templates
+  ADD COLUMN IF NOT EXISTS market_max_end_seconds INTEGER;
 
 -- ---------------------------------------------------------------------------
 -- follow_relations — leader → account → template (PRD §6.1)
@@ -140,7 +159,98 @@ CREATE TABLE IF NOT EXISTS leader_trades (
   -- across the WS-user-channel path and the on-chain RPC cross-check.
   tx_hash        TEXT,
   raw            JSONB,
-  CONSTRAINT uq_leader_trades_leader_tx UNIQUE (leader_address, tx_hash)
+  -- A3 (PolyHermes deep-dive): durable per-trade copy-attempt outcome
+  -- (PolyHermes' processed_trade.status slot). 'success' = the copy order
+  -- was placed; 'failed' = a copy attempt was made but did not place
+  -- (retries exhausted / executor reject). Persisted on BOTH paths so a
+  -- WS/poll redelivery of a known-bad trade is not re-attempted in a loop.
+  -- NULLable: a leader-trade row written by a future pure-cache path (no
+  -- copy attempt) legitimately has no outcome yet.
+  status         TEXT,
+  -- When the copy attempt outcome (success/failed) was recorded.
+  processed_at   TIMESTAMPTZ,
+  CONSTRAINT uq_leader_trades_leader_tx UNIQUE (leader_address, tx_hash),
+  -- Defence-in-depth: only the two known outcomes (or NULL) are storable.
+  CONSTRAINT ck_leader_trades_status
+    CHECK (status IS NULL OR status IN ('success', 'failed'))
+);
+
+-- Idempotent forward-fill for DBs created before the A3 status /
+-- processed_at columns + the status CHECK existed. CREATE TABLE IF NOT
+-- EXISTS above is a no-op on a warm DB, so these guarded statements bring
+-- an already-existing leader_trades up to the current shape. Each leg is
+-- individually idempotent (ADD COLUMN IF NOT EXISTS / pg_constraint guard)
+-- so a warm-volume redeploy never fails.
+DO $$
+BEGIN
+  -- status column add (NULLable — no backfill value; pre-A3 rows have no
+  -- recorded copy-attempt outcome).
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'leader_trades'
+      AND column_name = 'status'
+  ) THEN
+    ALTER TABLE leader_trades ADD COLUMN status TEXT;
+  END IF;
+
+  -- processed_at column add (NULLable).
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'leader_trades'
+      AND column_name = 'processed_at'
+  ) THEN
+    ALTER TABLE leader_trades ADD COLUMN processed_at TIMESTAMPTZ;
+  END IF;
+
+  -- status CHECK add (guarded by pg_constraint so re-apply is a no-op).
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'ck_leader_trades_status'
+      AND conrelid = 'public.leader_trades'::regclass
+  ) THEN
+    ALTER TABLE leader_trades
+      ADD CONSTRAINT ck_leader_trades_status
+      CHECK (status IS NULL OR status IN ('success', 'failed'));
+  END IF;
+END
+$$;
+
+-- ---------------------------------------------------------------------------
+-- markets — persisted market-metadata cache (C4, PolyHermes deep-dive)
+-- LiveDataSource hits the data-api / Gamma every cycle for the same market
+-- metadata with no persistence; this table backs a cache -> DB -> remote
+-- read layering. A RESOLVED market (is_resolved=true) is immutable — its
+-- row is served forever with no remote re-fetch; an unresolved market uses
+-- a short freshness window keyed on updated_at. condition_id is the natural
+-- PK (THE market identifier shared across the activity/positions APIs).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS markets (
+  condition_id   TEXT        NOT NULL PRIMARY KEY,
+  -- Polymarket internal market id (gamma "id" / data-api "market_id").
+  market_id      TEXT,
+  question       TEXT,
+  slug           TEXT,
+  -- NegRisk flag — selects the NegRisk Exchange contract for orders.
+  neg_risk       BOOLEAN,
+  -- CLOB price tick size (e.g. 0.01); TEXT to preserve the exact decimal
+  -- string the API returns.
+  tick_size      TEXT,
+  end_date       TIMESTAMPTZ,
+  -- Outcome token list (token_id / outcome / price dicts).
+  outcomes       JSONB,
+  -- Resolved/settled flag — once true the row is immutable (cached forever,
+  -- no remote re-fetch).
+  is_resolved    BOOLEAN     NOT NULL DEFAULT false,
+  -- Settled winning-outcome price (0/1 for binary); NULL until resolved.
+  settled_price  NUMERIC(10,6),
+  raw            JSONB,
+  -- When this row was first cached.
+  cached_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- When this row was last refreshed from a remote read — the unresolved
+  -- freshness window is measured against this.
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- ---------------------------------------------------------------------------
@@ -191,7 +301,68 @@ CREATE TABLE IF NOT EXISTS backtest_jobs (
   status                   TEXT        NOT NULL DEFAULT 'pending',
   progress                 NUMERIC(5,2) NOT NULL DEFAULT 0,
   result                   JSONB,
+  -- B1 (PolyHermes deep-dive): denormalised neutral-scenario summary stats,
+  -- promoted out of the result JSONB so the /backtest list page can
+  -- sort/filter without unpacking a multi-megabyte body. All NULLable: a
+  -- pending/running/failed job has no summary yet, and the JSONB result
+  -- stays the source of truth (these are an additive read-optimised mirror).
+  total_return_pct         NUMERIC(14,4),
+  win_rate                 NUMERIC(6,4),
+  max_drawdown_pct         NUMERIC(8,4),
+  total_trades             INTEGER,
+  sharpe_ratio             NUMERIC(10,4),
+  total_fees_usd           NUMERIC(14,4),
   created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Idempotent forward-fill for DBs created before the B1 denormalised
+-- summary columns existed. CREATE TABLE IF NOT EXISTS above is a no-op on a
+-- warm DB, so these guarded ADD COLUMNs bring an already-existing
+-- backtest_jobs up to the current shape. Each is individually idempotent
+-- (ADD COLUMN IF NOT EXISTS) so a warm-volume redeploy never fails — same
+-- pattern as the redeem_jobs.attempts / leader_trades.status blocks above.
+ALTER TABLE backtest_jobs
+  ADD COLUMN IF NOT EXISTS total_return_pct   NUMERIC(14,4);
+ALTER TABLE backtest_jobs
+  ADD COLUMN IF NOT EXISTS win_rate           NUMERIC(6,4);
+ALTER TABLE backtest_jobs
+  ADD COLUMN IF NOT EXISTS max_drawdown_pct   NUMERIC(8,4);
+ALTER TABLE backtest_jobs
+  ADD COLUMN IF NOT EXISTS total_trades       INTEGER;
+ALTER TABLE backtest_jobs
+  ADD COLUMN IF NOT EXISTS sharpe_ratio       NUMERIC(10,4);
+ALTER TABLE backtest_jobs
+  ADD COLUMN IF NOT EXISTS total_fees_usd     NUMERIC(14,4);
+
+-- ---------------------------------------------------------------------------
+-- backtest_trades — per-fill ledger for a backtest job (B1, PolyHermes
+-- deep-dive). One row per executed fill (BUY / SELL / MTM) of the neutral or
+-- any other scenario, carrying the equity curve (equity_after) so the
+-- /backtest detail + list pages can render/sort without unpacking the
+-- result JSONB. PolyHermes' backtest_trade.balance_after equivalent. The
+-- result JSONB still carries the full trade_log (additive, unchanged).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS backtest_trades (
+  id               BIGINT      NOT NULL GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  backtest_job_id  UUID        NOT NULL REFERENCES backtest_jobs(id),
+  -- Which leader + scenario this fill belongs to (a job runs N leaders ×
+  -- up to 3 scenarios). scenario ∈ optimistic | neutral | pessimistic.
+  leader_address   TEXT        NOT NULL,
+  scenario         TEXT        NOT NULL,
+  -- Monotonic per-(job,leader,scenario) fill index — preserves trade_log
+  -- order for the equity curve without depending on timestamp ties.
+  order_index      INTEGER     NOT NULL,
+  -- BUY | SELL | MTM (mark-to-market settlement row).
+  side             TEXT        NOT NULL,
+  condition_id     TEXT,
+  shares           NUMERIC(20,6),
+  price            NUMERIC(10,6),
+  fee              NUMERIC(14,4) NOT NULL DEFAULT 0,
+  pnl              NUMERIC(14,4) NOT NULL DEFAULT 0,
+  -- Equity (initial_capital + cumulative PnL) AFTER this fill — the curve.
+  equity_after     NUMERIC(16,4),
+  ts               TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- ---------------------------------------------------------------------------
@@ -373,3 +544,14 @@ CREATE INDEX IF NOT EXISTS idx_redeem_jobs_status
 -- copy_skips: dashboard/CLI queries recent skips chronologically (brief §7)
 CREATE INDEX IF NOT EXISTS idx_copy_skips_created_at
   ON copy_skips (created_at);
+
+-- backtest_trades: the detail page loads every fill for one job (B1)
+CREATE INDEX IF NOT EXISTS idx_backtest_trades_job
+  ON backtest_trades (backtest_job_id);
+
+-- markets: the cache layer's opportunistic-refresh sweep selects unresolved
+-- rows by staleness (C4); a partial index keeps it to the live (unresolved)
+-- subset since resolved rows never need re-fetching.
+CREATE INDEX IF NOT EXISTS idx_markets_unresolved_updated_at
+  ON markets (updated_at)
+  WHERE is_resolved = false;

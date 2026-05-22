@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -173,9 +173,7 @@ async def test_evaluator_fixed_size_sizing() -> None:
 
 @pytest.mark.asyncio
 async def test_evaluator_below_min_size_skips() -> None:
-    ev = TraderCopyEvaluator(
-        template_for=lambda a, ldr: _tpl(copy_ratio=Decimal("0.001"))
-    )
+    ev = TraderCopyEvaluator(template_for=lambda a, ldr: _tpl(copy_ratio=Decimal("0.001")))
     out = await ev.evaluate_copy(
         leader_address=LEADER,
         tx_hash="0x1",
@@ -189,9 +187,7 @@ async def test_evaluator_below_min_size_skips() -> None:
 
 @pytest.mark.asyncio
 async def test_evaluator_not_following_skips() -> None:
-    ev = TraderCopyEvaluator(
-        template_for=lambda a, ldr: _tpl(), is_following=lambda a, ldr: False
-    )
+    ev = TraderCopyEvaluator(template_for=lambda a, ldr: _tpl(), is_following=lambda a, ldr: False)
     out = await ev.evaluate_copy(
         leader_address=LEADER,
         tx_hash="0x1",
@@ -205,9 +201,7 @@ async def test_evaluator_not_following_skips() -> None:
 
 @pytest.mark.asyncio
 async def test_evaluator_keyword_filter_skips() -> None:
-    ev = TraderCopyEvaluator(
-        template_for=lambda a, ldr: _tpl(category_whitelist=("Politics",))
-    )
+    ev = TraderCopyEvaluator(template_for=lambda a, ldr: _tpl(category_whitelist=("Politics",)))
     out = await ev.evaluate_copy(
         leader_address=LEADER,
         tx_hash="0x1",
@@ -233,6 +227,108 @@ async def test_evaluator_price_band_skips() -> None:
         trade=_trade(price=0.05),
     )
     assert out.decision.skip_reason is SkipReason.FILTER_PRICE_BAND
+
+
+# ---------------------------------------------------------------------------
+# Tri-mode keyword filter + upper market-end bound (PolyHermes deep-dive B4)
+# ---------------------------------------------------------------------------
+
+
+async def _eval_with(tpl: TemplateConfig, **trade_kw: object) -> EvaluatedCopy:
+    """Run the evaluator with a fixed template and a (kwarg-overridable) trade."""
+    ev = TraderCopyEvaluator(template_for=lambda a, ldr: tpl)
+    return await ev.evaluate_copy(
+        leader_address=LEADER,
+        tx_hash="0x1",
+        account_id=ACCT,
+        condition_id="c",
+        binding=BINDING,
+        trade=_trade(**trade_kw),
+    )
+
+
+@pytest.mark.asyncio
+async def test_keyword_filter_disabled_default_does_no_gating() -> None:
+    # A default template (disabled, no terms) copies regardless of title —
+    # existing templates must behave exactly as before B4.
+    tpl = _tpl()
+    assert tpl.keyword_filter_mode == "disabled"
+    out = await _eval_with(tpl, title="Crypto market")
+    assert out.decision.outcome is DecisionOutcome.COPY
+
+
+@pytest.mark.asyncio
+async def test_keyword_filter_whitelist_copies_only_on_match() -> None:
+    tpl = _tpl(keyword_filter_mode="whitelist", keywords=("Fed", "rate"))
+    # Match -> copy.
+    hit = await _eval_with(tpl, title="Fed June rate decision")
+    assert hit.decision.outcome is DecisionOutcome.COPY
+    # No match -> skip with FILTER_KEYWORD.
+    miss = await _eval_with(tpl, title="Premier League winner")
+    assert miss.decision.skip_reason is SkipReason.FILTER_KEYWORD
+
+
+@pytest.mark.asyncio
+async def test_keyword_filter_blacklist_skips_on_match() -> None:
+    tpl = _tpl(keyword_filter_mode="blacklist", keywords=("sports", "NBA"))
+    # Match -> skip.
+    hit = await _eval_with(tpl, title="NBA Finals game 7")
+    assert hit.decision.skip_reason is SkipReason.FILTER_KEYWORD
+    # No match -> copy.
+    miss = await _eval_with(tpl, title="Fed rate decision")
+    assert miss.decision.outcome is DecisionOutcome.COPY
+
+
+@pytest.mark.asyncio
+async def test_keyword_filter_empty_terms_is_inert() -> None:
+    # whitelist mode with no terms must not block everything (inert).
+    tpl = _tpl(keyword_filter_mode="whitelist", keywords=())
+    out = await _eval_with(tpl, title="anything at all")
+    assert out.decision.outcome is DecisionOutcome.COPY
+
+
+@pytest.mark.asyncio
+async def test_market_max_end_bound_skips_far_out_market() -> None:
+    far = datetime.now(tz=UTC) + timedelta(days=400)
+    near = datetime.now(tz=UTC) + timedelta(days=3)
+    # 30-day ceiling: a 400-day-out market is skipped, a 3-day one copies.
+    tpl = _tpl(market_max_end_seconds=30 * 24 * 3600)
+    ev_far = TraderCopyEvaluator(template_for=lambda a, ldr: tpl, market_end_for=lambda c: far)
+    out_far = await ev_far.evaluate_copy(
+        leader_address=LEADER,
+        tx_hash="0x1",
+        account_id=ACCT,
+        condition_id="c",
+        binding=BINDING,
+        trade=_trade(),
+    )
+    assert out_far.decision.skip_reason is SkipReason.FILTER_MARKET_END
+    ev_near = TraderCopyEvaluator(template_for=lambda a, ldr: tpl, market_end_for=lambda c: near)
+    out_near = await ev_near.evaluate_copy(
+        leader_address=LEADER,
+        tx_hash="0x1",
+        account_id=ACCT,
+        condition_id="c",
+        binding=BINDING,
+        trade=_trade(),
+    )
+    assert out_near.decision.outcome is DecisionOutcome.COPY
+
+
+@pytest.mark.asyncio
+async def test_market_max_end_bound_zero_disables() -> None:
+    far = datetime.now(tz=UTC) + timedelta(days=400)
+    tpl = _tpl()  # market_max_end_seconds defaults to None -> disabled
+    ev = TraderCopyEvaluator(template_for=lambda a, ldr: tpl, market_end_for=lambda c: far)
+    out = await ev.evaluate_copy(
+        leader_address=LEADER,
+        tx_hash="0x1",
+        account_id=ACCT,
+        condition_id="c",
+        binding=BINDING,
+        trade=_trade(),
+    )
+    assert out.decision.outcome is DecisionOutcome.COPY
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +388,7 @@ async def test_risk_fail_closed_on_orderbook_error() -> None:
     async def book_boom(_tid: str) -> dict[str, object]:
         raise RuntimeError("book unavailable")
 
-    gate = LayeredRiskGate(
-        context_for=lambda e: _ctx(_tpl()), orderbook_for=book_boom
-    )
+    gate = LayeredRiskGate(context_for=lambda e: _ctx(_tpl()), orderbook_for=book_boom)
     res = await gate.check(_eval(_copy_decision()))
     assert res.passed is False
     assert res.skip_reason is SkipReason.DATA_UNAVAILABLE
@@ -316,9 +410,7 @@ async def test_risk_not_following_gate() -> None:
 
 @pytest.mark.asyncio
 async def test_risk_keyword_gate() -> None:
-    gate = LayeredRiskGate(
-        context_for=lambda e: _ctx(_tpl(category_whitelist=("Sports",)))
-    )
+    gate = LayeredRiskGate(context_for=lambda e: _ctx(_tpl(category_whitelist=("Sports",))))
     res = await gate.check(_eval(_copy_decision(), raw={"title": "Politics"}))
     assert res.skip_reason is SkipReason.FILTER_KEYWORD
 
@@ -332,9 +424,7 @@ async def test_risk_market_end_gate() -> None:
 
 @pytest.mark.asyncio
 async def test_risk_price_band_gate() -> None:
-    gate = LayeredRiskGate(
-        context_for=lambda e: _ctx(_tpl(min_price=Decimal("0.6")))
-    )
+    gate = LayeredRiskGate(context_for=lambda e: _ctx(_tpl(min_price=Decimal("0.6"))))
     res = await gate.check(_eval(_copy_decision(price=Decimal("0.5"))))
     assert res.skip_reason is SkipReason.FILTER_PRICE_BAND
 
@@ -378,9 +468,7 @@ async def test_risk_depth_gate() -> None:
 @pytest.mark.asyncio
 async def test_risk_position_value_normalize_then_pass() -> None:
     # max_position 5 USD @ price 0.5 ⇒ 10 shares cap; request 100 ⇒ normalized.
-    gate = LayeredRiskGate(
-        context_for=lambda e: _ctx(_tpl(max_position_usd=Decimal("5")))
-    )
+    gate = LayeredRiskGate(context_for=lambda e: _ctx(_tpl(max_position_usd=Decimal("5"))))
     res = await gate.check(_eval(_copy_decision(size=Decimal("100"))))
     assert res.passed is True
     assert res.adjusted_size == Decimal("10.000000")
@@ -388,11 +476,7 @@ async def test_risk_position_value_normalize_then_pass() -> None:
 
 @pytest.mark.asyncio
 async def test_risk_position_value_infeasible_skips() -> None:
-    gate = LayeredRiskGate(
-        context_for=lambda e: _ctx(
-            _tpl(max_position_usd=Decimal("0.10"))
-        )
-    )
+    gate = LayeredRiskGate(context_for=lambda e: _ctx(_tpl(max_position_usd=Decimal("0.10"))))
     res = await gate.check(_eval(_copy_decision(size=Decimal("100"))))
     assert res.skip_reason is SkipReason.POSITION_CAP
 
@@ -400,9 +484,7 @@ async def test_risk_position_value_infeasible_skips() -> None:
 @pytest.mark.asyncio
 async def test_risk_daily_order_cap_gate() -> None:
     gate = LayeredRiskGate(
-        context_for=lambda e: _ctx(
-            _tpl(daily_order_cap=20), daily_order_count=20
-        )
+        context_for=lambda e: _ctx(_tpl(daily_order_cap=20), daily_order_count=20)
     )
     res = await gate.check(_eval(_copy_decision()))
     assert res.skip_reason is SkipReason.DAILY_ORDER_CAP
@@ -454,7 +536,10 @@ async def test_improvement1_n_confirmation_guard() -> None:
         ]
     )
     chain = ChainCrossCheckListener(
-        [LEADER], q, datasource=ds, confirmations=2  # type: ignore[arg-type]
+        [LEADER],
+        q,
+        datasource=ds,  # type: ignore[arg-type]
+        confirmations=2,
     )
     assert await chain.run_once() == 0  # 1st sighting < 2 confirmations
     assert q.empty()
@@ -494,9 +579,7 @@ async def test_improvement3_portfolio_cap() -> None:
 async def test_improvement4_position_count_cap_kept() -> None:
     """#4 KEEP a position-count / concurrency cap."""
     gate = LayeredRiskGate(
-        context_for=lambda e: _ctx(
-            _tpl(max_concurrent_positions=3), open_position_count=3
-        )
+        context_for=lambda e: _ctx(_tpl(max_concurrent_positions=3), open_position_count=3)
     )
     res = await gate.check(_eval(_copy_decision()))
     assert res.skip_reason is SkipReason.POSITION_CAP
@@ -528,9 +611,7 @@ async def test_risk_slippage_and_strategy_drift() -> None:
     res = await gate.check(_eval(_copy_decision(price=Decimal("0.5"))))
     assert res.skip_reason is SkipReason.SLIPPAGE_REJECT
 
-    gate2 = LayeredRiskGate(
-        context_for=lambda e: _ctx(_tpl(), strategy_drift=True)
-    )
+    gate2 = LayeredRiskGate(context_for=lambda e: _ctx(_tpl(), strategy_drift=True))
     res2 = await gate2.check(_eval(_copy_decision()))
     assert res2.skip_reason is SkipReason.STRATEGY_DRIFT
 
@@ -607,6 +688,96 @@ async def test_engine_audit_only_records_skip() -> None:
 
 
 # ---------------------------------------------------------------------------
+# A3 (PolyHermes deep-dive) — a copy attempt, success OR failure, persists a
+# durable leader_trades row via the trade_recorder (the processed_trade
+# status slot PolyEcho previously lacked).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a3_failed_copy_records_trade_status_failed() -> None:
+    """A3: a copy attempt that does NOT place still drives the
+    ``trade_recorder`` — with ``status="failed"`` — so a known-bad trade
+    gets a durable record (the in-proc LRU alone is not durable)."""
+    recorded: list[tuple[str, dict[str, object]]] = []
+
+    async def _recorder(evaluated: EvaluatedCopy, info: dict[str, object]) -> None:
+        recorded.append((evaluated.tx_hash, info))
+
+    # The default TraderCore wires an audit-only executor ⇒ result.placed
+    # is False ⇒ the failed-attempt branch fires.
+    core = TraderCore(follows=[_follow()], trade_recorder=_recorder)
+    await core.process_detected(_trade(side="BUY", price=0.5, size=100.0))
+
+    assert core.stats.placed == 0
+    # A3 fix: the failed path now ALSO records a trade (previously only a
+    # skip was recorded — no durable per-trade row).
+    assert len(recorded) == 1
+    tx_hash, info = recorded[0]
+    assert info["status"] == "failed"
+    assert info["fill_status"] == "rejected"
+    assert tx_hash  # the (leader, tx) dedup anchor is carried through
+
+
+@pytest.mark.asyncio
+async def test_a3_successful_copy_records_trade_status_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A3: a successful copy drives the ``trade_recorder`` with
+    ``status="success"`` on the live placement path."""
+    from polyecho.shared.config import get_settings
+
+    monkeypatch.setenv("POLYECHO_LIVE_TRADING", "true")
+    get_settings.cache_clear()
+    try:
+        recorded: list[dict[str, object]] = []
+
+        async def _recorder(_e: EvaluatedCopy, info: dict[str, object]) -> None:
+            recorded.append(info)
+
+        class _Client:
+            async def place_order(self, **kw: Any) -> dict[str, Any]:
+                return {"status": "matched"}
+
+        async def _factory(_e: EvaluatedCopy) -> Any:
+            return _Client()
+
+        core = TraderCore(follows=[_follow()], trade_recorder=_recorder)
+        core._executor = OrderExecutor(client_factory=_factory, ledger=core._ledger)
+        await core.process_detected(_trade(side="BUY", price=0.5, size=100.0))
+
+        assert core.stats.placed == 1
+        assert len(recorded) == 1
+        assert recorded[0]["status"] == "success"
+        assert recorded[0]["fill_status"] == "filled"
+    finally:
+        monkeypatch.delenv("POLYECHO_LIVE_TRADING", raising=False)
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_a3_redelivery_does_not_re_record_or_re_attempt() -> None:
+    """A3: a WS/poll redelivery of the SAME (leader, tx) is deduped
+    BEFORE the pipeline runs — the trade_recorder fires exactly once, so
+    a known trade is neither re-attempted nor double-recorded."""
+    recorded: list[dict[str, object]] = []
+
+    async def _recorder(_e: EvaluatedCopy, info: dict[str, object]) -> None:
+        recorded.append(info)
+
+    core = TraderCore(follows=[_follow()], trade_recorder=_recorder)
+    trade = _trade(side="BUY", price=0.5, size=100.0)
+    await core.process_detected(trade)
+    # Same tx redelivered (the dedup anchor is (leader_address, tx_hash)).
+    await core.process_detected(dict(trade))
+
+    assert core.stats.detected == 2
+    assert core.stats.deduped == 1  # the 2nd delivery was deduped
+    # The recorder ran for the first delivery only — no re-attempt.
+    assert len(recorded) == 1
+
+
+# ---------------------------------------------------------------------------
 # Reconcile backfill (brief §7 #5) — WS-gap closure, restart-safe
 # ---------------------------------------------------------------------------
 
@@ -673,9 +844,7 @@ async def test_redeem_idempotent_and_auto_redeem_off() -> None:
         seen.add(key)
         return True
 
-    w = RedeemWorker(
-        candidate_source=candidates, job_upserter=upsert, auto_redeem=False
-    )
+    w = RedeemWorker(candidate_source=candidates, job_upserter=upsert, auto_redeem=False)
     outs = await w.poll_once()
     assert len(outs) == 2
     assert outs[0].created is True
@@ -788,9 +957,7 @@ async def test_p1_2_malformed_book_row_fails_closed_not_raises() -> None:
     async def book_missing_size(_tid: str) -> dict[str, object]:
         return {"bids": [{"price": 0.49}], "asks": [{"price": 0.51, "size": 5}]}
 
-    gate = LayeredRiskGate(
-        context_for=lambda e: _ctx(_tpl()), orderbook_for=book_missing_size
-    )
+    gate = LayeredRiskGate(context_for=lambda e: _ctx(_tpl()), orderbook_for=book_missing_size)
     res = await gate.check(_eval(_copy_decision()))
     assert res.passed is False
     assert res.skip_reason is SkipReason.DATA_UNAVAILABLE
@@ -804,18 +971,14 @@ async def test_p1_2_non_numeric_and_nonlist_book_fail_closed() -> None:
             "asks": [{"price": 0.51, "size": 5}],
         }
 
-    g1 = LayeredRiskGate(
-        context_for=lambda e: _ctx(_tpl()), orderbook_for=book_garbage_price
-    )
+    g1 = LayeredRiskGate(context_for=lambda e: _ctx(_tpl()), orderbook_for=book_garbage_price)
     r1 = await g1.check(_eval(_copy_decision()))
     assert r1.skip_reason is SkipReason.DATA_UNAVAILABLE
 
     async def book_not_list(_tid: str) -> dict[str, object]:
         return {"bids": "oops", "asks": []}
 
-    g2 = LayeredRiskGate(
-        context_for=lambda e: _ctx(_tpl()), orderbook_for=book_not_list
-    )
+    g2 = LayeredRiskGate(context_for=lambda e: _ctx(_tpl()), orderbook_for=book_not_list)
     r2 = await g2.check(_eval(_copy_decision()))
     assert r2.skip_reason is SkipReason.DATA_UNAVAILABLE
 
@@ -848,12 +1011,7 @@ async def test_p1_3_dry_run_does_not_pollute_ledger() -> None:
     assert core.stats.copied == 1
     assert core.stats.placed == 0  # dry-run
     # No phantom BuyLot ⇒ open_position_count stays 0 (no phantom exposure).
-    assert (
-        core._executor.ledger.open_lots(
-            ACCT, "0xcond_fed_june_2026", "Yes"
-        )
-        == []
-    )
+    assert core._executor.ledger.open_lots(ACCT, "0xcond_fed_june_2026", "Yes") == []
 
 
 @pytest.mark.asyncio
@@ -875,9 +1033,7 @@ async def test_p1_3_live_path_still_records_buy_lot(
             return _Client()
 
         core = TraderCore(follows=[_follow()])
-        core._executor = OrderExecutor(
-            client_factory=_factory, ledger=core._ledger
-        )
+        core._executor = OrderExecutor(client_factory=_factory, ledger=core._ledger)
         await core.process_detected(_trade(side="BUY", price=0.5, size=100.0))
         assert core.stats.placed == 1
         lots = core._ledger.open_lots(ACCT, "0xcond_fed_june_2026", "Yes")
@@ -1021,9 +1177,7 @@ async def test_p1_6_failed_row_retried_then_succeeds(
     import polyecho.core.pending as pending_mod
     from polyecho.core.pending import PendingActionExecutor
 
-    monkeypatch.setattr(
-        pending_mod, "is_danger_passphrase_provisioned", _true
-    )
+    monkeypatch.setattr(pending_mod, "is_danger_passphrase_provisioned", _true)
     row = _pending_row()
     marked: list[str] = []
 
@@ -1048,9 +1202,7 @@ async def test_p1_6_failed_row_retried_then_succeeds(
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("transient venue error")
-            return await super().execute(
-                evaluated, size_override=size_override
-            )
+            return await super().execute(evaluated, size_override=size_override)
 
     ex = PendingActionExecutor(
         rows_source=_rows,
@@ -1085,24 +1237,18 @@ async def test_p1_6_p0_guards_still_fail_closed(
         raise AssertionError("a refused row must NOT be marked processed")
 
     # (a) danger passphrase NOT provisioned ⇒ refuse, claim, no execute.
-    monkeypatch.setattr(
-        pending_mod, "is_danger_passphrase_provisioned", _false
-    )
+    monkeypatch.setattr(pending_mod, "is_danger_passphrase_provisioned", _false)
     row = _pending_row()
 
     async def _rows() -> list[Any]:
         return [row]
 
-    ex = PendingActionExecutor(
-        rows_source=_rows, positions_for=_positions, mark_processed=_mark
-    )
+    ex = PendingActionExecutor(rows_source=_rows, positions_for=_positions, mark_processed=_mark)
     assert await ex.poll_once() == []
     assert row.id in ex._seen  # P0 refusal still claims (no loop-spam)
 
     # (b) expired confirmed row ⇒ refused even with passphrase provisioned.
-    monkeypatch.setattr(
-        pending_mod, "is_danger_passphrase_provisioned", _true
-    )
+    monkeypatch.setattr(pending_mod, "is_danger_passphrase_provisioned", _true)
     expired = _pending_row(
         id="act-exp",
         expires_at=datetime(2000, 1, 1, tzinfo=UTC),
@@ -1111,9 +1257,7 @@ async def test_p1_6_p0_guards_still_fail_closed(
     async def _rows2() -> list[Any]:
         return [expired]
 
-    ex2 = PendingActionExecutor(
-        rows_source=_rows2, positions_for=_positions, mark_processed=_mark
-    )
+    ex2 = PendingActionExecutor(rows_source=_rows2, positions_for=_positions, mark_processed=_mark)
     assert await ex2.poll_once() == []
     assert expired.id in ex2._seen
 
@@ -1136,9 +1280,7 @@ async def test_p1_12_follows_but_zero_detected_is_degenerate() -> None:
         account_id=ACCT,
         leader_address=ghost,
         template=_tpl(),
-        binding=WalletBinding(
-            signature_type=0, funder=ghost, wallet_mode="eoa", derived=False
-        ),
+        binding=WalletBinding(signature_type=0, funder=ghost, wallet_mode="eoa", derived=False),
     )
     core = TraderCore(follows=[spec])
     await core.run_once()
@@ -1200,9 +1342,7 @@ async def test_p1_12_main_once_degenerate_returns_nonzero(
     # no-implicit-reexport) to capture the original.
     real_trader_core = TraderCore
 
-    def _configured_trader_core(
-        *, follows: list[FollowSpec], **kw: Any
-    ) -> TraderCore:
+    def _configured_trader_core(*, follows: list[FollowSpec], **kw: Any) -> TraderCore:
         # The entrypoint passes follows=[]; substitute a configured ghost
         # follow so the REAL engine runs the degenerate path. All other
         # ctor kwargs (the real injected heartbeat/cursor writers) pass
@@ -1336,9 +1476,7 @@ def _fake_shared_health(
     saved = sys.modules.get("polyecho.shared.health")
     sys.modules["polyecho.shared.health"] = mod
     try:
-        yield types.SimpleNamespace(
-            integ_writes=integ_writes, hb_writes=hb_writes
-        )
+        yield types.SimpleNamespace(integ_writes=integ_writes, hb_writes=hb_writes)
     finally:
         if saved is not None:
             sys.modules["polyecho.shared.health"] = saved
@@ -1481,9 +1619,7 @@ async def test_task2_probe_failure_does_not_affect_engine() -> None:
         raise RuntimeError("datasource probe exploded")
 
     with _fake_shared_health(run_all_probes=_bad_probes) as fake:
-        core = TraderCore(
-            follows=[_follow()], integration_probe_interval_seconds=0.01
-        )
+        core = TraderCore(follows=[_follow()], integration_probe_interval_seconds=0.01)
         probe_task = asyncio.create_task(core._integration_probe_loop())
         # Engine pass runs CONCURRENTLY with the failing probe cadence.
         stats = await core.run_once()
@@ -1520,9 +1656,7 @@ async def test_task2_slow_probe_is_timeout_bounded_not_blocking() -> None:
         trader_mod.INTEGRATION_PROBE_TIMEOUT_SECONDS = 0.05
         try:
             # One cycle must RETURN promptly (~timeout), never hang.
-            await asyncio.wait_for(
-                core._run_integration_probe_once(), timeout=2.0
-            )
+            await asyncio.wait_for(core._run_integration_probe_once(), timeout=2.0)
         finally:
             trader_mod.INTEGRATION_PROBE_TIMEOUT_SECONDS = prev
 
@@ -1541,23 +1675,12 @@ def test_task2_interval_clamped_to_safe_floor() -> None:
     )
 
     assert (
-        TraderCore(
-            integration_probe_interval_seconds=0.0001
-        )._integration_probe_interval_s
-        == FLOOR
+        TraderCore(integration_probe_interval_seconds=0.0001)._integration_probe_interval_s == FLOOR
     )
     assert (
-        TraderCore(
-            integration_probe_interval_seconds=-5
-        )._integration_probe_interval_s
-        == DEFAULT
+        TraderCore(integration_probe_interval_seconds=-5)._integration_probe_interval_s == DEFAULT
     )
-    assert (
-        TraderCore(
-            integration_probe_interval_seconds=120
-        )._integration_probe_interval_s
-        == 120
-    )
+    assert TraderCore(integration_probe_interval_seconds=120)._integration_probe_interval_s == 120
 
 
 @pytest.mark.asyncio
@@ -1586,9 +1709,7 @@ async def test_task2_once_degenerate_still_exit_two() -> None:
         account_id=ACCT,
         leader_address=ghost,
         template=_tpl(),
-        binding=WalletBinding(
-            signature_type=0, funder=ghost, wallet_mode="eoa", derived=False
-        ),
+        binding=WalletBinding(signature_type=0, funder=ghost, wallet_mode="eoa", derived=False),
     )
 
     async def _probes() -> dict[str, Any]:
@@ -1697,9 +1818,7 @@ async def test_idle_keepalive_failsoft_backend_does_not_abort_park(
 
     monkeypatch.setattr(trader_mod, "IDLE_KEEPALIVE_INTERVAL_SECONDS", 0.001)
 
-    with _fake_shared_health(
-        run_all_probes=_probes, write_heartbeat=_boom_canonical
-    ):
+    with _fake_shared_health(run_all_probes=_probes, write_heartbeat=_boom_canonical):
         core = TraderCore(follows=[_follow()], heartbeat_writer=_boom_hook)
         task = asyncio.create_task(core._park())
         try:

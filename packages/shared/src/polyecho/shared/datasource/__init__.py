@@ -40,6 +40,10 @@ from polyecho.shared.datasource.dto import (
 from polyecho.shared.datasource.factory import get_datasource
 from polyecho.shared.datasource.fixture import FixtureDataSource
 from polyecho.shared.datasource.live import CircuitOpenError, LiveDataSource
+from polyecho.shared.datasource.market_cache import (
+    MarketMetadata,
+    MarketMetadataCache,
+)
 from polyecho.shared.datasource.protocol import DataSource
 
 __all__ = [
@@ -48,11 +52,14 @@ __all__ = [
     "ActivityRecord",
     "PositionRecord",
     "MarketSummary",
+    "MarketMetadata",
     # Protocol
     "DataSource",
     # Implementations
     "FixtureDataSource",
     "LiveDataSource",
+    # Cache (C4, PolyHermes deep-dive)
+    "MarketMetadataCache",
     # Errors
     "CircuitOpenError",
     # Factory

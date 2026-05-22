@@ -914,6 +914,8 @@ class TraderCore:
                     "size": str(size),
                     "price": str(price),
                     "fill_status": "filled",
+                    # A3: durable copy-attempt outcome → leader_trades.status.
+                    "status": "success",
                 },
             )
             await self._emit_event(
@@ -938,6 +940,24 @@ class TraderCore:
                 evaluated,
                 result.skip_reason or SkipReason.DATA_UNAVAILABLE,
                 result.detail or "order not placed",
+            )
+            # A3 (PolyHermes deep-dive): a copy attempt that did NOT place
+            # must still leave a durable ``leader_trades`` row with
+            # ``status="failed"`` (PolyHermes' processed_trade.status=FAILED
+            # slot).  Without it a WS/poll redelivery of this same
+            # known-bad tx has no durable "do not retry" marker once the
+            # in-proc LRU has evicted it — the recorder is idempotent on
+            # ``(leader_address, tx_hash)`` so this never double-inserts.
+            await self._record_trade(
+                evaluated,
+                {
+                    "tx_hash": tx_hash,
+                    "side": side.value if side else None,
+                    "size": str(size),
+                    "price": str(price),
+                    "fill_status": "rejected",
+                    "status": "failed",
+                },
             )
 
     # ------------------------------------------------------------------

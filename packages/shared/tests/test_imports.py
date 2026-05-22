@@ -47,6 +47,7 @@ class TestModelImports:
             Event,
             FollowRelation,
             LeaderTrade,
+            Market,
             MyTrade,
             PendingAction,
             PushSubscription,
@@ -62,14 +63,13 @@ class TestModelImports:
             Event,
             FollowRelation,
             LeaderTrade,
+            Market,
             MyTrade,
             PendingAction,
             PushSubscription,
             Setting,
         ):
-            assert issubclass(model_cls, Base), (
-                f"{model_cls.__name__} does not inherit from Base"
-            )
+            assert issubclass(model_cls, Base), f"{model_cls.__name__} does not inherit from Base"
             assert hasattr(model_cls, "__tablename__"), (
                 f"{model_cls.__name__} missing __tablename__"
             )
@@ -84,6 +84,7 @@ class TestModelImports:
             Event,
             FollowRelation,
             LeaderTrade,
+            Market,
             MyTrade,
             PendingAction,
             PushSubscription,
@@ -99,6 +100,7 @@ class TestModelImports:
             Event: "events",
             FollowRelation: "follow_relations",
             LeaderTrade: "leader_trades",
+            Market: "markets",
             MyTrade: "my_trades",
             PendingAction: "pending_actions",
             PushSubscription: "push_subscriptions",
@@ -106,8 +108,7 @@ class TestModelImports:
         }
         for cls, tablename in expected.items():
             assert cls.__tablename__ == tablename, (
-                f"Expected {cls.__name__}.__tablename__ == {tablename!r}, "
-                f"got {cls.__tablename__!r}"
+                f"Expected {cls.__name__}.__tablename__ == {tablename!r}, got {cls.__tablename__!r}"
             )
 
 
@@ -128,10 +129,7 @@ class TestSettings:
         # db_url / db_url_drizzle are SecretStr (DSN holds the password):
         # the cleartext is only available via .get_secret_value(), and the
         # secret must never appear in repr()/str() (never-logged contract).
-        assert (
-            settings.db_url.get_secret_value()
-            == "postgresql+asyncpg://u:p@localhost/test"
-        )
+        assert settings.db_url.get_secret_value() == "postgresql+asyncpg://u:p@localhost/test"
         assert "u:p@localhost" not in repr(settings.db_url)
         assert "u:p@localhost" not in str(settings.db_url)
         assert "u:p@localhost" not in repr(settings)

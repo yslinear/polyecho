@@ -199,15 +199,32 @@ class LayeredRiskGate:
             )
 
         # 3. keyword ------------------------------------------------------
+        # Cheap re-check of the evaluator gate (defense in depth): legacy
+        # category_whitelist + the tri-mode keyword filter (PolyHermes B4).
+        market_text = " ".join(
+            str(evaluated.raw.get(k) or "") for k in ("category", "title")
+        ).lower()
         if tpl.category_whitelist:
-            category = str(
-                evaluated.raw.get("category") or evaluated.raw.get("title") or ""
-            )
-            if not any(c.lower() in category.lower() for c in tpl.category_whitelist):
+            if not any(c.lower() in market_text for c in tpl.category_whitelist):
                 return RiskResult(
                     passed=False,
                     skip_reason=SkipReason.FILTER_KEYWORD,
-                    detail=f"category {category!r} not whitelisted",
+                    detail=f"market text {market_text!r} not whitelisted",
+                )
+        kw_mode = (tpl.keyword_filter_mode or "disabled").lower()
+        if kw_mode in ("whitelist", "blacklist") and tpl.keywords:
+            kw_matched = any(kw.lower() in market_text for kw in tpl.keywords)
+            if kw_mode == "whitelist" and not kw_matched:
+                return RiskResult(
+                    passed=False,
+                    skip_reason=SkipReason.FILTER_KEYWORD,
+                    detail=f"market text {market_text!r} matches no whitelist keyword",
+                )
+            if kw_mode == "blacklist" and kw_matched:
+                return RiskResult(
+                    passed=False,
+                    skip_reason=SkipReason.FILTER_KEYWORD,
+                    detail=f"market text {market_text!r} matches a blacklist keyword",
                 )
 
         # 4. market-end (cheap re-check; primary check is in the evaluator)
@@ -224,10 +241,7 @@ class LayeredRiskGate:
             return RiskResult(
                 passed=False,
                 skip_reason=SkipReason.FILTER_PRICE_BAND,
-                detail=(
-                    f"price {price} outside template band "
-                    f"[{tpl.min_price}, {tpl.max_price}]"
-                ),
+                detail=(f"price {price} outside template band [{tpl.min_price}, {tpl.max_price}]"),
             )
 
         # --- ONE orderbook fetch, reused by 6/7/15 (brief §4) -----------
@@ -292,9 +306,7 @@ class LayeredRiskGate:
 
             # 7. depth ----------------------------------------------------
             if tpl.min_depth > _ZERO:
-                relevant_depth = (
-                    buy_depth if decision.side is TradeSide.BUY else sell_depth
-                )
+                relevant_depth = buy_depth if decision.side is TradeSide.BUY else sell_depth
                 if relevant_depth < tpl.min_depth:
                     return RiskResult(
                         passed=False,
@@ -318,8 +330,7 @@ class LayeredRiskGate:
                     Decimal("0.000001"), rounding=ROUND_DOWN
                 )
                 if adjusted >= _ONE and (
-                    tpl.min_trade_size_usd is None
-                    or adjusted * price >= tpl.min_trade_size_usd
+                    tpl.min_trade_size_usd is None or adjusted * price >= tpl.min_trade_size_usd
                 ):
                     size = adjusted
                     notional = size * price
@@ -345,10 +356,7 @@ class LayeredRiskGate:
                 )
 
         # 10. daily-order-cap --------------------------------------------
-        if (
-            tpl.daily_order_cap is not None
-            and ctx.daily_order_count >= tpl.daily_order_cap
-        ):
+        if tpl.daily_order_cap is not None and ctx.daily_order_count >= tpl.daily_order_cap:
             return RiskResult(
                 passed=False,
                 skip_reason=SkipReason.DAILY_ORDER_CAP,
@@ -407,8 +415,7 @@ class LayeredRiskGate:
                 passed=False,
                 skip_reason=SkipReason.POSITION_CAP,
                 detail=(
-                    f"open positions {ctx.open_position_count} "
-                    f"≥ max {tpl.max_concurrent_positions}"
+                    f"open positions {ctx.open_position_count} ≥ max {tpl.max_concurrent_positions}"
                 ),
             )
 

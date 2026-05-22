@@ -91,9 +91,7 @@ class _FakeScope:
         return False
 
 
-def _patch_session_scope(
-    monkeypatch: pytest.MonkeyPatch, sink: list[Any]
-) -> None:
+def _patch_session_scope(monkeypatch: pytest.MonkeyPatch, sink: list[Any]) -> None:
     def _scope() -> _FakeScope:
         return _FakeScope(sink)
 
@@ -145,9 +143,7 @@ async def test_heartbeat_writer_upserts_settings_row_correct_shape(
         async def __aexit__(self, *exc: Any) -> bool:
             return False
 
-    monkeypatch.setattr(
-        "polyecho.shared.db.session_scope", lambda: _Scope()
-    )
+    monkeypatch.setattr("polyecho.shared.db.session_scope", lambda: _Scope())
 
     writer = wiring.make_heartbeat_writer()
     info = {
@@ -166,9 +162,7 @@ async def test_heartbeat_writer_upserts_settings_row_correct_shape(
     assert wiring.TRADER_HEARTBEAT_KEY == "trader_heartbeat"
     assert "trader_heartbeat" in params.values()
     # The value column carries the heartbeat dict verbatim (ISO ts + phase).
-    stored = next(
-        v for v in params.values() if isinstance(v, dict) and "ts" in v
-    )
+    stored = next(v for v in params.values() if isinstance(v, dict) and "ts" in v)
     assert stored == info
     assert isinstance(stored["ts"], str)
     assert stored["phase"] == "cycle_start"
@@ -293,9 +287,7 @@ async def test_redeem_worker_auto_redeem_off_skips_onchain(
                 derived=False,
             )
         ),
-        redeem_client=Web3RedeemClient(
-            web3=fake, private_key_resolver=_key
-        ),
+        redeem_client=Web3RedeemClient(web3=fake, private_key_resolver=_key),
         auto_redeem=False,
     )
     outs = await worker.poll_once()
@@ -330,9 +322,7 @@ async def test_redeem_worker_locks_on_reaches_concrete_eoa_path(
                 derived=False,
             )
         ),
-        redeem_client=Web3RedeemClient(
-            web3=fake, private_key_resolver=_key
-        ),
+        redeem_client=Web3RedeemClient(web3=fake, private_key_resolver=_key),
         auto_redeem=True,  # live ON + auto_redeem ON ⇒ concrete path
     )
     outs = await worker.poll_once()
@@ -359,6 +349,219 @@ async def test_key_resolver_failsclosed_without_passphrase(
 
 
 # ---------------------------------------------------------------------------
+# 3b. trade_recorder — A3: a durable leader_trades row per copy attempt,
+#     placed (status=success) AND failed (status=failed), idempotent on the
+#     existing (leader_address, tx_hash) UNIQUE.
+# ---------------------------------------------------------------------------
+def _evaluated_copy() -> Any:
+    """A minimal EvaluatedCopy the trade_recorder can consume."""
+    from polyecho.shared.copytrading import (
+        Decision,
+        DecisionOutcome,
+        EvaluatedCopy,
+        TradeSide,
+    )
+
+    return EvaluatedCopy(
+        leader_address=LEADER,
+        tx_hash="0xfeedface" + "00" * 16,
+        account_id=ACCT,
+        condition_id="0xcond_a3",
+        binding=WalletBinding(signature_type=0, funder=LEADER, wallet_mode="eoa", derived=False),
+        decision=Decision(outcome=DecisionOutcome.COPY, side=TradeSide.BUY),
+        raw={"outcome": "Yes"},
+    )
+
+
+async def test_trade_recorder_success_writes_leader_trades_status_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful copy persists a leader_trades row with status=success."""
+    captured: list[dict[str, Any]] = []
+
+    class _Sess:
+        async def execute(self, stmt: Any) -> Any:
+            captured.append(dict(stmt.compile().params))
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+    class _Scope:
+        async def __aenter__(self) -> _Sess:
+            return _Sess()
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+    monkeypatch.setattr("polyecho.shared.db.session_scope", lambda: _Scope())
+
+    recorder = wiring.make_trade_recorder()
+    await recorder(
+        _evaluated_copy(),
+        {
+            "tx_hash": "0xfeedface" + "00" * 16,
+            "side": "BUY",
+            "size": "12.5",
+            "price": "0.42",
+            "fill_status": "filled",
+            "status": "success",
+        },
+    )
+
+    assert len(captured) == 1
+    params = captured[0]
+    assert "success" in params.values()
+    assert LEADER in params.values()
+    # The dedup anchor txHash is carried as both trade_id and tx_hash.
+    assert ("0xfeedface" + "00" * 16) in params.values()
+
+
+async def test_trade_recorder_failed_writes_leader_trades_status_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed copy attempt STILL persists a leader_trades row — A3's
+    core fix: a known-bad trade gets a durable status=failed marker."""
+    captured: list[dict[str, Any]] = []
+
+    class _Sess:
+        async def execute(self, stmt: Any) -> Any:
+            captured.append(dict(stmt.compile().params))
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+    class _Scope:
+        async def __aenter__(self) -> _Sess:
+            return _Sess()
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+    monkeypatch.setattr("polyecho.shared.db.session_scope", lambda: _Scope())
+
+    recorder = wiring.make_trade_recorder()
+    await recorder(
+        _evaluated_copy(),
+        {
+            "tx_hash": "0xfeedface" + "00" * 16,
+            "side": "BUY",
+            "size": "12.5",
+            "price": "0.42",
+            "fill_status": "rejected",
+            "status": "failed",
+        },
+    )
+
+    assert len(captured) == 1
+    assert "failed" in captured[0].values()
+
+
+async def test_trade_recorder_is_idempotent_on_leader_tx_unique(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redelivery does not double-insert: the write is ON CONFLICT
+    DO UPDATE keyed on the EXISTING (leader_address, tx_hash) UNIQUE, so a
+    known-failed trade is updated in place, never re-inserted/re-attempted."""
+    stmts: list[Any] = []
+
+    class _Sess:
+        async def execute(self, stmt: Any) -> Any:
+            stmts.append(stmt)
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+    class _Scope:
+        async def __aenter__(self) -> _Sess:
+            return _Sess()
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+    monkeypatch.setattr("polyecho.shared.db.session_scope", lambda: _Scope())
+
+    recorder = wiring.make_trade_recorder()
+    info = {
+        "tx_hash": "0xfeedface" + "00" * 16,
+        "side": "BUY",
+        "size": "1",
+        "price": "0.5",
+        "status": "failed",
+    }
+    # Same (leader, tx) delivered twice (a WS/poll redelivery).
+    await recorder(_evaluated_copy(), info)
+    await recorder(_evaluated_copy(), info)
+
+    assert len(stmts) == 2
+    for stmt in stmts:
+        sql = str(stmt).lower()
+        assert "insert into leader_trades" in sql
+        # Idempotency: ON CONFLICT on the existing dedup anchor — the key
+        # is NOT changed, the redelivery upserts the same row.
+        assert "on conflict" in sql
+        assert "uq_leader_trades_leader_tx" in sql
+
+
+async def test_trade_recorder_failsafe_on_db_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB error in the durable record write must NEVER crash the loop."""
+
+    def _boom() -> Any:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("polyecho.shared.db.session_scope", _boom)
+    recorder = wiring.make_trade_recorder()
+    # Best-effort: must not raise.
+    await recorder(_evaluated_copy(), {"tx_hash": "0xabc", "status": "failed"})
+
+
+async def test_trade_recorder_skips_when_dedup_key_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No tx_hash ⇒ no row written (the dedup anchor is mandatory)."""
+    stmts: list[Any] = []
+
+    class _Sess:
+        async def execute(self, stmt: Any) -> Any:
+            stmts.append(stmt)
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+    class _Scope:
+        async def __aenter__(self) -> _Sess:
+            return _Sess()
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+    monkeypatch.setattr("polyecho.shared.db.session_scope", lambda: _Scope())
+
+    from polyecho.shared.copytrading import (
+        Decision,
+        DecisionOutcome,
+        EvaluatedCopy,
+    )
+
+    recorder = wiring.make_trade_recorder()
+    evaluated = EvaluatedCopy(
+        leader_address=LEADER,
+        tx_hash="",
+        account_id=ACCT,
+        condition_id="0xc",
+        binding=WalletBinding(signature_type=0, funder=LEADER, wallet_mode="eoa", derived=False),
+        decision=Decision(outcome=DecisionOutcome.COPY),
+    )
+    await recorder(evaluated, {"status": "failed"})
+    assert stmts == []
+
+
+# ---------------------------------------------------------------------------
 # 4. startup reconcile — invoked once; an error does NOT abort startup
 # ---------------------------------------------------------------------------
 async def test_startup_reconcile_invoked_once(
@@ -374,9 +577,7 @@ async def test_startup_reconcile_invoked_once(
         calls.append(1)
         return _Report()
 
-    monkeypatch.setattr(
-        "polyecho.core.onchain_reconcile.run_reconcile", _fake_run
-    )
+    monkeypatch.setattr("polyecho.core.onchain_reconcile.run_reconcile", _fake_run)
     await wiring.startup_reconcile()
     assert calls == [1]
 
@@ -387,9 +588,7 @@ async def test_startup_reconcile_error_does_not_abort(
     async def _boom(**_: Any) -> Any:
         raise RuntimeError("rpc unreachable")
 
-    monkeypatch.setattr(
-        "polyecho.core.onchain_reconcile.run_reconcile", _boom
-    )
+    monkeypatch.setattr("polyecho.core.onchain_reconcile.run_reconcile", _boom)
     # Must NOT raise — a reconcile error must never abort bot startup.
     await wiring.startup_reconcile()
 

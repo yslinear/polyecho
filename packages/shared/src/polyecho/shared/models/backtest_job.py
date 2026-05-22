@@ -28,12 +28,8 @@ class BacktestJob(Base):
 
     __tablename__ = "backtest_jobs"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    leader_addresses: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    leader_addresses: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     template_params: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     start_date: Mapped[date_type] = mapped_column(Date, nullable=False)
@@ -46,6 +42,18 @@ class BacktestJob(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     progress: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+    # B1 (PolyHermes deep-dive): denormalised neutral-scenario summary stats,
+    # promoted out of ``result`` JSONB so the /backtest list page can
+    # sort/filter without unpacking a multi-megabyte body. All NULLable: a
+    # pending/running/failed job has no summary yet, and ``result`` stays the
+    # source of truth (these are an additive read-optimised mirror).
+    total_return_pct: Mapped[float | None] = mapped_column(Numeric(14, 4), nullable=True)
+    win_rate: Mapped[float | None] = mapped_column(Numeric(6, 4), nullable=True)
+    max_drawdown_pct: Mapped[float | None] = mapped_column(Numeric(8, 4), nullable=True)
+    total_trades: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sharpe_ratio: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
+    total_fees_usd: Mapped[float | None] = mapped_column(Numeric(14, 4), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

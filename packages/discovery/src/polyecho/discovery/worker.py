@@ -72,6 +72,7 @@ from polyecho.shared.datasource import (
     ActivityRecord,
     DataSource,
     FixtureDataSource,
+    MarketMetadataCache,
 )
 from polyecho.shared.db import session_scope
 from polyecho.shared.events import (
@@ -1093,6 +1094,12 @@ class DiscoveryWorker:
     ) -> None:
         self._ds = datasource
         self._follower_capital = follower_capital_usd
+        # C4 (PolyHermes deep-dive): persisted market-metadata cache
+        # (cache -> markets DB table -> remote).  Composed with the FROZEN
+        # datasource — discover_hot_market_holders reads market metadata
+        # through it so a market's question/neg_risk/tick_size/end_date is
+        # persisted once and re-served (resolved markets cached forever).
+        self._market_cache = MarketMetadataCache(datasource)
         # Cache of known wallet addresses across all sources (used by hourly scan)
         self._known_wallets: set[str] = set()
         # Per-pass discovery counters for the F0 ``discovery_heartbeat``
@@ -1496,6 +1503,26 @@ class DiscoveryWorker:
                 )
             condition_ids = [cid for cid, _row in hot]
         logger.info("discover_hot_market_holders: %d hot markets", len(condition_ids))
+
+        # C4 (PolyHermes deep-dive): on the LIVE path only, persist each
+        # hot market's metadata through the cache layer (cache -> markets
+        # DB table -> remote). The first pass writes the markets table;
+        # subsequent passes serve the same condition_ids from the DB /
+        # in-process cache without a remote round-trip, and a RESOLVED
+        # market is served forever. The FIXTURE path is deliberately left
+        # untouched: a fixture is deterministic replay data, so caching it
+        # is pointless and would break the byte-identical fixture-path
+        # guarantee documented above. Fail-soft: the cache swallows
+        # DB/remote errors, so a cache miss never blocks the scan below.
+        if not isinstance(self._ds, FixtureDataSource):
+            for condition_id in condition_ids:
+                try:
+                    await self._market_cache.get_market(condition_id)
+                except Exception:  # noqa: BLE001 - cache is best-effort
+                    logger.warning(
+                        "discovery_market_cache_warm_failed",
+                        extra={"condition_id": condition_id},
+                    )
 
         seen: set[str] = set()
         for condition_id in condition_ids:

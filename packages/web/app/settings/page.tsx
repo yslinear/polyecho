@@ -109,6 +109,47 @@ export default async function SettingsPage() {
             {t("alertsSettings.settings.copyTemplates.emptyState")}
           </p>
         </div>
+        {/*
+         * B4 (PolyHermes deep-dive): the copy-template editor is still
+         * CLI-managed. This advisory documents the new tri-mode keyword
+         * filter + upper market-end bound so an operator knows the knobs
+         * exist before a web editor ships.
+         */}
+        <div className="space-y-2 rounded-lg border px-4 py-3">
+          <p className="text-sm font-medium">
+            {t(
+              "alertsSettings.settings.copyTemplates.keywordFilter.label"
+            )}
+          </p>
+          <ul className="space-y-1 text-sm text-muted-foreground">
+            <li>
+              {t(
+                "alertsSettings.settings.copyTemplates.keywordFilter.modeDisabled"
+              )}
+            </li>
+            <li>
+              {t(
+                "alertsSettings.settings.copyTemplates.keywordFilter.modeWhitelist"
+              )}
+            </li>
+            <li>
+              {t(
+                "alertsSettings.settings.copyTemplates.keywordFilter.modeBlacklist"
+              )}
+            </li>
+          </ul>
+          <p className="text-sm text-muted-foreground">
+            {t(
+              "alertsSettings.settings.copyTemplates.keywordFilter.termsLabel"
+            )}
+          </p>
+          <p className="text-sm font-medium">
+            {t("alertsSettings.settings.copyTemplates.marketMaxEnd.label")}
+          </p>
+          <p className="text-sm text-muted-foreground">
+            {t("alertsSettings.settings.copyTemplates.marketMaxEnd.help")}
+          </p>
+        </div>
       </section>
     </div>
   );

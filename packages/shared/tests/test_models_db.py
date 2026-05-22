@@ -179,6 +179,14 @@ class TestColumns:
         assert cols["exclude_short_markets"].nullable is True
         assert cols["use_fok_orders"].nullable is True
 
+    def test_copy_template_b4_keyword_filter_columns(self) -> None:
+        # PolyHermes deep-dive B4: tri-mode keyword filter + upper end bound.
+        cols = CopyTemplate.__table__.columns
+        assert isinstance(cols["keywords"].type, ARRAY)
+        assert cols["keyword_filter_mode"].nullable is True
+        assert cols["keywords"].nullable is True
+        assert cols["market_max_end_seconds"].nullable is True
+
     def test_backtest_job_arrays_and_jsonb(self) -> None:
         cols = BacktestJob.__table__.columns
         assert isinstance(cols["leader_addresses"].type, ARRAY)
@@ -322,9 +330,7 @@ def _patch_session_factory(
     session.__aexit__ = AsyncMock(return_value=None)
 
     factory = MagicMock(return_value=session)
-    monkeypatch.setattr(
-        "polyecho.shared.db._get_session_factory", lambda: factory
-    )
+    monkeypatch.setattr("polyecho.shared.db._get_session_factory", lambda: factory)
     return session, factory
 
 
@@ -342,9 +348,7 @@ class TestSessionScope:
         session.commit.assert_awaited_once()
         session.rollback.assert_not_awaited()
 
-    def test_rollback_and_reraise_on_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_rollback_and_reraise_on_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from polyecho.shared.db import session_scope
 
         session, _ = _patch_session_factory(monkeypatch)
@@ -362,9 +366,7 @@ class TestSessionScope:
         session.rollback.assert_awaited_once()
         session.commit.assert_not_awaited()
 
-    def test_commit_failure_triggers_rollback(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_commit_failure_triggers_rollback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """If ``commit()`` itself raises, the ``except`` path must still
         roll back and propagate (no swallowed error)."""
         from polyecho.shared.db import session_scope
@@ -394,9 +396,7 @@ class TestEngineAndFactory:
         dbmod._engine = None
         dbmod._session_factory = None
 
-    def test_get_engine_is_memoised(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_get_engine_is_memoised(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import polyecho.shared.db as dbmod
 
         dbmod._engine = None
@@ -413,9 +413,7 @@ class TestEngineAndFactory:
         assert e1 is e2 is sentinel
         assert calls["n"] == 1  # created exactly once
 
-    def test_session_factory_is_memoised(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_session_factory_is_memoised(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import polyecho.shared.db as dbmod
 
         dbmod._session_factory = None
@@ -511,21 +509,14 @@ class TestPgListenDsn:
     def test_strips_driver_suffix(self) -> None:
         from polyecho.shared.db import _asyncpg_dsn
 
-        assert (
-            _asyncpg_dsn("postgresql+asyncpg://u:p@h:5432/db")
-            == "postgresql://u:p@h:5432/db"
-        )
+        assert _asyncpg_dsn("postgresql+asyncpg://u:p@h:5432/db") == "postgresql://u:p@h:5432/db"
 
     def test_plain_url_unchanged(self) -> None:
         from polyecho.shared.db import _asyncpg_dsn
 
-        assert (
-            _asyncpg_dsn("postgresql://u:p@h/db") == "postgresql://u:p@h/db"
-        )
+        assert _asyncpg_dsn("postgresql://u:p@h/db") == "postgresql://u:p@h/db"
 
-    def test_defaults_to_settings_db_url(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_defaults_to_settings_db_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import polyecho.shared.db as dbmod
 
         class _S:
@@ -538,9 +529,7 @@ class TestPgListenDsn:
 
 
 class TestPgListenIter:
-    def test_listens_yields_and_closes_cleanly(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_listens_yields_and_closes_cleanly(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import polyecho.shared.db as dbmod
         from polyecho.shared.db import Notification, pg_listen_iter
 
@@ -553,9 +542,7 @@ class TestPgListenIter:
 
         async def _flow() -> list[Notification]:
             got: list[Notification] = []
-            async with pg_listen_iter(
-                "leader_trade", db_url="postgresql://x@h/db"
-            ) as notes:
+            async with pg_listen_iter("leader_trade", db_url="postgresql://x@h/db") as notes:
                 # Listener registered on entry.
                 assert conn.add_calls == ["leader_trade"]
                 await conn.fire("leader_trade", 42, "hello")
@@ -564,23 +551,17 @@ class TestPgListenIter:
 
         out = run(_flow())
         assert len(out) == 1
-        assert out[0] == Notification(
-            pid=42, channel="leader_trade", payload="hello"
-        )
+        assert out[0] == Notification(pid=42, channel="leader_trade", payload="hello")
         # Cleanly torn down on context exit.
         assert conn.remove_calls == ["leader_trade"]
         assert conn.close_calls == 1
 
-    def test_close_runs_even_on_exception(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_close_runs_even_on_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import polyecho.shared.db as dbmod
         from polyecho.shared.db import pg_listen_iter
 
         conn = _FakeAsyncpgConn()
-        monkeypatch.setattr(
-            dbmod, "_connect_asyncpg", lambda _dsn: _ret(conn)
-        )
+        monkeypatch.setattr(dbmod, "_connect_asyncpg", lambda _dsn: _ret(conn))
 
         class _Boom(RuntimeError):
             pass
@@ -594,9 +575,7 @@ class TestPgListenIter:
         assert conn.close_calls == 1
         assert conn.remove_calls == ["c"]
 
-    def test_registers_termination_listener(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_registers_termination_listener(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """R2/I1: pg_listen_iter must install a termination listener so a
         dropped connection is detectable (it had none before — the
         consumer stalled forever silently)."""
@@ -604,9 +583,7 @@ class TestPgListenIter:
         from polyecho.shared.db import pg_listen_iter
 
         conn = _FakeAsyncpgConn()
-        monkeypatch.setattr(
-            dbmod, "_connect_asyncpg", lambda _dsn: _ret(conn)
-        )
+        monkeypatch.setattr(dbmod, "_connect_asyncpg", lambda _dsn: _ret(conn))
 
         async def _flow() -> None:
             async with pg_listen_iter("c", db_url="postgresql://x@h/db"):
@@ -626,14 +603,10 @@ class TestPgListenIter:
         from polyecho.shared.db import ListenConnectionLost, pg_listen_iter
 
         conn = _FakeAsyncpgConn()
-        monkeypatch.setattr(
-            dbmod, "_connect_asyncpg", lambda _dsn: _ret(conn)
-        )
+        monkeypatch.setattr(dbmod, "_connect_asyncpg", lambda _dsn: _ret(conn))
 
         async def _flow() -> None:
-            async with pg_listen_iter(
-                "c", db_url="postgresql://x@h/db"
-            ) as notes:
+            async with pg_listen_iter("c", db_url="postgresql://x@h/db") as notes:
                 conn.terminate()  # server drops the dedicated connection
                 with pytest.raises(ListenConnectionLost):
                     await notes.__anext__()
@@ -642,9 +615,7 @@ class TestPgListenIter:
         # The dropped connection is closed on the way out.
         assert conn.is_closed() is True
 
-    def test_connection_drop_reconnects_when_enabled(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_connection_drop_reconnects_when_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """R2/I1: with ``reconnect=True`` a drop transparently re-opens the
         dedicated connection and re-issues LISTEN (mirrors pg_listen) so
         the ``async for`` continues across the drop."""
@@ -700,9 +671,7 @@ class _Settings:
 
 
 class TestPgListenLoop:
-    def test_subscribes_then_cancel_closes_cleanly(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_subscribes_then_cancel_closes_cleanly(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """pg_listen subscribes via add_listener + termination listener,
         idles on the Event, and on task cancellation removes the listener
         and closes the dedicated connection (no real DB)."""
@@ -710,9 +679,7 @@ class TestPgListenLoop:
         from polyecho.shared.db import pg_listen
 
         conn = _FakeAsyncpgConn()
-        monkeypatch.setattr(
-            dbmod, "_connect_asyncpg", lambda _dsn: _ret(conn)
-        )
+        monkeypatch.setattr(dbmod, "_connect_asyncpg", lambda _dsn: _ret(conn))
         monkeypatch.setattr(dbmod, "get_settings", lambda: _Settings())
 
         received: list[Any] = []
@@ -721,9 +688,7 @@ class TestPgListenLoop:
             received.append((pid, ch, payload))
 
         async def _flow() -> None:
-            task = asyncio.ensure_future(
-                pg_listen("leader_trade", _cb, reconnect_delay=0.01)
-            )
+            task = asyncio.ensure_future(pg_listen("leader_trade", _cb, reconnect_delay=0.01))
             # Let the loop connect + subscribe + reach `await terminated`.
             for _ in range(5):
                 await asyncio.sleep(0)
@@ -742,9 +707,7 @@ class TestPgListenLoop:
         assert conn.remove_calls == ["leader_trade"]
         assert conn.close_calls == 1
 
-    def test_reconnects_after_connection_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_reconnects_after_connection_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A failed connect is retried after ``reconnect_delay``; the second
         attempt succeeds and subscribes, then the loop is cancelled."""
         import polyecho.shared.db as dbmod
@@ -763,9 +726,7 @@ class TestPgListenLoop:
         monkeypatch.setattr(dbmod, "get_settings", lambda: _Settings())
 
         async def _flow() -> None:
-            task = asyncio.ensure_future(
-                pg_listen("c", lambda *_a: None, reconnect_delay=0.0)
-            )
+            task = asyncio.ensure_future(pg_listen("c", lambda *_a: None, reconnect_delay=0.0))
             # Drive: fail → backoff sleep(0) → reconnect → subscribe.
             for _ in range(20):
                 await asyncio.sleep(0)
@@ -780,9 +741,7 @@ class TestPgListenLoop:
         run(_flow())
         assert good.close_calls == 1  # cleaned up on cancel
 
-    def test_reconnects_after_connection_drop(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_reconnects_after_connection_drop(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When the dedicated connection drops (termination listener fires),
         the loop closes it and reconnects with a fresh connection."""
         import polyecho.shared.db as dbmod
@@ -800,9 +759,7 @@ class TestPgListenLoop:
         monkeypatch.setattr(dbmod, "get_settings", lambda: _Settings())
 
         async def _flow() -> None:
-            task = asyncio.ensure_future(
-                pg_listen("c", lambda *_a: None, reconnect_delay=0.0)
-            )
+            task = asyncio.ensure_future(pg_listen("c", lambda *_a: None, reconnect_delay=0.0))
             for _ in range(10):
                 await asyncio.sleep(0)
                 if conns[0].add_calls:

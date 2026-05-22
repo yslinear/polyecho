@@ -122,9 +122,22 @@ export const alertsSettings = {
     },
     copyTemplates: {
       heading: "跟單範本與風險",
-      help: "保守 / 平衡 / 積極範本、每日虧損上限與類別白名單目前由 CLI 編輯，後續階段會移至此處。",
+      help: "保守 / 平衡 / 積極範本、每日虧損上限、類別白名單、三模式關鍵字過濾（停用 / 白名單 / 黑名單）與市場結算時間上下限目前由 CLI 編輯，後續階段會移至此處。",
       /** Honest empty state: this section has no control yet. */
       emptyState: "此功能尚未提供。目前請使用 CLI 編輯跟單範本與風險上限。",
+      /** B4: tri-mode keyword filter modes (PolyHermes deep-dive). */
+      keywordFilter: {
+        label: "關鍵字過濾模式",
+        modeDisabled: "停用：不做關鍵字過濾",
+        modeWhitelist: "白名單：僅當市場文字符合任一關鍵字時才跟單",
+        modeBlacklist: "黑名單：當市場文字符合任一關鍵字時略過跟單",
+        termsLabel: "關鍵字清單（比對市場標題 / 類別）",
+      },
+      /** B4: upper market-end bound, mirrors the lower bound. */
+      marketMaxEnd: {
+        label: "市場結算時間上限（秒）",
+        help: "略過結算時間距今超過此秒數的市場；對應既有的下限設定。",
+      },
     },
   },
 } as const;

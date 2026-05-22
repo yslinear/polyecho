@@ -31,6 +31,7 @@ import {
 import {
   listBacktestJobs,
   type BacktestJobSummary,
+  type BacktestSortKey,
 } from "./actions";
 
 // Reads the DB on every request — never prerender at build time
@@ -106,10 +107,119 @@ function formatCreated(d: Date): string {
 }
 
 // ---------------------------------------------------------------------------
+// B1: denormalised summary cell helpers + sortable column header
+// ---------------------------------------------------------------------------
+/**
+ * Render a numeric summary value (the B1 denormalised columns arrive as
+ * `numeric` strings, or `null` for a not-yet-completed job). `null` becomes
+ * a calm muted placeholder (no em dash). `pct` appends a "%" suffix.
+ */
+function SummaryCell({
+  value,
+  digits = 2,
+  pct = false,
+}: {
+  value: string | number | null;
+  digits?: number;
+  pct?: boolean;
+}) {
+  if (value === null || value === undefined) {
+    return (
+      <span className="text-muted-foreground">
+        {t("backtest.list.summaryEmpty")}
+      </span>
+    );
+  }
+  const n = typeof value === "string" ? Number(value) : value;
+  if (!Number.isFinite(n)) {
+    return (
+      <span className="text-muted-foreground">
+        {t("backtest.list.summaryEmpty")}
+      </span>
+    );
+  }
+  return (
+    <span className="tabular-nums">
+      {n.toFixed(digits)}
+      {pct ? "%" : ""}
+    </span>
+  );
+}
+
+/** The known sort keys (mirrors `BacktestSortKey` in actions.ts). */
+const SORT_KEYS: ReadonlySet<string> = new Set<BacktestSortKey>([
+  "created_at",
+  "total_return_pct",
+  "win_rate",
+  "max_drawdown_pct",
+  "sharpe_ratio",
+  "total_trades",
+]);
+
+/**
+ * A column header that doubles as a sort toggle. Clicking it deep-links the
+ * page to `?sort=<key>&dir=<asc|desc>` — when the column is already the
+ * active sort, the direction flips; otherwise it defaults to descending.
+ * The active column shows a ▲ / ▼ marker (text, never colour-only — A11y).
+ */
+function SortHead({
+  label,
+  sortKey,
+  activeKey,
+  activeDir,
+  align = "left",
+}: {
+  label: string;
+  sortKey: BacktestSortKey;
+  activeKey: BacktestSortKey;
+  activeDir: "asc" | "desc";
+  align?: "left" | "right";
+}) {
+  const isActive = activeKey === sortKey;
+  const nextDir: "asc" | "desc" =
+    isActive && activeDir === "desc" ? "asc" : "desc";
+  const marker = isActive ? (activeDir === "desc" ? " ▼" : " ▲") : "";
+  return (
+    <Link
+      href={`/backtest?sort=${sortKey}&dir=${nextDir}`}
+      className={
+        "inline-flex items-center font-medium text-foreground underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" +
+        (align === "right" ? " justify-end" : "")
+      }
+      title={t("backtest.list.sortHint")}
+      data-sort-key={sortKey}
+      data-sort-active={isActive ? "true" : "false"}
+    >
+      {label}
+      {marker}
+    </Link>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
-export default async function BacktestListPage() {
-  const rows: BacktestJobSummary[] = await listBacktestJobs({ limit: 50 });
+export default async function BacktestListPage({
+  searchParams,
+}: {
+  // Next.js 15: searchParams is a Promise in Server Components.
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  // B1: resolve the sort column/direction from the URL (?sort=&dir=).
+  // Anything outside the known allowlist falls back to created_at desc so a
+  // hand-edited URL can never break the page or inject an arbitrary column.
+  const sp = await searchParams;
+  const rawSort = typeof sp.sort === "string" ? sp.sort : "";
+  const sortBy: BacktestSortKey = SORT_KEYS.has(rawSort)
+    ? (rawSort as BacktestSortKey)
+    : "created_at";
+  const sortDir: "asc" | "desc" = sp.dir === "asc" ? "asc" : "desc";
+
+  const rows: BacktestJobSummary[] = await listBacktestJobs({
+    limit: 50,
+    sortBy,
+    sortDir,
+  });
 
   return (
     <div className="space-y-8">
@@ -148,11 +258,66 @@ export default async function BacktestListPage() {
                 Mirrors the /leaders, /accounts, /discovery table treatment. */}
             <TableHeader className="sticky top-0 z-10 bg-muted">
               <TableRow>
-                <TableHead>{t("backtest.list.columns.date")}</TableHead>
+                <TableHead>
+                  <SortHead
+                    label={t("backtest.list.columns.date")}
+                    sortKey="created_at"
+                    activeKey={sortBy}
+                    activeDir={sortDir}
+                  />
+                </TableHead>
                 <TableHead>{t("backtest.list.columns.leaders")}</TableHead>
                 <TableHead>{t("backtest.list.columns.status")}</TableHead>
                 <TableHead className="text-right">
                   {t("backtest.list.columns.progress")}
+                </TableHead>
+                {/* B1: denormalised neutral-scenario summary columns,
+                    sortable so an operator can rank jobs by return / risk
+                    without opening each one. */}
+                <TableHead className="text-right">
+                  <SortHead
+                    label={t("backtest.list.columns.totalReturn")}
+                    sortKey="total_return_pct"
+                    activeKey={sortBy}
+                    activeDir={sortDir}
+                    align="right"
+                  />
+                </TableHead>
+                <TableHead className="text-right">
+                  <SortHead
+                    label={t("backtest.list.columns.winRate")}
+                    sortKey="win_rate"
+                    activeKey={sortBy}
+                    activeDir={sortDir}
+                    align="right"
+                  />
+                </TableHead>
+                <TableHead className="text-right">
+                  <SortHead
+                    label={t("backtest.list.columns.maxDrawdown")}
+                    sortKey="max_drawdown_pct"
+                    activeKey={sortBy}
+                    activeDir={sortDir}
+                    align="right"
+                  />
+                </TableHead>
+                <TableHead className="text-right">
+                  <SortHead
+                    label={t("backtest.list.columns.sharpe")}
+                    sortKey="sharpe_ratio"
+                    activeKey={sortBy}
+                    activeDir={sortDir}
+                    align="right"
+                  />
+                </TableHead>
+                <TableHead className="text-right">
+                  <SortHead
+                    label={t("backtest.list.columns.trades")}
+                    sortKey="total_trades"
+                    activeKey={sortBy}
+                    activeDir={sortDir}
+                    align="right"
+                  />
                 </TableHead>
                 <TableHead>{t("backtest.list.columns.window")}</TableHead>
                 <TableHead className="text-right">
@@ -194,6 +359,22 @@ export default async function BacktestListPage() {
                           {t("backtest.list.progressEmpty")}
                         </span>
                       )}
+                    </TableCell>
+                    {/* B1: denormalised neutral-scenario summary cells. */}
+                    <TableCell className="text-right">
+                      <SummaryCell value={r.total_return_pct} pct />
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <SummaryCell value={r.win_rate} digits={3} />
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <SummaryCell value={r.max_drawdown_pct} pct />
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <SummaryCell value={r.sharpe_ratio} />
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <SummaryCell value={r.total_trades} digits={0} />
                     </TableCell>
                     <TableCell className="font-mono text-xs tabular-nums">
                       {r.start_date} → {r.end_date}

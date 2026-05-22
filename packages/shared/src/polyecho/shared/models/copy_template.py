@@ -25,9 +25,7 @@ class CopyTemplate(Base):
 
     __tablename__ = "copy_templates"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     # SQL/Drizzle do NOT declare ``name`` UNIQUE — drop the ORM-only unique
     # so Base.metadata matches the migration (3-way alignment, SQL = truth).
     name: Mapped[str] = mapped_column(Text, nullable=False)
@@ -52,6 +50,14 @@ class CopyTemplate(Base):
     exclude_short_markets: Mapped[bool | None] = mapped_column(
         Boolean, nullable=True, default=False
     )
-    use_fok_orders: Mapped[bool | None] = mapped_column(
-        Boolean, nullable=True, default=True
-    )
+    use_fok_orders: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=True)
+
+    # Tri-mode keyword filter + upper market-end bound (PolyHermes deep-dive
+    # B4). ``keyword_filter_mode`` is ``disabled`` | ``whitelist`` |
+    # ``blacklist`` (SQL default ``disabled`` so existing templates are
+    # unchanged); ``keywords`` is the operator term list matched against a
+    # market title/category. ``market_max_end_seconds`` is the upper end
+    # bound mirroring the lower ``market_min_end_seconds`` guard.
+    keyword_filter_mode: Mapped[str | None] = mapped_column(Text, nullable=True, default="disabled")
+    keywords: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True, default=list)
+    market_max_end_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)

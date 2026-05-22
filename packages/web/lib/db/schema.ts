@@ -134,6 +134,16 @@ export const copyTemplates = pgTable("copy_templates", {
   category_whitelist: text("category_whitelist").array(),
   exclude_short_markets: boolean("exclude_short_markets").default(false),
   use_fok_orders: boolean("use_fok_orders").default(true),
+  /**
+   * Tri-mode keyword filter + upper market-end bound (PolyHermes deep-dive
+   * B4). `keyword_filter_mode` is disabled | whitelist | blacklist (default
+   * disabled so existing templates behave unchanged); `keywords` is the
+   * operator term list matched against a market title/category;
+   * `market_max_end_seconds` mirrors the lower bound as a ceiling.
+   */
+  keyword_filter_mode: text("keyword_filter_mode").default("disabled"),
+  keywords: text("keywords").array(),
+  market_max_end_seconds: integer("market_max_end_seconds"),
 });
 
 // ---------------------------------------------------------------------------
@@ -182,12 +192,70 @@ export const leaderTrades = pgTable(
     /** Cross-source dedup key (brief §3): txHash idempotency anchor. */
     tx_hash: text("tx_hash"),
     raw: jsonb("raw"),
+    /**
+     * A3 (PolyHermes deep-dive): durable per-trade copy-attempt outcome
+     * (PolyHermes' processed_trade.status slot) — 'success' | 'failed'.
+     * Persisted on both the placed and the failed-attempt path so a
+     * redelivery of a known-bad trade is not re-attempted. CHECK-
+     * constrained in SQL to ('success','failed') or NULL.
+     */
+    status: text("status"),
+    processed_at: timestamp("processed_at", { withTimezone: true }),
   },
   (t) => ({
     leaderTxUq: unique("uq_leader_trades_leader_tx").on(
       t.leader_address,
       t.tx_hash
     ),
+  })
+);
+
+// ---------------------------------------------------------------------------
+// markets — persisted market-metadata cache (C4, PolyHermes deep-dive)
+// LiveDataSource hits the data-api / Gamma every cycle for the same market
+// metadata with no persistence; this table backs a cache -> DB -> remote
+// read layering. A RESOLVED market (is_resolved=true) is immutable — its row
+// is served forever with no remote re-fetch; an unresolved market uses a
+// short freshness window keyed on updated_at. condition_id is the natural PK.
+// ---------------------------------------------------------------------------
+export const markets = pgTable(
+  "markets",
+  {
+    condition_id: text("condition_id").primaryKey(),
+    /** Polymarket internal market id (gamma "id" / data-api "market_id"). */
+    market_id: text("market_id"),
+    question: text("question"),
+    slug: text("slug"),
+    /** NegRisk flag — selects the NegRisk Exchange contract for orders. */
+    neg_risk: boolean("neg_risk"),
+    /** CLOB price tick size (e.g. 0.01); text to preserve the exact decimal. */
+    tick_size: text("tick_size"),
+    end_date: timestamp("end_date", { withTimezone: true }),
+    /** Outcome token list (token_id / outcome / price dicts). */
+    outcomes: jsonb("outcomes"),
+    /** Resolved/settled flag — once true the row is immutable. */
+    is_resolved: boolean("is_resolved").notNull().default(false),
+    /** Settled winning-outcome price (0/1 for binary); NULL until resolved. */
+    settled_price: numeric("settled_price", { precision: 10, scale: 6 }),
+    raw: jsonb("raw"),
+    /** When this row was first cached. */
+    cached_at: timestamp("cached_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    /** When this row was last refreshed from a remote read. */
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    /**
+     * The cache layer's opportunistic-refresh sweep selects unresolved rows
+     * by staleness; a partial index keeps it to the live subset (3-way
+     * aligned with idx_markets_unresolved_updated_at in 0000_init.sql).
+     */
+    unresolvedUpdatedAtIdx: index("idx_markets_unresolved_updated_at")
+      .on(t.updated_at)
+      .where(sql`${t.is_resolved} = false`),
   })
 );
 
@@ -249,10 +317,61 @@ export const backtestJobs = pgTable("backtest_jobs", {
     .notNull()
     .default("0"),
   result: jsonb("result"),
+  /**
+   * B1 (PolyHermes deep-dive): denormalised neutral-scenario summary stats,
+   * promoted out of the `result` jsonb so the /backtest list page can
+   * sort/filter without unpacking a multi-megabyte body. All NULLable: a
+   * pending/running/failed job has no summary yet, and `result` stays the
+   * source of truth (these are an additive read-optimised mirror).
+   */
+  total_return_pct: numeric("total_return_pct", { precision: 14, scale: 4 }),
+  win_rate: numeric("win_rate", { precision: 6, scale: 4 }),
+  max_drawdown_pct: numeric("max_drawdown_pct", { precision: 8, scale: 4 }),
+  total_trades: integer("total_trades"),
+  sharpe_ratio: numeric("sharpe_ratio", { precision: 10, scale: 4 }),
+  total_fees_usd: numeric("total_fees_usd", { precision: 14, scale: 4 }),
   created_at: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
 });
+
+// ---------------------------------------------------------------------------
+// backtest_trades — per-fill ledger for a backtest job (B1, PolyHermes
+// deep-dive). One row per executed fill (BUY / SELL / MTM) carrying the
+// equity curve (equity_after) so the /backtest pages render/sort without
+// unpacking the result jsonb. PolyHermes' backtest_trade.balance_after.
+// ---------------------------------------------------------------------------
+export const backtestTrades = pgTable(
+  "backtest_trades",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    backtest_job_id: uuid("backtest_job_id")
+      .notNull()
+      .references(() => backtestJobs.id),
+    /** Which leader + scenario this fill belongs to. */
+    leader_address: text("leader_address").notNull(),
+    /** optimistic | neutral | pessimistic */
+    scenario: text("scenario").notNull(),
+    /** Monotonic per-(job, leader, scenario) fill index. */
+    order_index: integer("order_index").notNull(),
+    /** BUY | SELL | MTM */
+    side: text("side").notNull(),
+    condition_id: text("condition_id"),
+    shares: numeric("shares", { precision: 20, scale: 6 }),
+    price: numeric("price", { precision: 10, scale: 6 }),
+    fee: numeric("fee", { precision: 14, scale: 4 }).notNull().default("0"),
+    pnl: numeric("pnl", { precision: 14, scale: 4 }).notNull().default("0"),
+    /** Equity (initial_capital + cumulative PnL) AFTER this fill. */
+    equity_after: numeric("equity_after", { precision: 16, scale: 4 }),
+    ts: timestamp("ts", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    jobIdx: index("idx_backtest_trades_job").on(t.backtest_job_id),
+  })
+);
 
 // ---------------------------------------------------------------------------
 // pending_actions — dangerous op confirmations (PRD §5.7)

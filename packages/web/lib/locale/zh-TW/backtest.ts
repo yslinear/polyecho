@@ -16,8 +16,18 @@ export const backtest = {
       progress: "進度",
       window: "回測期間",
       capital: "本金",
+      /** B1: denormalised neutral-scenario summary columns. */
+      totalReturn: "總報酬率",
+      winRate: "勝率",
+      maxDrawdown: "最大回撤",
+      sharpe: "Sharpe",
+      trades: "交易筆數",
       actions: "操作",
     },
+    /** Placeholder for a summary cell on a not-yet-completed job. */
+    summaryEmpty: "無",
+    /** Tooltip / hint for the sortable column headers (B1). */
+    sortHint: "點欄位標題依該欄排序",
     status: {
       pending: "已排入佇列",
       running: "執行中",

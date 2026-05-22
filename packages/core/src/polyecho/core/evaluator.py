@@ -63,6 +63,14 @@ class TemplateConfig:
     category_whitelist: tuple[str, ...] = ()
     exclude_short_markets: bool = True
     use_fok_orders: bool = True
+    # Tri-mode keyword filter (PolyHermes deep-dive B4). ``keyword_filter_mode``
+    # is ``disabled`` (no gating — the default, so existing templates behave
+    # exactly as before) | ``whitelist`` (copy only if a term matches) |
+    # ``blacklist`` (skip if a term matches). ``keywords`` is the operator
+    # term list. The legacy ``category_whitelist`` is honoured additively: a
+    # non-empty whitelist still gates as before, regardless of mode.
+    keyword_filter_mode: str = "disabled"
+    keywords: tuple[str, ...] = ()
     # Price band / book guards (brief §4 Conservative ceilings as defaults).
     min_price: Decimal = Decimal("0.02")
     max_price: Decimal = Decimal("0.98")
@@ -70,7 +78,11 @@ class TemplateConfig:
     min_depth: Decimal = Decimal("0")
     price_tolerance_pct: Decimal = Decimal("3")
     max_slippage_pct: Decimal = Decimal("3")
+    # Market-end bounds: ``market_min_end_seconds`` is the lower bound (skip a
+    # market resolving too soon); ``market_max_end_seconds`` is the upper
+    # bound (skip a market resolving too far out). 0 / None disables each.
     market_min_end_seconds: int = 0
+    market_max_end_seconds: int | None = None
     # Portfolio / circuit-breaker (brief §7 improvements 2 & 3).
     portfolio_max_usd: Decimal | None = None
     open_loss_limit_usd: Decimal | None = None
@@ -136,9 +148,7 @@ class TraderCopyEvaluator:
             )
 
         # --- not-following branch (brief §4) ---------------------------------
-        if self._is_following is not None and not self._is_following(
-            account_id, leader_address
-        ):
+        if self._is_following is not None and not self._is_following(account_id, leader_address):
             return _skip(
                 SkipReason.NOT_FOLLOWING,
                 f"no active follow_relation for {leader_address}",
@@ -160,18 +170,37 @@ class TraderCopyEvaluator:
             )
         side = TradeSide(side_raw)
 
-        # --- keyword / category filter (brief §4) ----------------------------
-        category = str(trade.get("category") or trade.get("title") or "")
+        # --- keyword / category filter (brief §4, PolyHermes deep-dive B4) ---
+        # The market text matched against both term lists. PolyHermes matches
+        # title + category; we concatenate both so either field can match.
+        market_text = " ".join(str(trade.get(k) or "") for k in ("category", "title")).lower()
+
+        # Legacy category_whitelist: kept additive — a non-empty whitelist
+        # still gates as before, independent of keyword_filter_mode.
         if tpl.category_whitelist:
-            if not any(
-                c.lower() in category.lower() for c in tpl.category_whitelist
-            ):
+            if not any(c.lower() in market_text for c in tpl.category_whitelist):
                 return _skip(
                     SkipReason.FILTER_KEYWORD,
-                    f"category {category!r} not in whitelist",
+                    f"market text {market_text!r} not in category_whitelist",
                 )
 
-        # --- short-market / market-end filter (brief §4) ---------------------
+        # Tri-mode keyword filter over the operator term list. ``disabled``
+        # (default) does no gating, so existing templates are unchanged.
+        mode = (tpl.keyword_filter_mode or "disabled").lower()
+        if mode in ("whitelist", "blacklist") and tpl.keywords:
+            matched = any(kw.lower() in market_text for kw in tpl.keywords)
+            if mode == "whitelist" and not matched:
+                return _skip(
+                    SkipReason.FILTER_KEYWORD,
+                    f"market text {market_text!r} matches no whitelist keyword",
+                )
+            if mode == "blacklist" and matched:
+                return _skip(
+                    SkipReason.FILTER_KEYWORD,
+                    f"market text {market_text!r} matches a blacklist keyword",
+                )
+
+        # --- short-market / market-end filter (brief §4, B4 upper bound) -----
         if self._market_end_for is not None:
             end_dt: datetime | None = self._market_end_for(condition_id)
             if end_dt is not None:
@@ -181,14 +210,24 @@ class TraderCopyEvaluator:
                         SkipReason.FILTER_MARKET_END,
                         f"market already ended at {end_dt.isoformat()}",
                     )
+                remaining = (end_dt - now).total_seconds()
                 if tpl.exclude_short_markets and tpl.market_min_end_seconds > 0:
-                    remaining = (end_dt - now).total_seconds()
                     if remaining < tpl.market_min_end_seconds:
                         return _skip(
                             SkipReason.FILTER_MARKET_END,
-                            f"market ends in {remaining:.0f}s "
-                            f"< {tpl.market_min_end_seconds}s",
+                            f"market ends in {remaining:.0f}s < {tpl.market_min_end_seconds}s",
                         )
+                # Upper bound (PolyHermes maxMarketEndDate): skip a market
+                # resolving further out than the operator ceiling.
+                if (
+                    tpl.market_max_end_seconds is not None
+                    and tpl.market_max_end_seconds > 0
+                    and remaining > tpl.market_max_end_seconds
+                ):
+                    return _skip(
+                        SkipReason.FILTER_MARKET_END,
+                        f"market ends in {remaining:.0f}s > {tpl.market_max_end_seconds}s",
+                    )
 
         # --- price band (brief §4) ------------------------------------------
         price = _to_decimal(trade.get("price"))
@@ -213,8 +252,7 @@ class TraderCopyEvaluator:
         else:
             return _skip(
                 SkipReason.DATA_UNAVAILABLE,
-                "copy_template has neither copy_ratio nor fixed_size_usd; "
-                "set one to enable sizing",
+                "copy_template has neither copy_ratio nor fixed_size_usd; set one to enable sizing",
             )
 
         # Clamp by max_position_usd (value cap, brief §3/§4).
@@ -232,19 +270,13 @@ class TraderCopyEvaluator:
             )
 
         notional = size * price
-        if (
-            tpl.min_trade_size_usd is not None
-            and notional < tpl.min_trade_size_usd
-        ):
+        if tpl.min_trade_size_usd is not None and notional < tpl.min_trade_size_usd:
             return _skip(
                 SkipReason.BELOW_MIN_SIZE,
-                f"notional ${notional} < min_trade_size_usd "
-                f"${tpl.min_trade_size_usd}",
+                f"notional ${notional} < min_trade_size_usd ${tpl.min_trade_size_usd}",
             )
 
-        token_id = str(
-            trade.get("token_id") or trade.get("asset") or condition_id
-        )
+        token_id = str(trade.get("token_id") or trade.get("asset") or condition_id)
         order_type = "FOK" if tpl.use_fok_orders else "FAK"
         decision = Decision(
             outcome=DecisionOutcome.COPY,

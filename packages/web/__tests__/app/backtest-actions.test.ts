@@ -249,4 +249,50 @@ describe("listBacktestJobs", () => {
     await listBacktestJobs({ limit: 25 });
     expect(lblLimit).toHaveBeenLastCalledWith(25);
   });
+
+  // B1: the denormalised summary columns are projected onto each row so the
+  // list can sort/filter without unpacking the result jsonb.
+  it("surfaces the B1 denormalised summary columns on each row", async () => {
+    listRows = [
+      {
+        id: "j-sum",
+        leader_addresses: ["0xabc"],
+        start_date: "2025-01-01",
+        end_date: "2025-02-01",
+        initial_capital_usd: "1000",
+        status: "completed",
+        progress: "100",
+        result: null,
+        total_return_pct: "15.0000",
+        win_rate: "0.6000",
+        max_drawdown_pct: "12.5000",
+        total_trades: 8,
+        sharpe_ratio: "1.8000",
+        total_fees_usd: "4.0000",
+        created_at: new Date("2026-05-20T00:00:00Z"),
+      },
+    ];
+    const out = await listBacktestJobs();
+    expect(out[0].total_return_pct).toBe("15.0000");
+    expect(out[0].win_rate).toBe("0.6000");
+    expect(out[0].max_drawdown_pct).toBe("12.5000");
+    expect(out[0].total_trades).toBe(8);
+    expect(out[0].sharpe_ratio).toBe("1.8000");
+    expect(out[0].total_fees_usd).toBe("4.0000");
+  });
+
+  // B1: sorting is always applied via a single .orderBy() call; the column
+  // is resolved from the allowlist so the sort key is never interpolated.
+  it("calls .orderBy(...) exactly once for every sort key", async () => {
+    listRows = [];
+    await listBacktestJobs({ sortBy: "win_rate", sortDir: "asc" });
+    expect(lblOrderBy).toHaveBeenCalledTimes(1);
+    lblOrderBy.mockClear();
+    await listBacktestJobs({ sortBy: "total_return_pct", sortDir: "desc" });
+    expect(lblOrderBy).toHaveBeenCalledTimes(1);
+    lblOrderBy.mockClear();
+    // The default (no sort opts) still issues exactly one .orderBy().
+    await listBacktestJobs();
+    expect(lblOrderBy).toHaveBeenCalledTimes(1);
+  });
 });

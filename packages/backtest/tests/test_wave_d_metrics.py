@@ -63,11 +63,23 @@ def _patch_status_recorder(
         *,
         progress: float | None = None,
         result: dict[str, object] | None = None,
+        summary: dict[str, object] | None = None,
     ) -> None:
+        # B1: accept (and ignore) the denormalised-summary kwarg.
         transitions.append({"status": status})
+
+    async def _noop_persist_artifacts(
+        session: object,
+        job_id: object,
+        all_results: dict[str, object],
+        initial_capital_usd: float,
+    ) -> None:
+        # B1: per-fill ledger write needs a real DB session — stubbed here.
+        return None
 
     monkeypatch.setattr(jobs_mod, "session_scope", _fake_scope)
     monkeypatch.setattr(jobs_mod, "_set_status", _record_set_status)
+    monkeypatch.setattr(jobs_mod, "_persist_backtest_artifacts", _noop_persist_artifacts)
 
 
 def _done_records(
@@ -116,9 +128,7 @@ async def test_timing_helper_exception_does_not_propagate(
     def _boom() -> float:
         raise RuntimeError("forced clock failure")
 
-    monkeypatch.setattr(
-        "polyecho.backtest._perf.time.perf_counter", _boom
-    )
+    monkeypatch.setattr("polyecho.backtest._perf.time.perf_counter", _boom)
 
     transitions: list[dict[str, object]] = []
     _patch_status_recorder(monkeypatch, transitions)

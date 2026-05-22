@@ -69,6 +69,7 @@ from polyecho.shared.models import (  # noqa: F401 — register all tables on Ba
     Event,
     FollowRelation,
     LeaderTrade,
+    Market,
     MyTrade,
     PendingAction,
     PushSubscription,
@@ -184,11 +185,7 @@ def _reflect(sync_conn: Any) -> dict[str, Any]:
             }
             for c in insp.get_columns(table, schema="public")
         }
-        pk = tuple(
-            insp.get_pk_constraint(table, schema="public").get(
-                "constrained_columns", []
-            )
-        )
+        pk = tuple(insp.get_pk_constraint(table, schema="public").get("constrained_columns", []))
         uniques = {
             tuple(sorted(u["column_names"]))
             for u in insp.get_unique_constraints(table, schema="public")
@@ -288,9 +285,9 @@ _PGTABLE_RE = re.compile(
 # the first newline-then-identifier-colon (next column) or a `}` so nested
 # `references(() => x.id)` parens don't leak into the next entry.
 _COLUMN_RE = re.compile(
-    r'(?P<jskey>[A-Za-z_]\w*)\s*:\s*'
+    r"(?P<jskey>[A-Za-z_]\w*)\s*:\s*"
     r'(?P<fn>[A-Za-z_]\w*)\s*\(\s*"(?P<col>[a-z_0-9]+)"'
-    r'(?P<chain>[^\n]*(?:\n\s*\.[^\n]*)*)',
+    r"(?P<chain>[^\n]*(?:\n\s*\.[^\n]*)*)",
 )
 
 
@@ -351,21 +348,14 @@ def test_drizzle_schema_matches_orm() -> None:
         dcols = drizzle[tname]
         for cname, meta in sorted(exp["columns"].items()):
             if cname not in dcols:
-                diffs.append(
-                    f"{tname}.{cname}: ORM column absent from schema.ts"
-                )
+                diffs.append(f"{tname}.{cname}: ORM column absent from schema.ts")
                 continue
             exp_fam = meta["family"]
             got_fam = dcols[cname]
             if exp_fam != got_fam:
-                diffs.append(
-                    f"{tname}.{cname}: schema.ts type {got_fam} != "
-                    f"{exp_fam} (ORM)"
-                )
+                diffs.append(f"{tname}.{cname}: schema.ts type {got_fam} != {exp_fam} (ORM)")
 
-    assert not diffs, (
-        "Schema drift (ORM vs Drizzle schema.ts):\n" + "\n".join(diffs)
-    )
+    assert not diffs, "Schema drift (ORM vs Drizzle schema.ts):\n" + "\n".join(diffs)
 
 
 def test_migration_matches_orm_metadata() -> None:
@@ -418,8 +408,7 @@ def test_migration_matches_orm_metadata() -> None:
     # ORM contract is fully satisfied, not that the DB has nothing else).
     missing_tables = sorted(set(expected) - set(reflected))
     assert not missing_tables, (
-        f"Tables in Base.metadata but NOT created by 0000_init.sql: "
-        f"{missing_tables}"
+        f"Tables in Base.metadata but NOT created by 0000_init.sql: {missing_tables}"
     )
 
     diffs: list[str] = []
@@ -437,10 +426,7 @@ def test_migration_matches_orm_metadata() -> None:
         for cname in sorted(set(exp_cols) & set(got_cols)):
             e, g = exp_cols[cname], got_cols[cname]
             if e["family"] != g["family"]:
-                diffs.append(
-                    f"{tname}.{cname}: type {g['family']} (DB) != "
-                    f"{e['family']} (ORM)"
-                )
+                diffs.append(f"{tname}.{cname}: type {g['family']} (DB) != {e['family']} (ORM)")
             if (
                 e["precision"] is not None
                 and g["precision"] is not None
@@ -452,20 +438,14 @@ def test_migration_matches_orm_metadata() -> None:
                 )
             if e["nullable"] != g["nullable"]:
                 diffs.append(
-                    f"{tname}.{cname}: nullable={g['nullable']} (DB) != "
-                    f"{e['nullable']} (ORM)"
+                    f"{tname}.{cname}: nullable={g['nullable']} (DB) != {e['nullable']} (ORM)"
                 )
 
         if tuple(exp["pk"]) != tuple(got["pk"]):
-            diffs.append(
-                f"{tname}: PK {got['pk']} (DB) != {exp['pk']} (ORM)"
-            )
+            diffs.append(f"{tname}: PK {got['pk']} (DB) != {exp['pk']} (ORM)")
         if exp["uniques"] != got["uniques"]:
             diffs.append(
-                f"{tname}: UNIQUE {sorted(got['uniques'])} (DB) != "
-                f"{sorted(exp['uniques'])} (ORM)"
+                f"{tname}: UNIQUE {sorted(got['uniques'])} (DB) != {sorted(exp['uniques'])} (ORM)"
             )
 
-    assert not diffs, "Schema drift (ORM vs applied 0000_init.sql):\n" + "\n".join(
-        diffs
-    )
+    assert not diffs, "Schema drift (ORM vs applied 0000_init.sql):\n" + "\n".join(diffs)
