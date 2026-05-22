@@ -505,6 +505,116 @@ def match_fifo_sell(lots: list[Lot], sell_shares: float, sell_price: float) -> S
 
 
 # ---------------------------------------------------------------------------
+# Incremental simulation state + per-trade result (C1-P2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SimState:
+    """Serializable simulation state for incremental copy-trade simulation.
+
+    C1-P2 (PolyHermes C1 roadmap).  ``BacktestEngine.run()`` is a *batch*
+    simulation over a fixed leader-trade window; the C1 forward
+    paper-trading worker simulates ONE leader trade per worker cycle against
+    state that lives in DB rows (``paper_sessions`` / ``paper_positions``),
+    not in a local Python loop.
+
+    :meth:`BacktestEngine.simulate_one` advances exactly one trade against an
+    instance of this dataclass and returns the updated state, so the batch
+    path and the future incremental path share ONE code path.  Every field
+    here is a plain Python type (or a list of :class:`Lot`, itself a plain
+    dataclass), so the structure round-trips cleanly to JSON / DB rows; the
+    paper worker rebuilds a ``SimState`` from its persisted rows each cycle.
+    No DB wiring lives here (that is C1-P3) — this is only the clean shape.
+
+    Attributes:
+        capital_remaining: Available capital in USD (decreases on a BUY open,
+                           increases on a SELL close).
+        open_positions:    ``condition_id -> ordered FIFO Lot list`` (B5).  A
+                           BUY appends a :class:`Lot`; a SELL consumes the
+                           oldest lots first.  An empty list's key is pruned
+                           so ``len(open_positions)`` is an exact
+                           open-position count for the max-concurrent gate.
+        daily_loss:        ``date -> cumulative loss`` (stored as a positive
+                           amount); feeds the daily-loss-limit risk gate.
+        halted_days:       Days on which the daily-loss limit tripped — every
+                           later trade on such a day is risk-skipped.
+        trade_count:       Count of executed (non-skipped) copy fills — BUY
+                           opens plus SELL closes.
+        realized_pnl:      Cumulative *realised* PnL in USD (the per-trade
+                           ``pnl_usd`` of every executed fill: SELL gross
+                           minus fee, and the negative BUY-leg fee).  MTM is
+                           NOT folded in here — it is applied at period end.
+        total_slippage_bps: ``slippage_bps`` plus the ASSUMPTION-DELAY extra
+                           (``execution_delay_seconds * 0.5`` bps/s).  Cached
+                           on the state so :meth:`simulate_one` stays pure of
+                           the params-to-slippage derivation.
+    """
+
+    capital_remaining: float
+    total_slippage_bps: int
+    open_positions: dict[str, list[Lot]] = field(default_factory=dict)
+    daily_loss: dict[date, float] = field(default_factory=lambda: defaultdict(float))
+    halted_days: set[date] = field(default_factory=set)
+    trade_count: int = 0
+    realized_pnl: float = 0.0
+
+    @classmethod
+    def initial(cls, params: BacktestParams) -> SimState:
+        """Build a fresh :class:`SimState` from backtest parameters.
+
+        Derives ``total_slippage_bps`` from ``slippage_bps`` plus the
+        ASSUMPTION-DELAY extra (0.5 bps per second of execution delay) so the
+        per-trade simulation never has to re-derive it.
+        """
+        delay_extra_bps = int(params.execution_delay_seconds * 0.5)
+        return cls(
+            capital_remaining=params.initial_capital_usd,
+            total_slippage_bps=params.slippage_bps + delay_extra_bps,
+            open_positions={},
+            daily_loss=defaultdict(float),
+            halted_days=set(),
+            trade_count=0,
+            realized_pnl=0.0,
+        )
+
+    @property
+    def open_position_count(self) -> int:
+        """Exact count of condition_ids holding at least one open FIFO lot."""
+        return len(self.open_positions)
+
+
+@dataclass
+class TradeResult:
+    """Outcome of simulating ONE leader trade via :meth:`simulate_one`.
+
+    C1-P2.  Carries the trade-log entries the simulation produced (one entry
+    for an executed/ skipped fill; the period-end MTM pass produces its own
+    entries separately) and the skip classification so the caller can
+    aggregate :class:`SkipStats`.
+
+    Attributes:
+        log_entries: Trade-log dicts produced by this trade (always exactly
+                     one for the per-trade body — either an executed fill or
+                     a skip entry).  A list so the structure stays open to
+                     future multi-entry results without an API change.
+        executed:    True if the trade was a real BUY open / SELL close;
+                     False if it was skipped by a filter or risk gate.
+        skip_reason: When ``executed`` is False, the skip-reason string
+                     (matches the ``_skip_entry`` reasons); None otherwise.
+        skip_bucket: When ``executed`` is False, which :class:`SkipStats`
+                     counter to increment — one of ``insufficient_liquidity``,
+                     ``risk_triggered``, ``below_min_size``,
+                     ``category_filtered``; None otherwise.
+    """
+
+    log_entries: list[dict[str, Any]] = field(default_factory=list)
+    executed: bool = False
+    skip_reason: str | None = None
+    skip_bucket: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
 
@@ -581,243 +691,42 @@ class BacktestEngine:
         positions_map = await self._fetch_positions_map(effective_leader)
 
         # ---- 3. Simulate ---------------------------------------------------
+        # C1-P2: the per-trade body is extracted into :meth:`simulate_one`.
+        # ``run()`` is now a thin batch driver — it builds one :class:`SimState`,
+        # advances it trade-by-trade, and aggregates :class:`SkipStats` from
+        # each :class:`TradeResult`.  The future incremental paper-trading
+        # worker calls the SAME :meth:`simulate_one`, so the batch path and the
+        # incremental path share ONE code path (the logic is never forked).
         skip_stats = SkipStats()
         trade_log: list[dict[str, Any]] = []
 
-        # State
-        capital_remaining = params.initial_capital_usd
-        # open_positions: condition_id → ordered list of FIFO Lots (B5).
-        # A BUY appends a Lot; a SELL consumes the oldest lots first via
-        # match_fifo_sell.  A condition_id with an empty list == no open
-        # position (the key is pruned so len(open_positions) stays an exact
-        # open-position count for the max-concurrent-positions gate).
-        open_positions: dict[str, list[Lot]] = {}
-        # daily_loss: date → cumulative loss (positive = loss)
-        daily_loss: dict[date, float] = defaultdict(float)
-        # halted_days: days where risk limit was hit
-        halted_days: set[date] = set()
+        state = SimState.initial(params)
 
-        # Track leader's own cost basis for leader PnL comparison
+        # Track leader's own cost basis for leader PnL comparison.  This is
+        # NOT part of SimState: it is a backtest-only comparison artefact (the
+        # leader's *own* unmodelled PnL), not copy-trade simulation state, so
+        # the paper worker has no use for it.
         leader_open: dict[str, dict[str, Any]] = {}
         leader_daily_pnl: dict[date, float] = defaultdict(float)
 
-        # Extra delay slippage: ASSUMPTION-DELAY
-        # 0.5 bps per second of delay, added on top of slippage_bps
-        delay_extra_bps = int(params.execution_delay_seconds * 0.5)
-        total_slippage_bps = params.slippage_bps + delay_extra_bps
-
         for trade in trades:
-            trade_date = trade.timestamp.date()
-            side = trade.side or "BUY"
-            leader_price = trade.price or 0.0
-            leader_usdc = trade.usdc_size or 0.0
-            cond_id = trade.condition_id or ""
-
             # ---- Track leader's own PnL (no slippage, no risk gate) --------
             self._update_leader_tracking(leader_open, leader_daily_pnl, trade, positions_map)
 
-            # ---- C4: SELL with no matching open BUY ------------------------
-            # A SELL whose condition_id is not in open_positions has no copy
-            # position to close: either the leader opened the BUY *before*
-            # start_date (out of window), or this is a duplicate / partial
-            # SELL whose BUY was already closed.  The previous code fell
-            # through to the trade-log append with side="SELL", pnl_usd=0.0
-            # and skipped=False, which inflated the *closed-trade* count and
-            # therefore distorted win_rate (a 0-PnL phantom "loss").  Skip it
-            # BEFORE computing fill price / shares so it is recorded as a
-            # genuine skip with an explicit reason and never reaches the
-            # closed-trade / win-rate population.
-            if side == "SELL" and cond_id not in open_positions:
-                skip_stats.risk_triggered += 1
-                skip_stats.total += 1
-                trade_log.append(self._skip_entry(trade, "no_open_position", params))
-                continue
-
-            # ---- Category whitelist filter ---------------------------------
-            if params.category_whitelist is not None:
-                title = str(trade.raw.get("title") or "")
-                if not any(cat.lower() in title.lower() for cat in params.category_whitelist):
-                    skip_stats.category_filtered += 1
-                    skip_stats.total += 1
-                    trade_log.append(self._skip_entry(trade, "category_filtered", params))
-                    continue
-
-            # ---- Risk gate: daily loss limit --------------------------------
-            if trade_date in halted_days:
-                skip_stats.risk_triggered += 1
-                skip_stats.total += 1
-                trade_log.append(self._skip_entry(trade, "risk_daily_limit", params))
-                continue
-
-            # ---- Risk gate: max concurrent positions (only count BUY opens) -
-            if side == "BUY" and len(open_positions) >= params.max_concurrent_positions:
-                skip_stats.risk_triggered += 1
-                skip_stats.total += 1
-                trade_log.append(self._skip_entry(trade, "risk_max_positions", params))
-                continue
-
-            # ---- Compute copy size -----------------------------------------
-            # ASSUMPTION-COPY-SIZE: fixed_size_usd > 0 overrides copy_ratio
-            if params.fixed_size_usd > 0.0:
-                copy_usdc = params.fixed_size_usd
-            else:
-                copy_usdc = leader_usdc * params.copy_ratio
-
-            # Cap at max_position_usd
-            copy_usdc = min(copy_usdc, params.max_position_usd)
-
-            # ---- Below-min filter ------------------------------------------
-            if copy_usdc < params.min_trade_size_usd:
-                skip_stats.below_min_size += 1
-                skip_stats.total += 1
-                trade_log.append(self._skip_entry(trade, "below_min_size", params))
-                continue
-
-            # ---- Liquidity gate --------------------------------------------
-            # ASSUMPTION-LIQ: reject if copy > 10× leader's own notional;
-            # signals we'd dominate a thin book.
-            if leader_usdc > 0.0 and copy_usdc > 10.0 * leader_usdc:
-                skip_stats.insufficient_liquidity += 1
-                skip_stats.total += 1
-                trade_log.append(self._skip_entry(trade, "insufficient_liquidity", params))
-                continue
-
-            # ---- Adverse fill price (slippage + delay) ---------------------
-            fill_price = apply_slippage(leader_price, side, total_slippage_bps)
-
-            # ---- P1-10a: per-leg trading fee (PRD §5.4 non-negotiable) -----
-            # Charged on BOTH legs: the BUY open consumes extra capital, the
-            # SELL close deducts from realised PnL.  A pure cost — never
-            # improves PnL — so high fee_bps must monotonically reduce return.
-            #
-            # CRIT-2 / B5: the *fee notional* must stay consistent with the
-            # shares actually transacted on this leg.  For a BUY this is
-            # ``copy_usdc`` (the opened notional).  For a SELL under FIFO the
-            # gross PnL is matched only against the open lots, so the SELL-leg
-            # fee is charged on the SELL-side notional bounded by the *total
-            # open lot notional* on this condition_id — a SELL larger than the
-            # open position is fee-charged only on the portion actually
-            # closed, and a SELL that consumes layered lots at different
-            # prices is fee-charged on the genuinely-matched notional.
-            if side == "SELL" and cond_id in open_positions:
-                _open_usdc = sum(lot.copy_usdc for lot in open_positions[cond_id])
-                fee_notional = min(copy_usdc, _open_usdc)
-            else:
-                fee_notional = copy_usdc
-            fee_usd = compute_fee(fee_notional, params.fee_bps)
-
-            # ---- Capital check (only BUY consumes capital) -----------------
-            if side == "BUY":
-                # The fee is paid up-front alongside the notional, so the
-                # capital gate must cover copy_usdc + fee_usd.
-                if copy_usdc + fee_usd > capital_remaining:
-                    # Partial fill not modelled; skip to keep it simple
-                    skip_stats.risk_triggered += 1
-                    skip_stats.total += 1
-                    trade_log.append(self._skip_entry(trade, "risk_insufficient_capital", params))
-                    continue
-                capital_remaining -= copy_usdc + fee_usd
-
-            # ---- Compute copy token size (shares = usdc / fill_price) ------
-            copy_shares = copy_usdc / fill_price if fill_price > 0.0 else 0.0
-
-            # ---- PnL realisation -------------------------------------------
-            pnl_usd = 0.0
-            closed_at: datetime | None = None
-            opened_at: datetime | None = None
-
-            if side == "SELL" and cond_id in open_positions:
-                # B5: close against the FIFO lot list, oldest lots first.
-                # match_fifo_sell mutates the lot list in place (consumed
-                # lots removed / shrunk) and returns the per-lot gross PnL +
-                # the proportional BUY notional returned to capital.
-                lots = open_positions[cond_id]
-                sell_match = match_fifo_sell(lots, copy_shares, fill_price)
-                opened_at = sell_match.oldest_opened_at
-                # Gross PnL = Σ over consumed lots of
-                # (sell_price - lot_buy_price) * matched_qty.  The SELL-leg
-                # fee is then deducted so the *net* realised PnL (and
-                # daily-loss tracking) reflects the true round-trip cost.
-                gross_pnl = sell_match.gross_pnl
-                pnl_usd = gross_pnl - fee_usd
-                # CRIT-1 / B5: the *principal returned to capital* is the sum
-                # of the per-lot proportional BUY notionals that were
-                # actually committed at BUY time — NOT the freshly-recomputed
-                # SELL-side ``copy_usdc`` (= leader SELL notional × ratio).
-                # match_fifo_sell already proportions each consumed lot's
-                # notional, so a partial close returns exactly the slice that
-                # was closed; capital_remaining stays exact across layered
-                # partial exits.
-                capital_remaining += sell_match.returned_notional + pnl_usd
-                # B5: a SELL that fully drains every lot leaves an empty
-                # list — prune the key so len(open_positions) stays an exact
-                # open-position count for the max-concurrent gate.
-                if not lots:
-                    del open_positions[cond_id]
-                closed_at = trade.timestamp
-                # Carry the matched share count onto the trade-log entry so
-                # downstream consumers see what the SELL actually closed.
-                copy_shares = sell_match.matched_shares
-
-                # Update daily loss tracking (loss = negative pnl)
-                if pnl_usd < 0.0:
-                    daily_loss[trade_date] -= pnl_usd  # store as positive loss amount
-                    if daily_loss[trade_date] >= params.daily_loss_limit_usd:
-                        halted_days.add(trade_date)
-                        logger.debug(
-                            "backtest.daily_limit_hit",
-                            extra={"date": str(trade_date), "loss": daily_loss[trade_date]},
-                        )
-            elif side == "BUY":
-                # Open new position. The BUY-leg fee is *already* deducted
-                # from capital_remaining above; recording it on the trade-log
-                # entry keeps total_fees_usd a faithful both-legs total.
-                #
-                # IMP-1: the BUY-leg fee is a *realised* capital outflow the
-                # moment the position opens, but ``_build_pnl_curve`` skips
-                # every entry whose ``pnl_usd == 0.0`` (and a freshly-opened
-                # BUY otherwise has pnl_usd == 0.0).  A BUY that is opened but
-                # never closed/MTM'd in-window therefore leaked its fee out of
-                # ``total_return_usd`` (return overstated by the BUY fee).
-                # Record the BUY fee as *negative PnL on the BUY entry* so the
-                # cumulative curve reflects the true capital change on the BUY
-                # date.  If/when the position is later closed by a SELL, only
-                # the SELL-leg fee is charged again — the round-trip's gross
-                # PnL is independent of this entry, so there is no double count
-                # (BUY fee here, SELL fee on the SELL entry).
-                pnl_usd = -fee_usd
-                # B5: every BUY opens its OWN FIFO lot at its own fill price.
-                # Layered partial BUYs on the same condition_id therefore
-                # accumulate as separate lots, each with an independent cost
-                # basis, and a later SELL consumes them oldest-first.
-                open_positions.setdefault(cond_id, []).append(
-                    Lot(
-                        shares=copy_shares,
-                        fill_price=fill_price,
-                        copy_usdc=copy_usdc,
-                        opened_at=trade.timestamp,
-                    )
+            # ---- Simulate exactly one copy trade against the shared state --
+            state, trade_result = self.simulate_one(trade, state, params)
+            trade_log.extend(trade_result.log_entries)
+            if not trade_result.executed and trade_result.skip_bucket is not None:
+                setattr(
+                    skip_stats,
+                    trade_result.skip_bucket,
+                    getattr(skip_stats, trade_result.skip_bucket) + 1,
                 )
+                skip_stats.total += 1
 
-            entry = {
-                "timestamp": trade.timestamp.isoformat(),
-                "date": str(trade_date),
-                "condition_id": cond_id,
-                "side": side,
-                "leader_price": leader_price,
-                "fill_price": fill_price,
-                "copy_usdc": copy_usdc,
-                "copy_shares": copy_shares,
-                "pnl_usd": pnl_usd,
-                "fee_usd": fee_usd,
-                # I8: the matching BUY's open time, stored on the SELL entry so
-                # avg_hold_hours = SELL ts − BUY opened_at (was ≈0 because it
-                # used SELL ts − SELL closed_at, both the SELL timestamp).
-                "opened_at": opened_at.isoformat() if opened_at else None,
-                "closed_at": closed_at.isoformat() if closed_at else None,
-                "skipped": False,
-            }
-            trade_log.append(entry)
+        # The MTM / curve / stats steps below read the open positions and
+        # capital out of the shared SimState.
+        open_positions = state.open_positions
 
         # ---- 4. Mark-to-market open positions at period end ----------------
         # ASSUMPTION-MTM
@@ -923,6 +832,259 @@ class BacktestEngine:
             },
         )
         return result
+
+    # -----------------------------------------------------------------------
+    # Incremental per-trade simulation (C1-P2)
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def simulate_one(
+        trade: ActivityRecord,
+        state: SimState,
+        params: BacktestParams,
+    ) -> tuple[SimState, TradeResult]:
+        """Simulate ONE leader trade against ``state``; return updated state.
+
+        C1-P2 (PolyHermes C1 roadmap).  This is the per-trade body extracted
+        verbatim from :meth:`run`'s former ``for trade in trades`` loop — the
+        category whitelist, the risk gates (daily-loss limit, max-concurrent,
+        insufficient-capital), the copy-size / below-min / liquidity filters,
+        the slippage + delay fill model (:func:`apply_slippage`), the per-leg
+        fee (:func:`compute_fee`), the B5 FIFO match (:func:`match_fifo_sell`
+        over :class:`Lot` lists), and the realised-PnL math are ALL reused
+        unchanged.  ``run()`` calls this in its loop, and the C1 forward
+        paper-trading worker calls the same method one trade per cycle, so the
+        batch and incremental paths never fork.
+
+        Behaviour-preserving: ``state`` is MUTATED in place (and also
+        returned, so a caller may treat it functionally) — ``open_positions``,
+        ``capital_remaining``, ``daily_loss``, ``halted_days``,
+        ``trade_count`` and ``realized_pnl`` advance exactly as the old inline
+        loop advanced its local variables.  The 3-scenario (optimistic /
+        neutral / pessimistic) modelling is preserved because the only
+        scenario inputs — ``slippage_bps`` and ``execution_delay_seconds`` —
+        flow in through ``state.total_slippage_bps``, set by
+        :meth:`SimState.initial` from ``params``.
+
+        Args:
+            trade:  One leader TRADE :class:`ActivityRecord` to simulate.
+            state:  The :class:`SimState` to advance (mutated in place).
+            params: The :class:`BacktestParams` for this run (copy size,
+                    fee, risk limits, category whitelist).
+
+        Returns:
+            ``(state, TradeResult)`` — the same ``state`` object, and a
+            :class:`TradeResult` carrying the trade-log entry plus the skip
+            classification (so a batch caller can aggregate
+            :class:`SkipStats`).
+        """
+        trade_date = trade.timestamp.date()
+        side = trade.side or "BUY"
+        leader_price = trade.price or 0.0
+        leader_usdc = trade.usdc_size or 0.0
+        cond_id = trade.condition_id or ""
+        open_positions = state.open_positions
+
+        def _skipped(reason: str, bucket: str) -> tuple[SimState, TradeResult]:
+            return state, TradeResult(
+                log_entries=[BacktestEngine._skip_entry(trade, reason, params)],
+                executed=False,
+                skip_reason=reason,
+                skip_bucket=bucket,
+            )
+
+        # ---- C4: SELL with no matching open BUY ----------------------------
+        # A SELL whose condition_id is not in open_positions has no copy
+        # position to close: either the leader opened the BUY *before*
+        # start_date (out of window), or this is a duplicate / partial
+        # SELL whose BUY was already closed.  The previous code fell
+        # through to the trade-log append with side="SELL", pnl_usd=0.0
+        # and skipped=False, which inflated the *closed-trade* count and
+        # therefore distorted win_rate (a 0-PnL phantom "loss").  Skip it
+        # BEFORE computing fill price / shares so it is recorded as a
+        # genuine skip with an explicit reason and never reaches the
+        # closed-trade / win-rate population.
+        if side == "SELL" and cond_id not in open_positions:
+            return _skipped("no_open_position", "risk_triggered")
+
+        # ---- Category whitelist filter -------------------------------------
+        if params.category_whitelist is not None:
+            title = str(trade.raw.get("title") or "")
+            if not any(cat.lower() in title.lower() for cat in params.category_whitelist):
+                return _skipped("category_filtered", "category_filtered")
+
+        # ---- Risk gate: daily loss limit ------------------------------------
+        if trade_date in state.halted_days:
+            return _skipped("risk_daily_limit", "risk_triggered")
+
+        # ---- Risk gate: max concurrent positions (only count BUY opens) -----
+        if side == "BUY" and state.open_position_count >= params.max_concurrent_positions:
+            return _skipped("risk_max_positions", "risk_triggered")
+
+        # ---- Compute copy size ---------------------------------------------
+        # ASSUMPTION-COPY-SIZE: fixed_size_usd > 0 overrides copy_ratio
+        if params.fixed_size_usd > 0.0:
+            copy_usdc = params.fixed_size_usd
+        else:
+            copy_usdc = leader_usdc * params.copy_ratio
+
+        # Cap at max_position_usd
+        copy_usdc = min(copy_usdc, params.max_position_usd)
+
+        # ---- Below-min filter ----------------------------------------------
+        if copy_usdc < params.min_trade_size_usd:
+            return _skipped("below_min_size", "below_min_size")
+
+        # ---- Liquidity gate -------------------------------------------------
+        # ASSUMPTION-LIQ: reject if copy > 10× leader's own notional;
+        # signals we'd dominate a thin book.
+        if leader_usdc > 0.0 and copy_usdc > 10.0 * leader_usdc:
+            return _skipped("insufficient_liquidity", "insufficient_liquidity")
+
+        # ---- Adverse fill price (slippage + delay) -------------------------
+        fill_price = apply_slippage(leader_price, side, state.total_slippage_bps)
+
+        # ---- P1-10a: per-leg trading fee (PRD §5.4 non-negotiable) ---------
+        # Charged on BOTH legs: the BUY open consumes extra capital, the
+        # SELL close deducts from realised PnL.  A pure cost — never
+        # improves PnL — so high fee_bps must monotonically reduce return.
+        #
+        # CRIT-2 / B5: the *fee notional* must stay consistent with the
+        # shares actually transacted on this leg.  For a BUY this is
+        # ``copy_usdc`` (the opened notional).  For a SELL under FIFO the
+        # gross PnL is matched only against the open lots, so the SELL-leg
+        # fee is charged on the SELL-side notional bounded by the *total
+        # open lot notional* on this condition_id — a SELL larger than the
+        # open position is fee-charged only on the portion actually
+        # closed, and a SELL that consumes layered lots at different
+        # prices is fee-charged on the genuinely-matched notional.
+        if side == "SELL" and cond_id in open_positions:
+            _open_usdc = sum(lot.copy_usdc for lot in open_positions[cond_id])
+            fee_notional = min(copy_usdc, _open_usdc)
+        else:
+            fee_notional = copy_usdc
+        fee_usd = compute_fee(fee_notional, params.fee_bps)
+
+        # ---- Capital check (only BUY consumes capital) ---------------------
+        if side == "BUY":
+            # The fee is paid up-front alongside the notional, so the
+            # capital gate must cover copy_usdc + fee_usd.
+            if copy_usdc + fee_usd > state.capital_remaining:
+                # Partial fill not modelled; skip to keep it simple
+                return _skipped("risk_insufficient_capital", "risk_triggered")
+            state.capital_remaining -= copy_usdc + fee_usd
+
+        # ---- Compute copy token size (shares = usdc / fill_price) ----------
+        copy_shares = copy_usdc / fill_price if fill_price > 0.0 else 0.0
+
+        # ---- PnL realisation -----------------------------------------------
+        pnl_usd = 0.0
+        closed_at: datetime | None = None
+        opened_at: datetime | None = None
+
+        if side == "SELL" and cond_id in open_positions:
+            # B5: close against the FIFO lot list, oldest lots first.
+            # match_fifo_sell mutates the lot list in place (consumed
+            # lots removed / shrunk) and returns the per-lot gross PnL +
+            # the proportional BUY notional returned to capital.
+            lots = open_positions[cond_id]
+            sell_match = match_fifo_sell(lots, copy_shares, fill_price)
+            opened_at = sell_match.oldest_opened_at
+            # Gross PnL = Σ over consumed lots of
+            # (sell_price - lot_buy_price) * matched_qty.  The SELL-leg
+            # fee is then deducted so the *net* realised PnL (and
+            # daily-loss tracking) reflects the true round-trip cost.
+            gross_pnl = sell_match.gross_pnl
+            pnl_usd = gross_pnl - fee_usd
+            # CRIT-1 / B5: the *principal returned to capital* is the sum
+            # of the per-lot proportional BUY notionals that were
+            # actually committed at BUY time — NOT the freshly-recomputed
+            # SELL-side ``copy_usdc`` (= leader SELL notional × ratio).
+            # match_fifo_sell already proportions each consumed lot's
+            # notional, so a partial close returns exactly the slice that
+            # was closed; capital_remaining stays exact across layered
+            # partial exits.
+            state.capital_remaining += sell_match.returned_notional + pnl_usd
+            # B5: a SELL that fully drains every lot leaves an empty
+            # list — prune the key so len(open_positions) stays an exact
+            # open-position count for the max-concurrent gate.
+            if not lots:
+                del open_positions[cond_id]
+            closed_at = trade.timestamp
+            # Carry the matched share count onto the trade-log entry so
+            # downstream consumers see what the SELL actually closed.
+            copy_shares = sell_match.matched_shares
+
+            # Update daily loss tracking (loss = negative pnl)
+            if pnl_usd < 0.0:
+                state.daily_loss[trade_date] -= pnl_usd  # store as positive loss amount
+                if state.daily_loss[trade_date] >= params.daily_loss_limit_usd:
+                    state.halted_days.add(trade_date)
+                    logger.debug(
+                        "backtest.daily_limit_hit",
+                        extra={
+                            "date": str(trade_date),
+                            "loss": state.daily_loss[trade_date],
+                        },
+                    )
+        elif side == "BUY":
+            # Open new position. The BUY-leg fee is *already* deducted
+            # from capital_remaining above; recording it on the trade-log
+            # entry keeps total_fees_usd a faithful both-legs total.
+            #
+            # IMP-1: the BUY-leg fee is a *realised* capital outflow the
+            # moment the position opens, but ``_build_pnl_curve`` skips
+            # every entry whose ``pnl_usd == 0.0`` (and a freshly-opened
+            # BUY otherwise has pnl_usd == 0.0).  A BUY that is opened but
+            # never closed/MTM'd in-window therefore leaked its fee out of
+            # ``total_return_usd`` (return overstated by the BUY fee).
+            # Record the BUY fee as *negative PnL on the BUY entry* so the
+            # cumulative curve reflects the true capital change on the BUY
+            # date.  If/when the position is later closed by a SELL, only
+            # the SELL-leg fee is charged again — the round-trip's gross
+            # PnL is independent of this entry, so there is no double count
+            # (BUY fee here, SELL fee on the SELL entry).
+            pnl_usd = -fee_usd
+            # B5: every BUY opens its OWN FIFO lot at its own fill price.
+            # Layered partial BUYs on the same condition_id therefore
+            # accumulate as separate lots, each with an independent cost
+            # basis, and a later SELL consumes them oldest-first.
+            open_positions.setdefault(cond_id, []).append(
+                Lot(
+                    shares=copy_shares,
+                    fill_price=fill_price,
+                    copy_usdc=copy_usdc,
+                    opened_at=trade.timestamp,
+                )
+            )
+
+        entry = {
+            "timestamp": trade.timestamp.isoformat(),
+            "date": str(trade_date),
+            "condition_id": cond_id,
+            "side": side,
+            "leader_price": leader_price,
+            "fill_price": fill_price,
+            "copy_usdc": copy_usdc,
+            "copy_shares": copy_shares,
+            "pnl_usd": pnl_usd,
+            "fee_usd": fee_usd,
+            # I8: the matching BUY's open time, stored on the SELL entry so
+            # avg_hold_hours = SELL ts − BUY opened_at (was ≈0 because it
+            # used SELL ts − SELL closed_at, both the SELL timestamp).
+            "opened_at": opened_at.isoformat() if opened_at else None,
+            "closed_at": closed_at.isoformat() if closed_at else None,
+            "skipped": False,
+        }
+
+        # Advance the cumulative stats on the shared state.  trade_count
+        # counts executed fills (BUY opens + SELL closes); realized_pnl is
+        # the running sum of every executed fill's pnl_usd (the SELL net
+        # round-trip PnL and the negative BUY-leg fee).
+        state.trade_count += 1
+        state.realized_pnl += pnl_usd
+
+        return state, TradeResult(log_entries=[entry], executed=True)
 
     # -----------------------------------------------------------------------
     # Private helpers

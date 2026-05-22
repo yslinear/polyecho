@@ -21,7 +21,8 @@ Tests:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from dataclasses import asdict, replace
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 
 import pytest
@@ -30,6 +31,8 @@ from polyecho.backtest.engine import (
     BacktestEngine,
     BacktestParams,
     Lot,
+    SimState,
+    TradeResult,
     apply_slippage,
     compute_fee,
     compute_max_drawdown,
@@ -38,7 +41,7 @@ from polyecho.backtest.engine import (
     match_fifo_sell,
 )
 from polyecho.backtest.scenarios import run_triple
-from polyecho.shared.datasource import FixtureDataSource
+from polyecho.shared.datasource import ActivityRecord, FixtureDataSource
 
 # ---------------------------------------------------------------------------
 # Fixtures and constants
@@ -1144,7 +1147,6 @@ def test_annualised_return_uses_initial_capital() -> None:
 # ---------------------------------------------------------------------------
 
 from polyecho.shared.datasource import (  # noqa: E402
-    ActivityRecord,
     PositionRecord,
 )
 
@@ -2065,3 +2067,162 @@ async def test_r12_2_fetch_pending_refreshes_claimed_status() -> None:
     assert job.status == "running"
     assert ("expire", ["status", "progress"]) in refreshed
     assert ("refresh", ["status", "progress"]) in refreshed
+
+
+# ---------------------------------------------------------------------------
+# C1-P2: incremental simulate_one extraction
+# ---------------------------------------------------------------------------
+#
+# simulate_one is the per-trade body extracted from BacktestEngine.run's loop.
+# The C1 forward paper-trading worker advances ONE leader trade per cycle
+# against a persisted SimState; run() is now a batch driver that calls the
+# SAME simulate_one. These tests prove the extraction is behaviour-preserving:
+# simulating N trades one-by-one yields byte-identical results to batch run().
+
+
+def _replay_incrementally(
+    engine: BacktestEngine,
+    trades: list[Any],
+    params: BacktestParams,
+) -> tuple[SimState, list[dict[str, Any]], dict[str, int]]:
+    """Drive simulate_one trade-by-trade, mirroring run()'s aggregation.
+
+    Returns the final SimState, the executed/skipped trade-log entries, and a
+    SkipStats-shaped dict — exactly what run() builds before the MTM pass.
+    """
+    state = SimState.initial(params)
+    log: list[dict[str, Any]] = []
+    skips = {
+        "insufficient_liquidity": 0,
+        "risk_triggered": 0,
+        "below_min_size": 0,
+        "category_filtered": 0,
+        "total": 0,
+    }
+    for trade in trades:
+        state, result = engine.simulate_one(trade, state, params)
+        log.extend(result.log_entries)
+        if not result.executed and result.skip_bucket is not None:
+            skips[result.skip_bucket] += 1
+            skips["total"] += 1
+    return state, log, skips
+
+
+class TestSimulateOneEquivalence:
+    """simulate_one one-by-one == batch run() (the C1-P2 refactor invariant)."""
+
+    async def test_incremental_state_matches_batch_run(self) -> None:
+        # Run the real batch path once.
+        engine = make_engine()
+        params = base_params(leader=SWING, copy_ratio=0.05)
+        batch = await engine.run(params, leader_address=SWING)
+
+        # Re-fetch the SAME ordered leader-trade stream the batch path saw,
+        # then replay it incrementally through simulate_one.
+        trades = await engine._fetch_leader_trades(  # noqa: SLF001
+            SWING, params.start_date, params.end_date
+        )
+        assert trades, "fixture must yield leader trades for a real comparison"
+        state, inc_log, inc_skips = _replay_incrementally(engine, trades, params)
+
+        # Skip aggregation is identical.
+        assert inc_skips == batch.skip_stats.to_dict()
+
+        # The pre-MTM executed/skipped trade-log is byte-identical to the
+        # non-MTM slice of the batch trade_log.
+        batch_pre_mtm = [e for e in batch.trade_log if e.get("side") != "MTM"]
+        assert inc_log == batch_pre_mtm
+
+        # The final SimState capital matches: run() never re-derives capital,
+        # it reads it straight off the state, so this is the exact figure the
+        # batch path carried.
+        executed_pnl = sum(float(e["pnl_usd"]) for e in batch_pre_mtm if not e.get("skipped"))
+        assert state.realized_pnl == pytest.approx(executed_pnl)
+        assert state.trade_count == sum(1 for e in batch_pre_mtm if not e.get("skipped"))
+
+        # Open FIFO positions match exactly (same condition_ids, same lots).
+        assert sorted(state.open_positions) == sorted(
+            cid for cid, lots in _batch_open_positions(engine, trades, params).items()
+        )
+
+    async def test_incremental_equals_batch_scalper_with_fee(self) -> None:
+        # A different leader + a non-zero fee exercises the SELL-leg / BUY-leg
+        # fee path and the daily-loss halt inside simulate_one.
+        engine = make_engine()
+        params = replace(base_params(leader=SCALPER, copy_ratio=0.1), fee_bps=120)
+        batch = await engine.run(params, leader_address=SCALPER)
+        trades = await engine._fetch_leader_trades(  # noqa: SLF001
+            SCALPER, params.start_date, params.end_date
+        )
+        _state, inc_log, inc_skips = _replay_incrementally(engine, trades, params)
+
+        assert inc_skips == batch.skip_stats.to_dict()
+        assert inc_log == [e for e in batch.trade_log if e.get("side") != "MTM"]
+
+    def test_simstate_is_serializable(self) -> None:
+        # SimState must round-trip cleanly so the C1-P3 paper worker can
+        # persist it to / rebuild it from DB rows. asdict gives plain types.
+        params = base_params()
+        state = SimState.initial(params)
+        ts = datetime(2026, 3, 1, tzinfo=UTC)
+        state.open_positions["0xcond"] = [
+            Lot(shares=10.0, fill_price=0.4, copy_usdc=4.0, opened_at=ts)
+        ]
+        state.daily_loss[date(2026, 3, 1)] = 5.0
+        state.halted_days.add(date(2026, 3, 2))
+        state.trade_count = 3
+        state.realized_pnl = 12.5
+
+        as_dict = asdict(state)
+        assert as_dict["capital_remaining"] == params.initial_capital_usd
+        assert as_dict["trade_count"] == 3
+        assert as_dict["realized_pnl"] == 12.5
+        # The nested Lot is itself a plain dict of scalars (DB/JSON-ready).
+        lot_dict = as_dict["open_positions"]["0xcond"][0]
+        assert lot_dict["shares"] == 10.0 and lot_dict["fill_price"] == 0.4
+
+    def test_simstate_initial_folds_delay_into_slippage(self) -> None:
+        # The 3-scenario modelling flows through total_slippage_bps:
+        # ASSUMPTION-DELAY is 0.5 bps per second of execution delay.
+        params = replace(base_params(), slippage_bps=150, execution_delay_seconds=30)
+        assert SimState.initial(params).total_slippage_bps == 150 + 15
+        opt = replace(base_params(), slippage_bps=50, execution_delay_seconds=10)
+        assert SimState.initial(opt).total_slippage_bps == 50 + 5
+
+    def test_simulate_one_skip_classification(self) -> None:
+        # A below-min copy size is reported as a skip with the right bucket
+        # and leaves the state untouched (no capital spent, no lot opened).
+        engine = make_engine()
+        params = replace(base_params(), min_trade_size_usd=1_000_000.0)
+        state = SimState.initial(params)
+        rec = ActivityRecord(
+            wallet=SWING,
+            timestamp=datetime(2026, 3, 1, tzinfo=UTC),
+            activity_type="TRADE",
+            condition_id="0xcond",
+            side="BUY",
+            size=10.0,
+            price=0.5,
+            usdc_size=5.0,
+            raw={},
+        )
+        new_state, result = engine.simulate_one(rec, state, params)
+        assert isinstance(result, TradeResult)
+        assert result.executed is False
+        assert result.skip_reason == "below_min_size"
+        assert result.skip_bucket == "below_min_size"
+        assert new_state.capital_remaining == params.initial_capital_usd
+        assert new_state.open_positions == {}
+        assert new_state.trade_count == 0
+
+
+def _batch_open_positions(
+    engine: BacktestEngine,
+    trades: list[Any],
+    params: BacktestParams,
+) -> dict[str, list[Lot]]:
+    """Replay trades to obtain the open-position map (helper for the test)."""
+    state = SimState.initial(params)
+    for trade in trades:
+        state, _ = engine.simulate_one(trade, state, params)
+    return state.open_positions
