@@ -24,6 +24,7 @@ from polyecho.cli.db import app as db_app
 from polyecho.cli.discovery import app as discovery_app
 from polyecho.cli.doctor import doctor
 from polyecho.cli.logs import app as logs_app
+from polyecho.cli.paper import app as paper_app
 from polyecho.cli.push import app as push_app
 from polyecho.cli.settings import app as settings_app
 from polyecho.cli.status import status
@@ -40,6 +41,11 @@ app = typer.Typer(
 app.add_typer(account_app, name="account", help="Manage PolyEcho trading accounts.")
 app.add_typer(discovery_app, name="discovery", help="Leader candidate pool discovery.")
 app.add_typer(backtest_app, name="backtest", help="Backtest engine.")
+app.add_typer(
+    paper_app,
+    name="paper",
+    help="Paper-trading ladder (C1): status, manual cycle, danger-gated promote.",
+)
 app.add_typer(
     trader_app,
     name="trader",
