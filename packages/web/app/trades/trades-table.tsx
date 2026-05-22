@@ -245,20 +245,11 @@ interface TradesTableProps {
 }
 
 export function TradesTable({ data }: TradesTableProps) {
-  // Genuinely-empty dataset: one calm sentence + the real next action
-  // (DESIGN.md "real empty state"). The DataTable toolbar/pagination would
-  // be noise with nothing to act on, so the island owns this state — the
-  // same idiom /positions and /leaders use.
-  if (data.length === 0) {
-    return (
-      <div className="rounded-lg border border-dashed py-16 text-center">
-        <p className="text-sm text-muted-foreground">
-          {t("tables.trades.emptyTitle")}
-        </p>
-      </div>
-    );
-  }
-
+  // The genuinely-empty dataset (one calm sentence + the real next action)
+  // is owned by the parent Server Component — the same single-owner idiom
+  // /positions uses. This island only renders when rows exist; the
+  // DataTable's own fallback covers the "rows exist but a filter excludes
+  // them all" case (a true "no matches", not an empty page).
   return (
     <DataTable
       columns={columns}

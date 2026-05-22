@@ -79,16 +79,17 @@ describe("TradesTable (client island)", () => {
     expect(screen.getAllByText("0xabcd…ef01").length).toBeGreaterThan(0);
   });
 
-  it("renders an honest empty state (not a bare 'no results') with no data", () => {
+  it("does NOT duplicate the page empty state — the parent owns it", () => {
     render(<TradesTable data={[]} />);
-    // DESIGN.md ban: no terse "No results." — one calm sentence + the
-    // real next action. The shared DataTable's terse fallback must NOT
-    // render; the island owns this state with the i18n empty copy.
+    // Single-owner contract (mirrors /positions): the genuinely-empty
+    // dataset copy (tables.trades.emptyTitle) belongs to the parent Server
+    // Component, NOT this island. The island only shows the DataTable's
+    // own "no matches" fallback for the filter-excludes-everything case.
     expect(
-      screen.queryByText(t("common.dataTable.empty"))
+      screen.queryByText(t("tables.trades.emptyTitle"))
     ).not.toBeInTheDocument();
     expect(
-      screen.getByText(t("tables.trades.emptyTitle"))
+      screen.getByText(t("common.dataTable.empty"))
     ).toBeInTheDocument();
   });
 

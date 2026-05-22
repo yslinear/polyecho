@@ -37,7 +37,7 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { KeyRound, ShieldAlert, Loader2 } from "lucide-react";
+import { KeyRound, ShieldAlert, Loader2, AlertTriangle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -126,6 +126,24 @@ function useAddressBalance(address: string, enabled: boolean): ProbeState {
   return state;
 }
 
+/**
+ * FieldError — inline below-field validation message (DESIGN.md Forms
+ * rule). Uses the --loss token (an invalid shape IS an error state, and
+ * --loss is one of the three palette-sanctioned saturated colors) plus a
+ * leading AlertTriangle glyph so the signal is never color-only. Renders
+ * nothing when there is no error. `id` lets the field point at it via
+ * aria-describedby.
+ */
+function FieldError({ id, message }: { id: string; message: string | null }) {
+  if (!message) return null;
+  return (
+    <p id={id} role="alert" className="flex items-center gap-1 text-xs text-loss">
+      <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+      <span>{message}</span>
+    </p>
+  );
+}
+
 /** Render one labelled balance row (label · value-or-N/A). */
 function BalanceRow({
   label,
@@ -205,9 +223,10 @@ function BalanceLine({
  *
  * When the operator picks sig-type 1 AND types an explicit funder, we
  * compare it to the CREATE2 Magic-proxy derived from the EOA. A mismatch
- * shows a yellow warning; a match shows a quiet green confirmation. This
- * is purely informational — the form NEVER blocks on the result, and the
- * persisted funder is whatever the operator typed (the CLI does the same).
+ * shows an on-palette muted advisory (AlertTriangle icon + text, no
+ * off-palette saturated color); a match shows a quiet --gain confirmation.
+ * This is purely informational — the form NEVER blocks on the result, and
+ * the persisted funder is whatever the operator typed (the CLI does the same).
  *
  * Implemented as a Server Action call (`deriveMagicProxyForCheck`)
  * because the web bundle has no client-side keccak256 dependency; the
@@ -277,24 +296,34 @@ function CreateTwoCheck({
       </p>
     );
   }
+  // Advisory mismatch (warn-only — never blocks submit). DESIGN.md
+  // restricts saturated color to --primary/--gain/--loss, so this uses an
+  // on-palette --muted container + --border hairline; the AlertTriangle
+  // icon carries the warning signal so color is never the sole cue.
   return (
     <div
-      className="space-y-0.5 rounded border border-amber-500/50 bg-amber-500/5 px-2 py-1.5"
+      className="flex items-start gap-1.5 rounded border border-border bg-muted px-2 py-1.5"
       role="status"
       title={t("tables.accounts.import.create2MismatchHint")}
     >
-      <p className="text-xs font-medium text-amber-600 dark:text-amber-400">
-        {t("tables.accounts.import.create2MismatchHeading")}
-      </p>
-      <p className="font-mono text-[11px] text-muted-foreground">
-        <span className="font-medium text-foreground">
-          {t("tables.accounts.import.create2DerivedLabel")}：
-        </span>
-        <span className="ml-1">{derived}</span>
-      </p>
-      <p className="text-xs text-muted-foreground">
-        {t("tables.accounts.import.create2MismatchHint")}
-      </p>
+      <AlertTriangle
+        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground"
+        aria-hidden="true"
+      />
+      <div className="space-y-0.5">
+        <p className="text-xs font-medium text-foreground">
+          {t("tables.accounts.import.create2MismatchHeading")}
+        </p>
+        <p className="font-mono text-[11px] text-muted-foreground">
+          <span className="font-medium text-foreground">
+            {t("tables.accounts.import.create2DerivedLabel")}：
+          </span>
+          <span className="ml-1">{derived}</span>
+        </p>
+        <p className="text-xs text-muted-foreground">
+          {t("tables.accounts.import.create2MismatchHint")}
+        </p>
+      </div>
     </div>
   );
 }
@@ -310,6 +339,17 @@ export function ImportAccountForm() {
   const [encPass, setEncPass] = React.useState("");
   const [dangerPass, setDangerPass] = React.useState("");
   const [pending, setPending] = React.useState(false);
+
+  // Inline on-blur validation (DESIGN.md Forms: "inline validation on
+  // blur, error below field"). A field is only validated once the
+  // operator has left it (`touched`), so the form is not noisy while
+  // still being filled. These are the shape-checkable fields; non-shape
+  // errors (e.g. a bad danger passphrase) still surface as a submit toast.
+  const [touched, setTouched] = React.useState<{
+    eoa: boolean;
+    funder: boolean;
+    privateKey: boolean;
+  }>({ eoa: false, funder: false, privateKey: false });
 
   const isType0 = sigType === "0";
 
@@ -330,6 +370,28 @@ export function ImportAccountForm() {
     privateKeyValid &&
     encPass.length > 0 &&
     dangerPass.length > 0;
+
+  // Below-field inline errors: shown only for a touched field that has a
+  // non-empty but shape-invalid value. An empty untouched field shows
+  // nothing; an empty touched field also shows nothing (the disabled
+  // submit button is the "incomplete" signal — these errors are strictly
+  // for malformed input). The funder error is suppressed for type 0,
+  // where funder is ignored entirely.
+  const eoaError =
+    touched.eoa && eoa.trim().length > 0 && !eoaValid
+      ? t("tables.accounts.import.errEoa")
+      : null;
+  const funderError =
+    !isType0 &&
+    touched.funder &&
+    funder.trim().length > 0 &&
+    !EVM_ADDRESS_RE.test(funder.trim())
+      ? t("tables.accounts.import.errFunder")
+      : null;
+  const privateKeyError =
+    touched.privateKey && privateKey.trim().length > 0 && !privateKeyValid
+      ? t("tables.accounts.import.errPrivateKey")
+      : null;
 
   // Read-only, best-effort balance of the addresses we actually HAVE. The
   // EOA is always probed. Funder is probed whenever the operator types a
@@ -404,6 +466,7 @@ export function ImportAccountForm() {
         setEoa("");
         setSigType("0");
         setFunder("");
+        setTouched({ eoa: false, funder: false, privateKey: false });
         clearSecrets();
         setOpen(false);
         router.refresh();
@@ -482,8 +545,12 @@ export function ImportAccountForm() {
             spellCheck={false}
             placeholder={t("tables.accounts.import.eoaPlaceholder")}
             className="font-mono text-sm"
+            aria-invalid={eoaError ? true : undefined}
+            aria-describedby={eoaError ? "ia-eoa-error" : undefined}
             onChange={(e) => setEoa(e.target.value)}
+            onBlur={() => setTouched((s) => ({ ...s, eoa: true }))}
           />
+          <FieldError id="ia-eoa-error" message={eoaError} />
           <BalanceLine
             state={eoaBalance}
             note={t("tables.accounts.import.balanceEoaNote")}
@@ -515,8 +582,12 @@ export function ImportAccountForm() {
             spellCheck={false}
             placeholder={t("tables.accounts.import.funderPlaceholder")}
             className="font-mono text-sm"
+            aria-invalid={funderError ? true : undefined}
+            aria-describedby={funderError ? "ia-funder-error" : undefined}
             onChange={(e) => setFunder(e.target.value)}
+            onBlur={() => setTouched((s) => ({ ...s, funder: true }))}
           />
+          <FieldError id="ia-funder-error" message={funderError} />
           <p className="text-xs text-muted-foreground">
             {isType0
               ? t("tables.accounts.import.funderHintType0")
@@ -572,11 +643,12 @@ export function ImportAccountForm() {
 
       {/* Secrets section — visible (so the operator anticipates next steps)
           but locked until identity is valid (EOA + funder-when-not-type-0).
-          opacity-50 is the visual cue; `disabled` on inputs makes them
-          inert for a11y / keyboard. Submit button also disabled below
-          until ALL fields are valid. */}
+          opacity-50 is the visual cue; `disabled` on each input already
+          removes it from the tab order and the a11y tree. No aria-hidden
+          here — aria-hidden over a region with focusable descendants is an
+          a11y trap. Submit button also disabled below until ALL fields are
+          valid. */}
       <div
-        aria-hidden={secretsLocked || undefined}
         className={
           "grid gap-4 sm:grid-cols-2 transition-opacity " +
           (secretsLocked ? "opacity-50" : "")
@@ -596,8 +668,12 @@ export function ImportAccountForm() {
             disabled={secretsLocked}
             placeholder={t("tables.accounts.import.privateKeyPlaceholder")}
             className="font-mono text-sm"
+            aria-invalid={privateKeyError ? true : undefined}
+            aria-describedby={privateKeyError ? "ia-pk-error" : undefined}
             onChange={(e) => setPrivateKey(e.target.value)}
+            onBlur={() => setTouched((s) => ({ ...s, privateKey: true }))}
           />
+          <FieldError id="ia-pk-error" message={privateKeyError} />
           <p className="text-xs text-muted-foreground">
             {t("tables.accounts.import.privateKeyHint")}
           </p>

@@ -35,14 +35,18 @@ export function CopyAddress({ address }: CopyAddressProps) {
   }
 
   return (
-    <span className="inline-flex items-center gap-1.5">
+    <span className="inline-flex items-center gap-0.5">
       <span className="font-mono text-xs" title={address}>
         {shortAddress(address)}
       </span>
+      {/* The icon stays visually small (h-3 w-3) but the button is a full
+          44x44px touch target (DESIGN.md / a11y tap-target minimum). The
+          negative margin keeps the visual row tight so the larger hit
+          area does not bloat the table cell. */}
       <Button
         variant="ghost"
         size="icon"
-        className="h-6 w-6"
+        className="-my-2 h-11 w-11"
         onClick={handleCopy}
         aria-label={copied ? COPY_LABELS.copied : COPY_LABELS.copy}
       >
