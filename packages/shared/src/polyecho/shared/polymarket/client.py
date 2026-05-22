@@ -93,6 +93,84 @@ _ORDER_TYPE_MAP: dict[str, str] = {
 #: http(s) only — see polyecho.shared.http for the SOCKS limitation note.
 _PROXY_ENV_VARS: tuple[str, ...] = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
 
+
+class GeoRestrictionError(RuntimeError):
+    """Raised when a CLOB call is rejected because trading is geo-blocked.
+
+    C5 (PolyHermes deep-dive): Polymarket geo-restricts trading; the CLOB
+    answers an order from a blocked region with an error like
+    ``"Trading restricted in your region"``.  PolyHermes (and PolyEcho,
+    before this) only *logged* such a rejection — the loop would keep
+    re-attempting every later trade against a CLOB that will never accept
+    one.  This dedicated exception lets the trading path *detect* a
+    geo-block specifically (vs a transient network blip) and trip the
+    documented emergency-stop posture (set ``global_paused`` + emit a
+    high-severity event) instead of silently churning.
+
+    It is a :class:`RuntimeError` subclass so any existing broad
+    ``except Exception`` still catches it; callers that want the
+    emergency-stop behaviour catch :class:`GeoRestrictionError`
+    explicitly *first*.
+    """
+
+
+#: Conservative geo-restriction substring matcher.  These phrases appear
+#: in the CLOB / Polymarket rejection text for a region-blocked caller.
+#: They are matched case-insensitively against the *full* error string.
+#:
+#: Conservatism is the whole point of C5: a geo-halt is FAIL-SAFE
+#: (stopping is always safe) but a FALSE halt (tripped by a transient
+#: network error) is an availability bug.  So we require BOTH a
+#: restriction word AND a geography word to co-occur — e.g. a bare
+#: ``"connection error"`` / ``"timeout"`` / ``"503"`` never matches, and
+#: an unrelated ``"order size restricted"`` (restriction word only, no
+#: geography word) also never matches.
+_GEO_RESTRICT_WORDS: tuple[str, ...] = (
+    "restrict",  # "restricted" / "restriction"
+    "blocked",
+    "not available",
+    "unavailable",
+    "prohibited",
+    "forbidden",
+)
+_GEO_PLACE_WORDS: tuple[str, ...] = (
+    "region",
+    "geo",  # "geographic" / "geo-block" / "geolocation"
+    "country",
+    "jurisdiction",
+    "location",
+    "territory",
+)
+
+
+def is_geo_restriction_error(error: BaseException | str) -> bool:
+    """Return ``True`` only for a *geo-restriction* CLOB rejection.
+
+    Tolerant of wording but conservative: the error text must contain
+    BOTH a restriction word (``restricted`` / ``blocked`` / ``prohibited``
+    / ...) AND a geography word (``region`` / ``country`` / ``geo`` / ...)
+    — so the canonical ``"Trading restricted in your region"`` matches,
+    but a transient ``"connection reset"`` / ``"read timeout"`` /
+    ``"HTTP 503"`` (no geography word) and an unrelated ``"order
+    restricted"`` (no geography word) do NOT.  This avoids false-positive
+    emergency-stops on routine network flakiness.
+
+    Args:
+        error: An exception or a raw error string from a CLOB call.
+
+    Returns:
+        ``True`` iff the message looks like a region/geo trading block.
+    """
+    if isinstance(error, GeoRestrictionError):
+        return True
+    text_l = str(error).lower()
+    if not text_l:
+        return False
+    has_restrict = any(w in text_l for w in _GEO_RESTRICT_WORDS)
+    has_place = any(w in text_l for w in _GEO_PLACE_WORDS)
+    return has_restrict and has_place
+
+
 #: R4: ``_scoped_proxy_env`` save/set/restore mutates the *process-global*
 #: ``os.environ``.  Two concurrent ``PolymarketClient(...)`` constructions
 #: (each ``ClobClient(...)`` is offloaded via ``asyncio.to_thread`` and can
@@ -155,6 +233,30 @@ def _scoped_proxy_env(proxy: str | None) -> Iterator[None]:
                     os.environ.pop(var, None)
                 else:
                     os.environ[var] = prev  # type: ignore[assignment]
+
+
+@contextlib.contextmanager
+def _reraise_geo_restriction(*, call: str) -> Iterator[None]:
+    """Re-raise a CLOB geo-restriction error as :class:`GeoRestrictionError`.
+
+    Wraps a single CLOB SDK call.  If the call raises and the error text
+    matches :func:`is_geo_restriction_error`, the exception is re-raised
+    as :class:`GeoRestrictionError` (chained, original preserved) so the
+    trading loop can trip the emergency-stop.  Every other error — a
+    transient network blip, an HTTP 5xx, a timeout — propagates UNCHANGED,
+    so the executor's ordinary transient-retry path is untouched.  An
+    already-:class:`GeoRestrictionError` is left as-is.
+    """
+    try:
+        yield
+    except GeoRestrictionError:
+        raise  # already classified — do not re-wrap
+    except Exception as exc:  # noqa: BLE001 - classify, then re-raise
+        if is_geo_restriction_error(exc):
+            raise GeoRestrictionError(
+                f"CLOB {call} rejected: trading is geo-restricted in this region — {exc}"
+            ) from exc
+        raise
 
 
 class PolymarketClient:
@@ -400,6 +502,11 @@ class PolymarketClient:
             ValueError: If ``order_type`` is not one of
                 ``"FOK" / "FAK" / "GTC" / "GTD"`` — raised *before*
                 dispatch so a typo never reaches the network.
+            GeoRestrictionError: If the CLOB rejects the order because
+                trading is geo-restricted in this region (C5).  Re-raised
+                from the underlying SDK error so the trading loop can trip
+                the emergency-stop instead of treating it as a transient
+                failure to retry.
         """
         # Validate the order_type string up-front.  A typo here is a
         # programming bug; surface it loudly before any network call.
@@ -423,15 +530,22 @@ class PolymarketClient:
             tick_size=tick_size,
             neg_risk=neg_risk,
         )
-        return cast(
-            "dict[str, Any]",
-            await self._run_sync(
-                self._client.create_and_post_order,
-                order_args,
-                options,
-                sdk_order_type,
-            ),
-        )
+        # C5: a geo-restriction rejection is re-raised as the dedicated
+        # GeoRestrictionError so the trading loop can trip the documented
+        # emergency-stop (global_paused) instead of churning retries
+        # against a CLOB that will never accept an order from this region.
+        # Any non-geo error is propagated UNCHANGED — the executor's
+        # transient-retry path is untouched for ordinary network blips.
+        with _reraise_geo_restriction(call="place_order"):
+            return cast(
+                "dict[str, Any]",
+                await self._run_sync(
+                    self._client.create_and_post_order,
+                    order_args,
+                    options,
+                    sdk_order_type,
+                ),
+            )
 
     async def cancel_order(self, order_id: str) -> dict[str, Any]:
         """Cancel an open order by its CLOB order ID (Phase-4 W2).
@@ -442,14 +556,19 @@ class PolymarketClient:
 
         Returns:
             Response dict confirming cancellation.
+
+        Raises:
+            GeoRestrictionError: If the CLOB rejects the call because
+                trading is geo-restricted in this region (C5).
         """
-        return cast(
-            "dict[str, Any]",
-            await self._run_sync(
-                self._client.cancel_order,
-                OrderPayload(orderID=order_id),
-            ),
-        )
+        with _reraise_geo_restriction(call="cancel_order"):
+            return cast(
+                "dict[str, Any]",
+                await self._run_sync(
+                    self._client.cancel_order,
+                    OrderPayload(orderID=order_id),
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers

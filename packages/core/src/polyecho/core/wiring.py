@@ -60,6 +60,13 @@ logger = logging.getLogger(__name__)
 #: ``packages/web/lib/settings-keys.ts`` ``TRADER_HEARTBEAT_KEY``).
 TRADER_HEARTBEAT_KEY = "trader_heartbeat"
 
+#: C5: the global soft-pause kill-switch settings key.  Mirrors
+#: ``packages/web/lib/settings-keys.ts`` ``GLOBAL_PAUSED_KEY`` exactly —
+#: the web /settings page writes the SAME row (bare string ``"true"`` /
+#: ``"false"``).  trader-core's geo-restriction emergency-stop auto-trips
+#: it on a CLOB region-block.
+GLOBAL_PAUSED_KEY = "global_paused"
+
 #: operator-supplied passphrase for the encrypted EOA key, sourced from
 #: the host env on the LIVE redeem path only.  Never weakens the lock:
 #: the double live-lock short-circuits before the key is ever resolved,
@@ -108,6 +115,53 @@ def make_heartbeat_writer() -> Any:
             logger.warning(
                 "heartbeat_settings_upsert_failed_continuing",
                 extra={"error": str(exc)},
+            )
+
+    return _write
+
+
+# ---------------------------------------------------------------------------
+# 1b. GlobalPauseWriter — upsert the ``settings`` ``global_paused`` row (C5)
+# ---------------------------------------------------------------------------
+def make_global_pause_writer() -> Any:
+    """Build a real ``GlobalPauseWriter`` (best-effort settings upsert).
+
+    C5: the returned ``async (paused: bool) -> None`` upserts the
+    ``settings`` row keyed ``global_paused`` with the **bare string**
+    ``"true"`` / ``"false"`` — the EXACT same shape + key the web
+    /settings page writes (``packages/web/app/settings/actions.ts``
+    ``setGlobalPaused``), so the geo-restriction emergency-stop trips the
+    documented soft-pause kill-switch identically to an operator clicking
+    "全域暫停".
+
+    Best-effort: any DB error is logged and swallowed — the engine's
+    in-proc ``_geo_halted`` latch already stops new submissions even if
+    this durable write fails, so a transient DB blip can never let an
+    order through and can never crash the loop.
+    """
+
+    async def _write(paused: bool) -> None:
+        try:
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+            from polyecho.shared.db import session_scope
+            from polyecho.shared.models import Setting
+
+            value = "true" if paused else "false"
+            stmt = (
+                pg_insert(Setting)
+                .values(key=GLOBAL_PAUSED_KEY, value=value)
+                .on_conflict_do_update(
+                    index_elements=["key"],  # PK column (settings.key)
+                    set_={"value": value},
+                )
+            )
+            async with session_scope() as session:
+                await session.execute(stmt)
+        except Exception as exc:  # noqa: BLE001 - best-effort emergency-stop
+            logger.warning(
+                "global_paused_settings_upsert_failed_continuing",
+                extra={"paused": paused, "error": str(exc)},
             )
 
     return _write
@@ -295,9 +349,7 @@ async def _resolve_account(
 
         async with session_scope() as session:
             row = (
-                await session.execute(
-                    select(Account).where(Account.id == account_id)
-                )
+                await session.execute(select(Account).where(Account.id == account_id))
             ).scalar_one_or_none()
             if row is None:
                 logger.warning(
@@ -305,9 +357,7 @@ async def _resolve_account(
                     extra={"account_id": str(account_id)},
                 )
                 return None
-            binding = await resolve_wallet(
-                row, safe_proxy_resolver=_build_safe_proxy_resolver()
-            )
+            binding = await resolve_wallet(row, safe_proxy_resolver=_build_safe_proxy_resolver())
             return binding.funder, binding
     except Exception as exc:  # noqa: BLE001 - fail-soft per account
         logger.warning(
@@ -332,9 +382,7 @@ async def _redeem_accounts() -> list[tuple[uuid.UUID, str]]:
         out: list[tuple[uuid.UUID, str]] = []
         async with session_scope() as session:
             rows = (
-                await session.execute(
-                    select(Account).where(Account.status == "ready")
-                )
+                await session.execute(select(Account).where(Account.status == "ready"))
             ).scalars()
             for row in rows:
                 resolved = await _resolve_account(row.id)
@@ -375,20 +423,11 @@ def _make_key_resolver() -> Any:
 
         async with session_scope() as session:
             row = (
-                await session.execute(
-                    select(Account).where(
-                        Account.eoa_address == binding.funder
-                    )
-                )
+                await session.execute(select(Account).where(Account.eoa_address == binding.funder))
             ).scalar_one_or_none()
             if row is None or row.encrypted_private_key is None:
-                raise RuntimeError(
-                    "no encrypted key for funder "
-                    f"{binding.funder} (fail-closed)"
-                )
-            return decrypt_private_key(
-                bytes(row.encrypted_private_key), passphrase=passphrase
-            )
+                raise RuntimeError(f"no encrypted key for funder {binding.funder} (fail-closed)")
+            return decrypt_private_key(bytes(row.encrypted_private_key), passphrase=passphrase)
 
     return _resolve
 
@@ -442,9 +481,7 @@ def build_redeem_worker(
     async def _binding_for(account_id: uuid.UUID) -> WalletBinding:
         resolved = await _resolve_account(account_id)
         if resolved is None:
-            raise RuntimeError(
-                f"could not resolve wallet binding for {account_id}"
-            )
+            raise RuntimeError(f"could not resolve wallet binding for {account_id}")
         return resolved[1]
 
     return RedeemWorker(
@@ -465,9 +502,7 @@ def _session_factory() -> Any:
     return AsyncSessionLocal()
 
 
-async def _redeem_event_emitter(
-    ok: bool, spec: Any, result: Any
-) -> None:
+async def _redeem_event_emitter(ok: bool, spec: Any, result: Any) -> None:
     """Best-effort redeem success/failure observability (never raises).
 
     The frozen ``EventType`` taxonomy (``packages/shared`` — FROZEN) has
@@ -525,9 +560,7 @@ async def startup_reconcile() -> None:
         )
 
 
-async def _redeem_loop(
-    worker: RedeemWorker, *, interval_seconds: float
-) -> None:
+async def _redeem_loop(worker: RedeemWorker, *, interval_seconds: float) -> None:
     """Poll the real RedeemWorker on a cadence (best-effort, fail-safe).
 
     The worker enforces the double live-lock internally; with locks off
@@ -658,9 +691,11 @@ async def run_supervised(
 
 # Imported lazily by callers; re-exported for tests.
 __all__ = [
+    "GLOBAL_PAUSED_KEY",
     "TRADER_HEARTBEAT_KEY",
     "build_redeem_worker",
     "make_cursor_writer",
+    "make_global_pause_writer",
     "make_heartbeat_writer",
     "run_supervised",
     "startup_reconcile",

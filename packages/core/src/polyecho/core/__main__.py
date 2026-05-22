@@ -39,6 +39,7 @@ import sys
 from polyecho.core.trader import FollowSpec, TraderCore
 from polyecho.core.wiring import (
     make_cursor_writer,
+    make_global_pause_writer,
     make_heartbeat_writer,
     run_supervised,
 )
@@ -81,6 +82,11 @@ async def main(argv: list[str] | None = None) -> int:
         follows=follows,
         heartbeat_writer=make_heartbeat_writer(),
         cursor_writer=make_cursor_writer(),
+        # C5: the geo-restriction emergency-stop writes the documented
+        # ``global_paused`` soft-pause row when a CLOB call reports
+        # trading is region-blocked.  Best-effort (the in-proc latch
+        # halts new orders regardless of the durable write).
+        global_pause_writer=make_global_pause_writer(),
     )
 
     if once:

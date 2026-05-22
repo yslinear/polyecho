@@ -33,7 +33,7 @@ from polyecho.shared.copytrading import (
     SkipReason,
     TradeSide,
 )
-from polyecho.shared.polymarket.client import PolymarketClient
+from polyecho.shared.polymarket.client import GeoRestrictionError, PolymarketClient
 
 logger = logging.getLogger(__name__)
 
@@ -83,13 +83,11 @@ class FifoLedger:
         return (str(account_id), condition_id, outcome)
 
     def add_buy(self, lot: BuyLot) -> None:
-        self._lots.setdefault(
-            self._key(lot.account_id, lot.condition_id, lot.outcome), []
-        ).append(lot)
+        self._lots.setdefault(self._key(lot.account_id, lot.condition_id, lot.outcome), []).append(
+            lot
+        )
 
-    def open_lots(
-        self, account_id: uuid.UUID, condition_id: str, outcome: str
-    ) -> list[BuyLot]:
+    def open_lots(self, account_id: uuid.UUID, condition_id: str, outcome: str) -> list[BuyLot]:
         return [
             lot
             for lot in self._lots.get(self._key(account_id, condition_id, outcome), [])
@@ -271,6 +269,17 @@ class OrderExecutor:
                     detail=f"order placed (attempt {attempt + 1})",
                     sell_match=sell_match,
                 )
+            except GeoRestrictionError:
+                # C5: a geo-restriction rejection is NOT transient — a
+                # re-sign retry against the same region-blocked CLOB will
+                # never succeed.  Propagate it UNCAUGHT (skipping the
+                # retry loop) so the trader-core can trip the documented
+                # emergency-stop (global_paused) instead of churning.
+                logger.warning(
+                    "order_place_geo_restricted_halting",
+                    extra={"attempt": attempt + 1},
+                )
+                raise
             except Exception as exc:  # noqa: BLE001 - retry ≤2, re-sign
                 last_exc = exc
                 logger.warning(
@@ -281,9 +290,6 @@ class OrderExecutor:
             placed=False,
             decision=decision,
             skip_reason=SkipReason.DATA_UNAVAILABLE,
-            detail=(
-                f"order placement failed after "
-                f"{self._max_retries + 1} attempts: {last_exc}"
-            ),
+            detail=(f"order placement failed after {self._max_retries + 1} attempts: {last_exc}"),
             sell_match=sell_match,
         )

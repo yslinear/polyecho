@@ -62,6 +62,7 @@ from polyecho.shared.copytrading import (
 )
 from polyecho.shared.datasource import get_datasource
 from polyecho.shared.datasource.protocol import DataSource
+from polyecho.shared.polymarket.client import GeoRestrictionError
 from polyecho.shared.risk_mode import RiskMode, apply_conservative, get_risk_mode
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,13 @@ CursorWriter = Callable[[str, datetime], Awaitable[None]]
 #: wiring upserts the ``settings`` table, default is an in-proc mirror so
 #: ``polyecho trader status`` liveness is measurable without a DB in tests.
 HeartbeatWriter = Callable[[dict[str, Any]], Awaitable[None]]
+#: C5 ``async (paused: bool) -> None`` — write the ``global_paused``
+#: settings row (the documented soft-pause kill-switch).  Used by the
+#: geo-restriction emergency-stop: a CLOB region-block auto-trips this so
+#: ``global_paused=true`` exactly as the R24 operator runbook would set it
+#: by hand.  The live wiring upserts the ``settings`` table; the default
+#: keeps an in-proc mirror so the halt is observable DB-free in tests.
+GlobalPauseWriter = Callable[[bool], Awaitable[None]]
 
 
 @dataclass
@@ -215,9 +223,8 @@ class TraderCore:
         balance_for: BalanceFetcher | None = None,
         cursor_writer: CursorWriter | None = None,
         heartbeat_writer: HeartbeatWriter | None = None,
-        integration_probe_interval_seconds: float = (
-            INTEGRATION_PROBE_INTERVAL_SECONDS
-        ),
+        global_pause_writer: GlobalPauseWriter | None = None,
+        integration_probe_interval_seconds: float = (INTEGRATION_PROBE_INTERVAL_SECONDS),
     ) -> None:
         self._settings = get_settings()
         self._ds: DataSource = datasource if datasource is not None else get_datasource()
@@ -328,13 +335,24 @@ class TraderCore:
         # downward crossing, re-arm only after recovery ≥ threshold.
         self._low_balance_alerted: set[str] = set()
 
+        # --- C5 geo-restriction emergency-stop --------------------------
+        # When a CLOB call is rejected because trading is geo-restricted in
+        # this region, the engine trips the documented soft-pause: it sets
+        # ``global_paused=true`` (via the injected writer), emits a
+        # CRITICAL event, and stops submitting any further order for the
+        # rest of the pass.  ``_geo_halted`` is the in-proc latch so the
+        # halt + event fire exactly once (it stays latched for the process
+        # lifetime — a geo-block does not self-heal; an operator must lift
+        # ``global_paused`` after resolving the region issue).  The default
+        # writer is an in-proc mirror so the halt is observable DB-free.
+        self._global_pause_writer = global_pause_writer
+        self._geo_halted = False
+
     # ------------------------------------------------------------------
     # Evaluator / risk hooks
     # ------------------------------------------------------------------
 
-    def _template_for(
-        self, account_id: uuid.UUID, leader: str
-    ) -> TemplateConfig | None:
+    def _template_for(self, account_id: uuid.UUID, leader: str) -> TemplateConfig | None:
         spec = self._follow_index.get((str(account_id), leader.lower()))
         return spec.template if spec is not None else None
 
@@ -397,9 +415,7 @@ class TraderCore:
         return RiskContext(
             template=tpl,
             already_processed=False,
-            is_following=self._is_following(
-                evaluated.account_id, evaluated.leader_address
-            ),
+            is_following=self._is_following(evaluated.account_id, evaluated.leader_address),
             open_position_count=len(
                 self._ledger.open_lots(
                     evaluated.account_id,
@@ -413,14 +429,10 @@ class TraderCore:
     # Recording helpers (default in-memory; durable via injected hooks)
     # ------------------------------------------------------------------
 
-    async def _record_skip(
-        self, evaluated: EvaluatedCopy, reason: SkipReason, detail: str
-    ) -> None:
+    async def _record_skip(self, evaluated: EvaluatedCopy, reason: SkipReason, detail: str) -> None:
         self.skips.append((reason.value, detail))
         self.stats.skipped += 1
-        self.stats.skip_reasons[reason.value] = (
-            self.stats.skip_reasons.get(reason.value, 0) + 1
-        )
+        self.stats.skip_reasons[reason.value] = self.stats.skip_reasons.get(reason.value, 0) + 1
         logger.info(
             "copy_skip",
             extra={
@@ -434,9 +446,7 @@ class TraderCore:
         if self._skip_recorder is not None:
             await self._skip_recorder(evaluated, reason, detail)
 
-    async def _record_trade(
-        self, evaluated: EvaluatedCopy, info: dict[str, Any]
-    ) -> None:
+    async def _record_trade(self, evaluated: EvaluatedCopy, info: dict[str, Any]) -> None:
         self.trades.append(info)
         if self._trade_recorder is not None:
             await self._trade_recorder(evaluated, info)
@@ -511,10 +521,7 @@ class TraderCore:
             payload=base_payload,
             push=PushPayload(
                 title=f"已跟單成交 · {side_zh}",
-                body=(
-                    f"領單者 {leader[:10]}… 市場 {outcome} "
-                    f"{side_zh} {size} 股 @ {price}"
-                ),
+                body=(f"領單者 {leader[:10]}… 市場 {outcome} {side_zh} {size} 股 @ {price}"),
                 url="/trades",
                 tag=f"copy_fill:{tx_hash}",
                 data={"tx_hash": tx_hash},
@@ -536,10 +543,7 @@ class TraderCore:
                 payload=closed_payload,
                 push=PushPayload(
                     title="停損出場",
-                    body=(
-                        f"市場 {outcome} 已停損平倉，"
-                        f"已實現損益 ${realised}"
-                    ),
+                    body=(f"市場 {outcome} 已停損平倉，已實現損益 ${realised}"),
                     url="/trades",
                     tag=f"position:{spec.account_id}:{outcome}",
                     data={"tx_hash": tx_hash},
@@ -552,10 +556,7 @@ class TraderCore:
                 payload=closed_payload,
                 push=PushPayload(
                     title="達標獲利出場",
-                    body=(
-                        f"市場 {outcome} 已停利平倉，"
-                        f"已實現損益 ${realised}"
-                    ),
+                    body=(f"市場 {outcome} 已停利平倉，已實現損益 ${realised}"),
                     url="/trades",
                     tag=f"position:{spec.account_id}:{outcome}",
                     data={"tx_hash": tx_hash},
@@ -567,10 +568,7 @@ class TraderCore:
             payload=closed_payload,
             push=PushPayload(
                 title="部位已平倉",
-                body=(
-                    f"市場 {outcome} 部位已平倉，"
-                    f"已實現損益 ${realised}"
-                ),
+                body=(f"市場 {outcome} 部位已平倉，已實現損益 ${realised}"),
                 url="/trades",
                 tag=f"position:{spec.account_id}:{outcome}",
                 data={"tx_hash": tx_hash},
@@ -671,9 +669,7 @@ class TraderCore:
                     return
 
                 condition_id = str(trade.get("condition_id") or "")
-                await self._process_follows(
-                    trade, leader, tx_hash, condition_id
-                )
+                await self._process_follows(trade, leader, tx_hash, condition_id)
             finally:
                 lock.release()
 
@@ -757,6 +753,23 @@ class TraderCore:
         condition_id: str,
         tx_hash: str,
     ) -> None:
+        # C5: once a CLOB geo-restriction has tripped the emergency-stop,
+        # NO further order is submitted for the rest of the pass — every
+        # later follow would hit the same region-block.  Short-circuit to
+        # a skip (the in-proc latch is set the instant the first geo error
+        # is seen, so this is a no-op until then).
+        if self._geo_halted:
+            self.stats.skipped += 1
+            self.skips.append((SkipReason.LIVE_LOCKED.value, "geo-restriction emergency stop"))
+            self.stats.skip_reasons[SkipReason.LIVE_LOCKED.value] = (
+                self.stats.skip_reasons.get(SkipReason.LIVE_LOCKED.value, 0) + 1
+            )
+            logger.info(
+                "copy_skip_geo_halted",
+                extra={"leader": spec.leader_address, "tx_hash": tx_hash},
+            )
+            return
+
         evaluated = await self._evaluator.evaluate_copy(
             leader_address=spec.leader_address,
             tx_hash=tx_hash,
@@ -806,14 +819,9 @@ class TraderCore:
             # reject is a normal risk decision (NOT an API outage) and only
             # clears the orderbook flag if the fetch itself succeeded.
             if reason is SkipReason.DATA_UNAVAILABLE and (
-                "orderbook fetch failed" in detail
-                or "risk context fetch failed" in detail
+                "orderbook fetch failed" in detail or "risk context fetch failed" in detail
             ):
-                call_site = (
-                    "orderbook"
-                    if "orderbook fetch failed" in detail
-                    else "risk_context"
-                )
+                call_site = "orderbook" if "orderbook fetch failed" in detail else "risk_context"
                 await self._note_api_outcome(
                     call_site=call_site,
                     ok=False,
@@ -841,9 +849,23 @@ class TraderCore:
         # through as an explicit override so OrderExecutor places exactly
         # what the gate approved, and reuse result.decision below so the
         # FIFO lot / trade record / push payload all reflect that size.
-        result = await self._executor.execute(
-            evaluated, size_override=risk.adjusted_size
-        )
+        #
+        # C5: a CLOB geo-restriction is re-raised from PolymarketClient as
+        # GeoRestrictionError and propagated UNCAUGHT through the executor
+        # (it is NOT a transient failure to retry).  Catch it HERE: trip
+        # the documented emergency-stop (global_paused=true + CRITICAL
+        # event) and record the skip — do NOT place the order.  The
+        # ``_geo_halted`` latch then short-circuits every later follow.
+        try:
+            result = await self._executor.execute(evaluated, size_override=risk.adjusted_size)
+        except GeoRestrictionError as exc:
+            await self._trigger_geo_halt(spec=spec, tx_hash=tx_hash, error=str(exc))
+            await self._record_skip(
+                evaluated,
+                SkipReason.LIVE_LOCKED,
+                f"geo-restriction emergency stop: {exc}",
+            )
+            return
 
         decision = result.decision
         side = decision.side
@@ -969,13 +991,9 @@ class TraderCore:
         try:
             _samples = self.stats.copy_latency_samples
             _avg_ms = (
-                round(self.stats.copy_latency_ms_total / _samples, 3)
-                if _samples > 0
-                else None
+                round(self.stats.copy_latency_ms_total / _samples, 3) if _samples > 0 else None
             )
-            _max_ms = (
-                round(self.stats.copy_latency_ms_max, 3) if _samples > 0 else None
-            )
+            _max_ms = round(self.stats.copy_latency_ms_max, 3) if _samples > 0 else None
         except Exception:  # noqa: BLE001 - observability is best-effort
             _samples, _avg_ms, _max_ms = 0, None, None
         logger.info(
@@ -1139,9 +1157,7 @@ class TraderCore:
             "copied": self.stats.copied,
             "skipped": self.stats.skipped,
             "placed": self.stats.placed,
-            "followed_leaders": sorted(
-                {f.leader_address.lower() for f in self._follows}
-            ),
+            "followed_leaders": sorted({f.leader_address.lower() for f in self._follows}),
         }
         # Legacy-shaped mirror/hook payload (counters ALSO top-level) — the
         # F0 reader folds these, so we don't break the existing row
@@ -1258,10 +1274,7 @@ class TraderCore:
             },
             push=PushPayload(
                 title="API 異常",
-                body=(
-                    f"Polymarket {call_site} 連線異常，已暫停受影響的跟單，"
-                    f"系統將自動重試"
-                ),
+                body=(f"Polymarket {call_site} 連線異常，已暫停受影響的跟單，系統將自動重試"),
                 url="/alerts",
                 tag="system_api_failure",
                 data={"call_site": call_site},
@@ -1316,6 +1329,81 @@ class TraderCore:
                 url="/accounts",
                 tag=f"low_balance:{acct}",
                 data={"account_id": acct},
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # C5: geo-restriction emergency-stop
+    # ------------------------------------------------------------------
+
+    async def _trigger_geo_halt(
+        self,
+        *,
+        spec: FollowSpec,
+        tx_hash: str,
+        error: str,
+    ) -> None:
+        """Trip the documented emergency-stop on a CLOB geo-restriction.
+
+        C5 (PolyHermes deep-dive): Polymarket geo-restricts trading.  When
+        a CLOB order is rejected because trading is blocked in this region
+        the engine MUST NOT just log it and keep going — every later
+        submission would fail the same way.  This is FAIL-SAFE: stopping
+        is always safe.  So we auto-trip the SAME posture the R24 operator
+        runbook applies by hand:
+
+        * set ``settings.global_paused = true`` (the documented soft-pause
+          kill-switch the web /settings page also writes), and
+        * emit a CRITICAL :class:`EventType.SYSTEM_API_FAILURE` event so
+          ``/alerts`` + Web Push surface it loudly.
+
+        Latched via :attr:`_geo_halted` so the halt + event fire exactly
+        once even if many follows hit the block in the same pass.  Every
+        leg is best-effort (``global_paused`` write + event emit are both
+        guarded) so the halt itself can never crash the loop — but the
+        latch is set FIRST so a writer hiccup still stops new submissions.
+        """
+        if self._geo_halted:
+            return
+        self._geo_halted = True
+        logger.error(
+            "geo_restriction_emergency_stop",
+            extra={
+                "leader": spec.leader_address,
+                "tx_hash": tx_hash,
+                "error": error,
+            },
+        )
+        # Set global_paused=true — best-effort; the in-proc latch above
+        # already stops new submissions even if this write fails.
+        if self._global_pause_writer is not None:
+            try:
+                await self._global_pause_writer(True)
+            except Exception as exc:  # noqa: BLE001 - best-effort halt
+                logger.warning(
+                    "geo_restriction_global_pause_write_failed_continuing",
+                    extra={"error": str(exc)},
+                )
+        await self._emit_push_event(
+            event_type=EventType.SYSTEM_API_FAILURE,
+            severity=Severity.CRITICAL,
+            payload={
+                "call_site": "order_place",
+                "reason": "geo_restriction",
+                "error": error,
+                "leader": spec.leader_address,
+                "tx_hash": tx_hash,
+                "global_paused": True,
+            },
+            push=PushPayload(
+                title="交易區域受限 · 已緊急停止",
+                body=(
+                    "Polymarket 回報此區域禁止交易，系統已自動全域暫停跟單。"
+                    "請於設定頁確認區域問題後再恢復"
+                ),
+                url="/alerts",
+                tag="geo_restriction_halt",
+                data={"reason": "geo_restriction"},
             ),
         )
 
@@ -1422,12 +1510,8 @@ class TraderCore:
                 # frozen snapshot before persisting.  Each is bounded +
                 # fail-soft (returns a ProbeResult, never raises), so the
                 # sweep's contract is unchanged.
-                snapshot["polymarket_ws_user"] = (
-                    await probe_polymarket_ws_user()
-                )
-                snapshot["polymarket_ws_market"] = (
-                    await probe_polymarket_ws_market()
-                )
+                snapshot["polymarket_ws_user"] = await probe_polymarket_ws_user()
+                snapshot["polymarket_ws_market"] = await probe_polymarket_ws_market()
                 await write_integration_status(snapshot)
             self.integration_probe_runs += 1
             logger.info(
@@ -1493,9 +1577,7 @@ class TraderCore:
             # only cancellation, so it can never trip the TaskGroup's
             # "one child raises ⇒ cancel siblings" rule and abort the
             # parked engine.
-            self._integration_probe_task = tg.create_task(
-                self._integration_probe_loop()
-            )
+            self._integration_probe_task = tg.create_task(self._integration_probe_loop())
 
     async def _park(self) -> None:
         """Idle the parked fixture engine while keeping liveness fresh.
