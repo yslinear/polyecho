@@ -170,6 +170,14 @@ CLOB_WSS_USER_URL: Final[str] = "wss://ws-subscriptions-clob.polymarket.com/ws/u
 #: Market WS channel (orderbook / price changes).  Brief §3.
 CLOB_WSS_MARKET_URL: Final[str] = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
+#: PUBLIC **activity firehose** WS (C2-P2).  Every Polymarket trade /
+#: order-match flows here as a public broadcast — leader-trade detection
+#: needs NO L2 auth (C2 roadmap "Design decision (settled)": leader trades
+#: are public).  ``UserChannelListener`` consumes this in live mode,
+#: substring-pre-filtering by the monitored leader set before any JSON
+#: parse.  This SUPERSEDES the auth-WS assumption of the original stub.
+ACTIVITY_FIREHOSE_WSS_URL: Final[str] = "wss://ws-live-data.polymarket.com"
+
 #: Default Polygon JSON-RPC (path-B on-chain log cross-check + EOA tx +
 #: Safe ``computeProxyAddress``).  Brief §3/§9.
 POLYGON_RPC_URL_DEFAULT: Final[str] = "https://polygon-rpc.com"
@@ -206,6 +214,7 @@ __all__ = [
     "DATA_API_BASE_URL",
     "CLOB_WSS_USER_URL",
     "CLOB_WSS_MARKET_URL",
+    "ACTIVITY_FIREHOSE_WSS_URL",
     "POLYGON_RPC_URL_DEFAULT",
     "BUILDER_RELAYER_URL",
     "MAX_UINT256",
