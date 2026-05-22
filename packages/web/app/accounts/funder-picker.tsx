@@ -83,11 +83,6 @@ function hasBalance(r: Row): boolean {
   );
 }
 
-/** Shorten an address for table-cell display; keep null-safe. */
-function shortAddr(addr: string): string {
-  return shortAddress(addr);
-}
-
 export interface FunderPickerProps {
   eoa: string;
   onPick: (c: FunderCandidate) => void;
@@ -203,7 +198,7 @@ export function FunderPicker({ eoa, onPick }: FunderPickerProps) {
           </span>
           <span className="font-medium">{t(modeLabelKey(picked.mode))}</span>
           <span className="font-mono text-muted-foreground">
-            {picked.address ? shortAddr(picked.address) : t("tables.accounts.import.picker.noAddress")}
+            {picked.address ? shortAddress(picked.address) : t("tables.accounts.import.picker.noAddress")}
           </span>
           <button
             type="button"
@@ -308,7 +303,7 @@ export function FunderPicker({ eoa, onPick }: FunderPickerProps) {
                   </span>
                   <span className="font-mono text-xs text-muted-foreground truncate">
                     {c.address
-                      ? shortAddr(c.address)
+                      ? shortAddress(c.address)
                       : t("tables.accounts.import.picker.noAddress")}
                   </span>
                 </div>
