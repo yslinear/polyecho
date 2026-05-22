@@ -490,6 +490,24 @@ async def test_drain_consumer_is_cancel_safe() -> None:
         await task
 
 
+async def _wait_until_started(
+    started: list[str], expected: set[str], *, timeout: float = 3.0
+) -> None:
+    """Poll until the started-task set matches ``expected``.
+
+    ``core.run()`` does a ``run_once`` DB pass before it enters its
+    TaskGroup; that pass is not instant on a cold CI runner, so a fixed
+    sleep races (the TaskGroup tasks have not started yet). Poll instead;
+    on timeout the caller's assert still reports the real diff.
+    """
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if set(started) == expected:
+            return
+        await asyncio.sleep(0.01)
+
+
 async def test_run_live_starts_listeners_and_drain_in_taskgroup() -> None:
     """LIVE: ``run`` attaches ws + chain + the drain consumer as tasks."""
     core = _live_core()
@@ -516,7 +534,7 @@ async def test_run_live_starts_listeners_and_drain_in_taskgroup() -> None:
     core._park = lambda: _never_exit("park")
 
     task = asyncio.ensure_future(core.run())
-    await asyncio.sleep(0.05)
+    await _wait_until_started(started, {"ws", "chain", "drain", "probe", "park"})
     assert set(started) == {"ws", "chain", "drain", "probe", "park"}
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -541,7 +559,7 @@ async def test_run_fixture_does_not_start_live_listeners() -> None:
     core._park = lambda: _never_exit("park")
 
     task = asyncio.ensure_future(core.run())
-    await asyncio.sleep(0.05)
+    await _wait_until_started(started, {"probe", "park"})
     # Only the always-on siblings ran; no ws / chain / drain.
     assert set(started) == {"probe", "park"}
     task.cancel()
