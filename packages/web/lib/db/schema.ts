@@ -88,9 +88,22 @@ export const candidateLeaders = pgTable("candidate_leaders", {
   total_score: numeric("total_score", { precision: 6, scale: 2 }),
   risk_flags: text("risk_flags").array(),
   specialization: text("specialization").array(),
-  /** new | watching | following | rejected */
+  /** new | watching | following | rejected (operator-review intent) */
   user_status: text("user_status").notNull().default("new"),
   user_notes: text("user_notes"),
+  /**
+   * C1 paper-trading ladder — AUTOMATED state, kept SEPARATE from
+   * user_status. discovered | candidate | paper | trial_ready | cooldown |
+   * retired (CHECK enforced in 0000_init.sql + the SQLAlchemy model).
+   * Driven by the C1-P3 state machine; this phase only declares it.
+   */
+  lifecycle_state: text("lifecycle_state").notNull().default("discovered"),
+  /** When a cooldown ends; NULL for a non-cooldown leader. */
+  cooldown_until: timestamp("cooldown_until", { withTimezone: true }),
+  /** How many times this leader has been put on cooldown — 3 retires it. */
+  cooldown_count: integer("cooldown_count").notNull().default(0),
+  /** Operator override: a locked leader is skipped by the ladder entirely. */
+  locked: boolean("locked").notNull().default(false),
   updated_at: timestamp("updated_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -370,6 +383,108 @@ export const backtestTrades = pgTable(
   },
   (t) => ({
     jobIdx: index("idx_backtest_trades_job").on(t.backtest_job_id),
+  })
+);
+
+// ---------------------------------------------------------------------------
+// paper_sessions — one forward shadow-copy run of a leader (C1, PolyHermes
+// deep-dive). A candidate_leaders row at lifecycle_state='paper' has exactly
+// one open paper_session. The denormalised summary columns are recomputed
+// each paper-worker cycle and gated on by the ladder state machine (C1-P3).
+// cursor_ts is the high-water mark of the last simulated leader-trade ts.
+// ---------------------------------------------------------------------------
+export const paperSessions = pgTable(
+  "paper_sessions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    leader_address: text("leader_address").notNull(),
+    /** open | trial_ready | cooldown | retired */
+    state: text("state").notNull().default("open"),
+    started_at: timestamp("started_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    /** Simulated starting paper capital for this session. */
+    capital_usd: numeric("capital_usd", { precision: 14, scale: 2 })
+      .notNull()
+      .default("0"),
+    /** Denormalised summary — recomputed each cycle, gated on by the ladder. */
+    score: numeric("score", { precision: 6, scale: 2 }),
+    trade_count: integer("trade_count").notNull().default(0),
+    copyable_pnl: numeric("copyable_pnl", { precision: 16, scale: 4 }),
+    max_drawdown: numeric("max_drawdown", { precision: 8, scale: 4 }),
+    unknown_exposure_ratio: numeric("unknown_exposure_ratio", {
+      precision: 6,
+      scale: 4,
+    }),
+    filtered_ratio: numeric("filtered_ratio", { precision: 6, scale: 4 }),
+    /** High-water mark of the last simulated leader-trade timestamp. */
+    cursor_ts: timestamp("cursor_ts", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    leaderIdx: index("idx_paper_sessions_leader").on(t.leader_address),
+  })
+);
+
+// ---------------------------------------------------------------------------
+// paper_trades — per-fill ledger for a paper_session (C1, PolyHermes
+// deep-dive). The paper-trading analogue of backtest_trades: each simulated
+// fill (BUY / SELL / MTM) is its own row carrying the running paper balance
+// (balance_after). Column shape/types mirror backtest_trades.
+// ---------------------------------------------------------------------------
+export const paperTrades = pgTable(
+  "paper_trades",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    session_id: uuid("session_id")
+      .notNull()
+      .references(() => paperSessions.id),
+    /** BUY | SELL | MTM */
+    side: text("side").notNull(),
+    condition_id: text("condition_id"),
+    shares: numeric("shares", { precision: 20, scale: 6 }),
+    price: numeric("price", { precision: 10, scale: 6 }),
+    fee: numeric("fee", { precision: 14, scale: 4 }).notNull().default("0"),
+    pnl: numeric("pnl", { precision: 14, scale: 4 }).notNull().default("0"),
+    /** Paper balance (capital + cumulative PnL) AFTER this fill. */
+    balance_after: numeric("balance_after", { precision: 16, scale: 4 }),
+    ts: timestamp("ts", { withTimezone: true }),
+  },
+  (t) => ({
+    sessionIdx: index("idx_paper_trades_session").on(t.session_id),
+  })
+);
+
+// ---------------------------------------------------------------------------
+// paper_positions — the open FIFO lots of a paper_session (C1, PolyHermes
+// deep-dive). One row per open (session, condition_id). lots is a jsonb array
+// of open FIFO lots, each {shares, fill_price, opened_at}; a single-row jsonb
+// array (vs one row per lot) lets the worker rewrite the whole list atomically
+// and rebuild all open state after a restart with one indexed SELECT.
+// ---------------------------------------------------------------------------
+export const paperPositions = pgTable(
+  "paper_positions",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    session_id: uuid("session_id")
+      .notNull()
+      .references(() => paperSessions.id),
+    condition_id: text("condition_id"),
+    /** Open FIFO lots — jsonb array of {shares, fill_price, opened_at}. */
+    lots: jsonb("lots")
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    sessionIdx: index("idx_paper_positions_session").on(t.session_id),
   })
 );
 

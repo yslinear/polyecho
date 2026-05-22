@@ -21,6 +21,9 @@ Table → PRD purpose summary
 * :class:`Setting`                — key/value store for runtime config (PRD §5.7)
 * :class:`BacktestJob`            — backtest task queue (PRD §5.4)
 * :class:`BacktestTrade`          — per-fill backtest ledger (B1, deep-dive)
+* :class:`PaperSession`           — forward paper-trading ladder run (C1, deep-dive)
+* :class:`PaperTrade`             — per-fill paper-trade ledger (C1, deep-dive)
+* :class:`PaperPosition`          — open FIFO lots of a paper session (C1, deep-dive)
 * :class:`PendingAction`          — dangerous operations awaiting confirmation (PRD §5.7)
 * :class:`PushSubscription`       — Web Push endpoint registrations (PRD §5.8)
 * :class:`Event`                  — system events for the push-sender (PRD §5.8)
@@ -38,6 +41,9 @@ from polyecho.shared.models.follow_relation import FollowRelation
 from polyecho.shared.models.leader_trade import LeaderTrade
 from polyecho.shared.models.market import Market
 from polyecho.shared.models.my_trade import MyTrade
+from polyecho.shared.models.paper_position import PaperPosition
+from polyecho.shared.models.paper_session import PaperSession
+from polyecho.shared.models.paper_trade import PaperTrade
 from polyecho.shared.models.pending_action import PendingAction
 from polyecho.shared.models.push_subscription import PushSubscription
 from polyecho.shared.models.redeem_job import RedeemJob
@@ -56,6 +62,9 @@ __all__ = [
     "LeaderTrade",
     "Market",
     "MyTrade",
+    "PaperPosition",
+    "PaperSession",
+    "PaperTrade",
     "PendingAction",
     "PushSubscription",
     "RedeemJob",

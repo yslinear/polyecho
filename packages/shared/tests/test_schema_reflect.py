@@ -62,6 +62,7 @@ from polyecho.shared.db import Base
 from polyecho.shared.models import (  # noqa: F401 — register all tables on Base
     Account,
     BacktestJob,
+    BacktestTrade,
     CandidateLeader,
     CandidateScoreHistory,
     CopySkip,
@@ -71,6 +72,9 @@ from polyecho.shared.models import (  # noqa: F401 — register all tables on Ba
     LeaderTrade,
     Market,
     MyTrade,
+    PaperPosition,
+    PaperSession,
+    PaperTrade,
     PendingAction,
     PushSubscription,
     RedeemJob,

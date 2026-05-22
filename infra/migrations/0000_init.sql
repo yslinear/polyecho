@@ -77,6 +77,76 @@ CREATE TABLE IF NOT EXISTS candidate_leaders (
 ALTER TABLE candidate_leaders
   ADD COLUMN IF NOT EXISTS last_seen_ts TIMESTAMPTZ;
 
+-- Idempotent forward-fill for DBs created before the C1 paper-trading
+-- ladder columns existed. CREATE TABLE IF NOT EXISTS above is a no-op on
+-- a warm DB, so these guarded statements bring an already-existing
+-- candidate_leaders up to the current shape. Each leg is individually
+-- idempotent (ADD COLUMN IF NOT EXISTS / pg_constraint guard) so a
+-- warm-volume redeploy never fails — same pattern as the
+-- redeem_jobs.attempts / leader_trades.status / backtest_jobs blocks.
+-- lifecycle_state is the AUTOMATED ladder state, kept SEPARATE from
+-- user_status (the operator-review intent — untouched here). The NOT NULL
+-- DEFAULT 'discovered' / DEFAULT 0 / DEFAULT false backfill existing rows.
+DO $$
+BEGIN
+  -- lifecycle_state column add (NOT NULL DEFAULT 'discovered' backfills).
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'candidate_leaders'
+      AND column_name = 'lifecycle_state'
+  ) THEN
+    ALTER TABLE candidate_leaders
+      ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'discovered';
+  END IF;
+
+  -- cooldown_until column add (NULLable — a non-cooldown leader has none).
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'candidate_leaders'
+      AND column_name = 'cooldown_until'
+  ) THEN
+    ALTER TABLE candidate_leaders ADD COLUMN cooldown_until TIMESTAMPTZ;
+  END IF;
+
+  -- cooldown_count column add (NOT NULL DEFAULT 0 backfills existing rows).
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'candidate_leaders'
+      AND column_name = 'cooldown_count'
+  ) THEN
+    ALTER TABLE candidate_leaders
+      ADD COLUMN cooldown_count INTEGER NOT NULL DEFAULT 0;
+  END IF;
+
+  -- locked column add (NOT NULL DEFAULT false backfills existing rows).
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'candidate_leaders'
+      AND column_name = 'locked'
+  ) THEN
+    ALTER TABLE candidate_leaders
+      ADD COLUMN locked BOOLEAN NOT NULL DEFAULT false;
+  END IF;
+
+  -- lifecycle_state CHECK add (guarded by pg_constraint so re-apply is a
+  -- no-op): the automated ladder state is one of the six known values.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'ck_candidate_leaders_lifecycle_state'
+      AND conrelid = 'public.candidate_leaders'::regclass
+  ) THEN
+    ALTER TABLE candidate_leaders
+      ADD CONSTRAINT ck_candidate_leaders_lifecycle_state
+      CHECK (lifecycle_state IN ('discovered', 'candidate', 'paper',
+                                 'trial_ready', 'cooldown', 'retired'));
+  END IF;
+END
+$$;
+
 -- ---------------------------------------------------------------------------
 -- candidate_score_history — daily snapshot (PRD §6.1)
 -- ---------------------------------------------------------------------------
@@ -366,6 +436,79 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
 );
 
 -- ---------------------------------------------------------------------------
+-- paper_sessions — one forward shadow-copy run of a leader (C1, PolyHermes
+-- deep-dive). A candidate_leaders row at lifecycle_state='paper' has exactly
+-- one open paper_session. The denormalised summary columns (score /
+-- trade_count / copyable_pnl / max_drawdown / unknown_exposure_ratio /
+-- filtered_ratio) are recomputed each paper-worker cycle and gated on by the
+-- ladder state machine (C1-P3). cursor_ts is the high-water mark of the last
+-- simulated leader-trade timestamp — the anti-duplication anchor a worker
+-- restart resumes from. All summary columns NULLable: a fresh session has no
+-- stats yet.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS paper_sessions (
+  id                     UUID        NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+  leader_address         TEXT        NOT NULL,
+  -- open | trial_ready | cooldown | retired (session lifecycle).
+  state                  TEXT        NOT NULL DEFAULT 'open',
+  started_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Simulated starting paper capital for this session.
+  capital_usd            NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- Denormalised summary — recomputed each cycle, gated on by the ladder.
+  score                  NUMERIC(6,2),
+  trade_count            INTEGER     NOT NULL DEFAULT 0,
+  copyable_pnl           NUMERIC(16,4),
+  max_drawdown           NUMERIC(8,4),
+  unknown_exposure_ratio NUMERIC(6,4),
+  filtered_ratio         NUMERIC(6,4),
+  -- High-water mark of the last simulated leader-trade timestamp.
+  cursor_ts              TIMESTAMPTZ,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
+-- paper_trades — per-fill ledger for a paper_session (C1, PolyHermes
+-- deep-dive). The paper-trading analogue of backtest_trades: each simulated
+-- fill (BUY / SELL / MTM) is its own row carrying the running paper balance
+-- (balance_after). The column shape/types mirror backtest_trades because the
+-- per-trade simulation math (slippage / fee / FIFO PnL) is reused verbatim.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS paper_trades (
+  id            BIGINT      NOT NULL GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  session_id    UUID        NOT NULL REFERENCES paper_sessions(id),
+  -- BUY | SELL | MTM (mark-to-market settlement row).
+  side          TEXT        NOT NULL,
+  condition_id  TEXT,
+  shares        NUMERIC(20,6),
+  price         NUMERIC(10,6),
+  fee           NUMERIC(14,4) NOT NULL DEFAULT 0,
+  pnl           NUMERIC(14,4) NOT NULL DEFAULT 0,
+  -- Paper balance (capital + cumulative PnL) AFTER this fill — the curve.
+  balance_after NUMERIC(16,4),
+  ts            TIMESTAMPTZ
+);
+
+-- ---------------------------------------------------------------------------
+-- paper_positions — the open FIFO lots of a paper_session (C1, PolyHermes
+-- deep-dive). One row per open (session, condition_id). lots is a JSONB array
+-- of open FIFO lots, each {shares, fill_price, opened_at}. A single-row JSONB
+-- array (vs one row per lot) is the cleaner shape: the FIFO discipline is
+-- positional, the worker rewrites the whole list atomically when a fill
+-- consumes / appends lots, and rebuilding all open state after a restart is
+-- one indexed SELECT ... WHERE session_id = ?. NOT NULL DEFAULT '[]' so a
+-- fresh position is a valid empty lot list with no NULL special-case.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS paper_positions (
+  id           BIGINT      NOT NULL GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  session_id   UUID        NOT NULL REFERENCES paper_sessions(id),
+  condition_id TEXT,
+  -- Open FIFO lots — JSONB array of {shares, fill_price, opened_at}.
+  lots         JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
 -- pending_actions — dangerous op confirmations (PRD §5.7)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS pending_actions (
@@ -548,6 +691,18 @@ CREATE INDEX IF NOT EXISTS idx_copy_skips_created_at
 -- backtest_trades: the detail page loads every fill for one job (B1)
 CREATE INDEX IF NOT EXISTS idx_backtest_trades_job
   ON backtest_trades (backtest_job_id);
+
+-- paper_sessions: the paper worker scans sessions by leader each cycle (C1)
+CREATE INDEX IF NOT EXISTS idx_paper_sessions_leader
+  ON paper_sessions (leader_address);
+
+-- paper_trades: the /research detail page loads every fill for one session (C1)
+CREATE INDEX IF NOT EXISTS idx_paper_trades_session
+  ON paper_trades (session_id);
+
+-- paper_positions: the worker rebuilds open state by session on restart (C1)
+CREATE INDEX IF NOT EXISTS idx_paper_positions_session
+  ON paper_positions (session_id);
 
 -- markets: the cache layer's opportunistic-refresh sweep selects unresolved
 -- rows by staleness (C4); a partial index keeps it to the live (unresolved)

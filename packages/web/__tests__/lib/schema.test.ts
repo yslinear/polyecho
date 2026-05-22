@@ -5,10 +5,11 @@ import * as schema from "@/lib/db/schema";
 /**
  * Drizzle schema must mirror PRD §6.1 + the Phase-4 W1 additions
  * (redeem_jobs, copy_skips — PolyHermes brief §9/§7) + the B1 deep-dive
- * addition (backtest_trades) + the C4 deep-dive addition (markets): all 16
- * tables exported with the expected physical table name and key columns.
- * We assert the column data type via the Drizzle SQL type string so a
- * schema drift breaks CI.
+ * addition (backtest_trades) + the C4 deep-dive addition (markets) + the
+ * C1-P1 paper-trading-ladder additions (paper_sessions, paper_trades,
+ * paper_positions): all 19 tables exported with the expected physical
+ * table name and key columns. We assert the column data type via the
+ * Drizzle SQL type string so a schema drift breaks CI.
  */
 
 const EXPECTED_TABLES: Record<string, string> = {
@@ -31,10 +32,14 @@ const EXPECTED_TABLES: Record<string, string> = {
   backtestTrades: "backtest_trades",
   // C4 (PolyHermes deep-dive): persisted market-metadata cache.
   markets: "markets",
+  // C1-P1 (PolyHermes deep-dive): forward paper-trading ladder.
+  paperSessions: "paper_sessions",
+  paperTrades: "paper_trades",
+  paperPositions: "paper_positions",
 };
 
 describe("lib/db/schema — table inventory", () => {
-  it("exports exactly the 16 schema tables", () => {
+  it("exports exactly the 19 schema tables", () => {
     const exportedTables = Object.keys(schema).filter((k) => {
       try {
         getTableName(
@@ -48,7 +53,7 @@ describe("lib/db/schema — table inventory", () => {
       }
     });
     expect(exportedTables.sort()).toEqual(Object.keys(EXPECTED_TABLES).sort());
-    expect(exportedTables).toHaveLength(16);
+    expect(exportedTables).toHaveLength(19);
   });
 
   it.each(Object.entries(EXPECTED_TABLES))(
