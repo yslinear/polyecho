@@ -88,9 +88,7 @@ export default async function LeadersPage() {
         </p>
       </header>
 
-      <section className="rounded-lg border p-4">
-        <LiveTradingStatus acked={acked} variant="verbose" />
-      </section>
+      <LiveTradingStatus acked={acked} variant="verbose" />
 
       {rows.length === 0 ? (
         <div className="rounded-lg border border-dashed py-16 text-center">

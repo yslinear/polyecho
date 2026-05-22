@@ -21,6 +21,7 @@ import { TraderHeartbeatStatus } from "@/components/trader-heartbeat-status";
 import { db } from "@/lib/db";
 import { myTrades, followRelations, events, settings } from "@/lib/db/schema";
 import { t } from "@/lib/i18n";
+import { cn } from "@/lib/utils";
 import {
   TRADER_HEARTBEAT_KEY,
   coerceHeartbeat,
@@ -105,8 +106,8 @@ export default async function DashboardPage() {
   const hasAnyTrades = allTrades.length > 0;
 
   return (
-    <div className="mx-auto max-w-6xl">
-      <header className="mb-8">
+    <div className="space-y-8">
+      <header>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h1 className="text-2xl font-bold tracking-tight">
             {t("dashboard.title")}
@@ -121,70 +122,59 @@ export default async function DashboardPage() {
         </p>
       </header>
 
-      {/* FOCAL BLOCK — a single PnL ledger strip, not a hero number and not
-          a row of identical cards. Today's net is the lead; realized,
-          unrealized and open risk sit beside it as a connected reading. */}
+      {/* FOCAL BLOCK — today's net PnL is the single lead figure, set apart
+          on its own surface. Realized + unrealized are the two supporting
+          reads of the SAME metric (PnL), so they sit together beneath it as
+          a connected ledger, not as peer cards. Open risk is a different
+          KIND of figure (entry notional, not PnL) and lives in the coverage
+          rail below — deliberately NOT a fourth identical card. */}
       <section
         aria-label={t("dashboard.summaryAriaLabel")}
         className="rounded-lg border bg-card"
       >
-        <div className="grid gap-px overflow-hidden rounded-lg bg-border sm:grid-cols-[1.4fr_1fr_1fr_1fr]">
-          <div className="bg-card p-6">
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              {t("dashboard.todayPnl.label")}
-            </p>
-            <Pnl
-              value={hasAnyTrades ? todayPnl : null}
-              emphasis="metric"
-              className="mt-2 block text-3xl"
-            />
-            <p className="mt-2 text-xs text-muted-foreground">
-              {t("dashboard.todayPnl.caption")}
-            </p>
-          </div>
-
-          <div className="bg-card p-6">
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              {t("dashboard.realized.label")}
-            </p>
-            <Pnl
-              value={closed.length > 0 ? realizedPnl : null}
-              className="mt-2 block text-xl"
-            />
-            <p className="mt-2 text-xs text-muted-foreground">
-              {t("dashboard.realized.caption", { count: closed.length })}
-            </p>
-          </div>
-
-          <div className="bg-card p-6">
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              {t("dashboard.unrealized.label")}
-            </p>
-            <Pnl
-              value={openPositions > 0 ? unrealizedPnl : null}
-              className="mt-2 block text-xl"
-            />
-            <p className="mt-2 text-xs text-muted-foreground">
-              {t("dashboard.unrealized.caption", { count: openPositions })}
-            </p>
-          </div>
-
-          <div className="bg-card p-6">
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              {t("dashboard.openRisk.label")}
-            </p>
-            <p className="mt-2 text-xl font-semibold tabular-nums">
-              {openPositions > 0 ? (
-                formatUsd(openRisk)
-              ) : (
-                <span className="text-muted-foreground">$0.00</span>
-              )}
-            </p>
-            <p className="mt-2 text-xs text-muted-foreground">
-              {t("dashboard.openRisk.caption")}
-            </p>
-          </div>
+        <div className="px-6 pb-5 pt-6">
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            {t("dashboard.todayPnl.label")}
+          </p>
+          <Pnl
+            value={hasAnyTrades ? todayPnl : null}
+            emphasis="metric"
+            className="mt-1.5 block text-4xl"
+          />
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {t("dashboard.todayPnl.caption")}
+          </p>
         </div>
+        <dl className="grid border-t sm:grid-cols-2 sm:divide-x">
+          <div className="flex items-baseline justify-between gap-4 px-6 py-3.5">
+            <dt className="text-sm text-muted-foreground">
+              {t("dashboard.realized.label")}
+              <span className="ml-1.5 text-xs">
+                {t("dashboard.realized.caption", { count: closed.length })}
+              </span>
+            </dt>
+            <dd>
+              <Pnl
+                value={closed.length > 0 ? realizedPnl : null}
+                className="text-base"
+              />
+            </dd>
+          </div>
+          <div className="flex items-baseline justify-between gap-4 border-t px-6 py-3.5 sm:border-t-0">
+            <dt className="text-sm text-muted-foreground">
+              {t("dashboard.unrealized.label")}
+              <span className="ml-1.5 text-xs">
+                {t("dashboard.unrealized.caption", { count: openPositions })}
+              </span>
+            </dt>
+            <dd>
+              <Pnl
+                value={openPositions > 0 ? unrealizedPnl : null}
+                className="text-base"
+              />
+            </dd>
+          </div>
+        </dl>
         {!hasAnyTrades && (
           <p className="border-t px-6 py-3 text-sm text-muted-foreground">
             {t("dashboard.noTrades")}
@@ -194,7 +184,7 @@ export default async function DashboardPage() {
 
       {/* SUPPORTING — intentionally NOT a uniform grid. A wide activity feed
           carries the weight; a narrow coverage rail sits beside it. */}
-      <div className="mt-8 grid gap-5 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <section aria-labelledby="activity-heading">
           <div className="mb-3 flex items-baseline justify-between">
             <h2
@@ -271,7 +261,23 @@ export default async function DashboardPage() {
                 {openPositions}
               </dd>
             </div>
+            <div className="flex items-center justify-between border-t px-5 py-4">
+              <dt className="text-sm text-muted-foreground">
+                {t("dashboard.openRisk.label")}
+              </dt>
+              <dd
+                className={cn(
+                  "text-base font-semibold tabular-nums",
+                  openPositions === 0 && "text-muted-foreground"
+                )}
+              >
+                {formatUsd(openRisk)}
+              </dd>
+            </div>
           </dl>
+          <p className="text-xs text-muted-foreground">
+            {t("dashboard.openRisk.caption")}
+          </p>
           {following.length === 0 && (
             <p className="text-xs text-muted-foreground">
               {t("dashboard.coverage.notFollowing")}

@@ -272,16 +272,17 @@ export default async function LeaderDetailPage({ params }: PageProps) {
           </TabsTrigger>
         </TabsList>
 
-        {/* ---- Overview tab ---- */}
-        <TabsContent value="overview" className="mt-5 space-y-5">
-          {/* Profile */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base font-semibold">
+        {/* ---- Overview tab — plain segmented sections divided by Separators
+            (mirrors the Stats tab idiom); no per-block Card and no nested
+            cards (DESIGN: cards are the lazy answer, no identical card
+            grid). ---- */}
+        <TabsContent value="overview" className="mt-5">
+          <div className="space-y-6">
+            {/* Profile */}
+            <section className="space-y-3">
+              <h2 className="text-base font-semibold">
                 {t("discovery.detail.profile.title")}
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
+              </h2>
               <dl className="grid grid-cols-1 gap-x-6 gap-y-4 text-sm sm:grid-cols-2">
                 <div>
                   <dt className="text-xs text-muted-foreground">
@@ -342,14 +343,13 @@ export default async function LeaderDetailPage({ params }: PageProps) {
                   </div>
                 )}
               </dl>
-            </CardContent>
-          </Card>
+            </section>
 
-          {/* Specialization + Risk — deliberately different shape, not a
-              mirrored card grid (DESIGN: no identical card grids). */}
-          <Card>
-            <CardContent className="grid grid-cols-1 gap-x-8 gap-y-5 pt-6 sm:grid-cols-[2fr_1fr]">
-              <div className="space-y-2">
+            <Separator />
+
+            {/* Specialization + Risk — paired, asymmetric columns. */}
+            <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-[2fr_1fr]">
+              <section className="space-y-2">
                 <h3 className="text-sm font-semibold">
                   {t("discovery.detail.specialization.title")}
                 </h3>
@@ -366,8 +366,8 @@ export default async function LeaderDetailPage({ params }: PageProps) {
                     </span>
                   )}
                 </div>
-              </div>
-              <div className="space-y-2 sm:border-l sm:border-border sm:pl-8">
+              </section>
+              <section className="space-y-2 sm:border-l sm:border-border sm:pl-8">
                 <h3 className="text-sm font-semibold">
                   {t("discovery.detail.riskFlags.title")}
                 </h3>
@@ -388,18 +388,16 @@ export default async function LeaderDetailPage({ params }: PageProps) {
                     </span>
                   )}
                 </div>
-              </div>
-            </CardContent>
-          </Card>
+              </section>
+            </div>
 
-          {/* Score formula */}
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-base font-semibold">
+            <Separator />
+
+            {/* Score formula */}
+            <section className="space-y-4">
+              <h2 className="text-base font-semibold">
                 {t("discovery.detail.breakdown.title")}
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
+              </h2>
               <p className="rounded-md bg-muted px-3 py-2 font-mono text-xs text-muted-foreground">
                 {/* Formula over DB column names (proper nouns); not
                     translatable copy. */}
@@ -463,8 +461,8 @@ export default async function LeaderDetailPage({ params }: PageProps) {
                   </ul>
                 </div>
               </div>
-            </CardContent>
-          </Card>
+            </section>
+          </div>
         </TabsContent>
 
         {/* ---- Stats tab — one Card, segmented sections (no card grid) ---- */}

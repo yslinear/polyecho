@@ -890,7 +890,7 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
 
   return (
     <section className="space-y-5">
-      <h2 className="flex items-center gap-2 text-lg font-semibold">
+      <h2 className="flex items-center gap-2 text-base font-semibold">
         {t("discovery.table.cardTitle")}
         <Badge
           variant="secondary"
@@ -1011,7 +1011,7 @@ export function DiscoveryTable({ data }: DiscoveryTableProps) {
         {/* Table (horizontal scroll wrapper for small screens via shadcn Table) */}
         <div className="max-h-[36rem] overflow-auto rounded-md border">
           <Table>
-            <TableHeader className="sticky top-0 z-10 bg-card">
+            <TableHeader className="sticky top-0 z-10 bg-muted">
               {table.getHeaderGroups().map((hg) => (
                 <TableRow key={hg.id} className="hover:bg-transparent">
                   {hg.headers.map((header) => {
