@@ -148,6 +148,24 @@ export function integrationNoData(): StatusPresentation {
   };
 }
 
+/**
+ * Defensive length cap for the worker-written `phase` raw string. It
+ * renders inline on /status; React escapes the text (no XSS) but a
+ * pathological / rogue DB value would blow out the layout (a view-DoS).
+ * Mirrors lib/alerts.ts `cappedFallback` (FALLBACK_MAX 40) — a normal
+ * phase value passes through untouched, only an oversize one is truncated.
+ * (probe `detail` is already capped upstream in lib/settings-keys
+ * `coerceProbe`; `phase` had no cap, hence this.)
+ */
+const STATUS_FIELD_MAX = 40;
+
+export function cappedField(raw: string): string {
+  const s = typeof raw === "string" ? raw : String(raw ?? "");
+  return s.length > STATUS_FIELD_MAX
+    ? `${s.slice(0, STATUS_FIELD_MAX)}…`
+    : s;
+}
+
 /** Human label for a worker heartbeat key (frozen key → instrument name). */
 export function workerLabel(key: string): string {
   switch (key) {

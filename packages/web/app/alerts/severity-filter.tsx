@@ -9,6 +9,7 @@
  */
 
 import * as React from "react";
+import { Check, Minus } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import {
@@ -129,13 +130,33 @@ export function AlertsList({ rows }: { rows: AlertEventRow[] }) {
                     </TableCell>
                     <TableCell className="text-right text-xs">
                       {r.pushed_at ? (
-                        <span className="text-gain">
+                        <Badge
+                          variant="secondary"
+                          className="gap-1 text-xs font-medium"
+                          aria-label={t(
+                            "alertsSettings.alerts.list.pushStatusAria"
+                          )}
+                        >
+                          <Check
+                            className="h-3 w-3 shrink-0"
+                            aria-hidden="true"
+                          />
                           {t("alertsSettings.alerts.list.delivered")}
-                        </span>
+                        </Badge>
                       ) : (
-                        <span className="text-muted-foreground">
+                        <Badge
+                          variant="outline"
+                          className="gap-1 text-xs font-medium text-muted-foreground"
+                          aria-label={t(
+                            "alertsSettings.alerts.list.pushStatusAria"
+                          )}
+                        >
+                          <Minus
+                            className="h-3 w-3 shrink-0"
+                            aria-hidden="true"
+                          />
                           {t("alertsSettings.alerts.list.notPushed")}
-                        </span>
+                        </Badge>
                       )}
                     </TableCell>
                     <TableCell className="whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground">

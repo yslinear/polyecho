@@ -34,6 +34,8 @@ export const alertsSettings = {
       noSummary: "未記錄",
       delivered: "已送達",
       notPushed: "未推播",
+      /** aria-label for the push-delivery status cell (icon + Badge). */
+      pushStatusAria: "推播狀態",
     },
     /** <DangerousActionInline> §5.7 危險-tier inline single-step confirm. */
     danger: {
@@ -80,6 +82,11 @@ export const alertsSettings = {
       errScheme: "Proxy URL 必須以 http:// 或 https:// 開頭。",
       errInvalidUrl: "請輸入有效的 http(s) URL，例如 http://127.0.0.1:8080",
       errSaveFailed: "Proxy 儲存失敗，目前仍沿用舊設定。請稍候重試。",
+      /** InlineConfirm description shown before persisting a new proxy. */
+      confirmDescription:
+        "這會改變 trader-core 對 Polymarket 的對外連線位址。請完成二次確認後送出（將於下一次 Polymarket 請求生效，無需重啟）。",
+      /** InlineConfirm success toast after a proxy is saved. */
+      saveSuccessToast: "已儲存 proxy，下一次 Polymarket 請求即生效。",
       urlLabel: "Proxy URL",
       urlPlaceholder: "http://127.0.0.1:8080  (留空 = 直接連線)",
       formHelp:
@@ -101,6 +108,11 @@ export const alertsSettings = {
       /** {{mode}} = resolved mode label (normal / conservative). */
       current: "目前：{{mode}}",
       errUpdateFailed: "風險模式切換失敗，目前模式維持不變。請稍候重試。",
+      /** InlineConfirm description shown when leaving conservative mode. */
+      confirmNormalDescription:
+        "這會解除保守模式：跟單比例與風險上限自動放回正常值。請完成二次確認後送出。",
+      /** InlineConfirm success toast after switching back to normal mode. */
+      normalSuccessToast: "已切換為正常模式。",
     },
     push: {
       heading: "推播通知",
@@ -111,6 +123,8 @@ export const alertsSettings = {
     copyTemplates: {
       heading: "跟單範本與風險",
       help: "保守 / 平衡 / 積極範本、每日虧損上限與類別白名單目前由 CLI 編輯，後續階段會移至此處。",
+      /** Honest empty state: this section has no control yet. */
+      emptyState: "此功能尚未提供。目前請使用 CLI 編輯跟單範本與風險上限。",
     },
   },
 } as const;

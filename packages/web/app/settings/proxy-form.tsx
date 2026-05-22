@@ -132,11 +132,15 @@ export function ProxyForm({ current, lastUpdated }: ProxyFormProps) {
           // Risk-increasing: setting a NEW proxy must inline-confirm.
           <InlineConfirm
             title={t("alertsSettings.settings.proxy.save")}
-            description="這會改變 trader-core 對 Polymarket 的對外連線位址。請完成二次確認後送出（將於下一次 Polymarket 請求生效，無需重啟）。"
+            description={t(
+              "alertsSettings.settings.proxy.confirmDescription"
+            )}
             requirePassphrase={false}
             triggerVariant="default"
             triggerClassName="h-9 gap-1.5"
-            successToast="Proxy saved. Takes effect on the next Polymarket call."
+            successToast={t(
+              "alertsSettings.settings.proxy.saveSuccessToast"
+            )}
             action={async ({ confirmText }) => {
               const localErr = validate(value);
               if (localErr) {

@@ -104,6 +104,11 @@ export default async function SettingsPage() {
         <p className="max-w-prose text-sm text-muted-foreground">
           {t("alertsSettings.settings.copyTemplates.help")}
         </p>
+        <div className="rounded-lg border border-dashed px-4 py-6 text-center">
+          <p className="text-sm text-muted-foreground">
+            {t("alertsSettings.settings.copyTemplates.emptyState")}
+          </p>
+        </div>
       </section>
     </div>
   );

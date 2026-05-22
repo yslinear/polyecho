@@ -21,6 +21,7 @@
  */
 
 import { inArray } from "drizzle-orm";
+import { AlertTriangle } from "lucide-react";
 
 import { db } from "@/lib/db";
 import { settings } from "@/lib/db/schema";
@@ -40,6 +41,7 @@ import {
   integrationNoData,
   workerLabel,
   probeLabel,
+  cappedField,
 } from "@/lib/status";
 import { formatRelativeTime, formatDateTime } from "@/lib/format";
 import { StatusBadge } from "@/components/status-badge";
@@ -107,9 +109,13 @@ export default async function StatusPage() {
         {rowError ? (
           <p
             role="alert"
-            className="max-w-prose text-sm font-medium text-destructive"
+            className="flex max-w-prose items-start gap-1.5 text-sm font-medium text-destructive"
           >
-            {t("status.rowError")}
+            <AlertTriangle
+              className="mt-0.5 h-4 w-4 shrink-0"
+              aria-hidden="true"
+            />
+            <span>{t("status.rowError")}</span>
           </p>
         ) : null}
       </header>
@@ -153,7 +159,9 @@ export default async function StatusPage() {
                       {t("status.workers.phase")}
                     </dt>
                     <dd className="font-medium">
-                      {hb?.phase ?? t("status.workers.unknown")}
+                      {hb?.phase
+                        ? cappedField(hb.phase)
+                        : t("status.workers.unknown")}
                     </dd>
                   </div>
                   <div className="space-y-0.5">

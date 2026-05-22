@@ -70,11 +70,15 @@ export function RiskModeForm({ current }: { current: RiskMode }) {
         // Risk-increasing: leave conservative → must inline-confirm.
         <InlineConfirm
           title={t("alertsSettings.settings.riskMode.normal")}
-          description="這會解除保守模式：跟單比例與風險上限自動放回正常值。請完成二次確認後送出。"
+          description={t(
+            "alertsSettings.settings.riskMode.confirmNormalDescription"
+          )}
           requirePassphrase={false}
           triggerVariant="default"
           triggerClassName="h-8 gap-1.5 text-xs"
-          successToast="已切換為正常模式。"
+          successToast={t(
+            "alertsSettings.settings.riskMode.normalSuccessToast"
+          )}
           action={async ({ confirmText }) => {
             const res = await setRiskMode("normal", { confirmText });
             return res;
