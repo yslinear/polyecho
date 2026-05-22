@@ -22,6 +22,7 @@ import {
   Users,
   Search,
   FlaskConical,
+  Microscope,
   History,
   TrendingUp,
   Wallet,
@@ -65,6 +66,10 @@ const NAV_GROUPS = [
       // Section "/backtest" matches /backtest, /backtest/new and
       // /backtest/<id> — see isNavItemActive.
       { href: "/backtest", labelKey: "sidebar.items.backtest", icon: FlaskConical },
+      // C1-P5: the forward paper-trading ladder (lifecycle_state + paper
+      // stats + operator-gated promote-to-live). Belongs in this group —
+      // it is the evaluation stage between discovery and a real follow.
+      { href: "/research", labelKey: "sidebar.items.research", icon: Microscope },
     ],
   },
   {

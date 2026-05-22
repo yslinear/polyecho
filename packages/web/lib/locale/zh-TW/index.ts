@@ -11,6 +11,7 @@ import { common, sidebar } from "./common";
 import { dashboard } from "./dashboard";
 import { discovery } from "./discovery";
 import { inlineConfirm } from "./inline-confirm";
+import { research } from "./research";
 import { status } from "./status";
 import { tables } from "./tables";
 
@@ -21,6 +22,7 @@ export const dict = {
   status,
   discovery,
   backtest,
+  research,
   tables,
   alertsSettings,
   inlineConfirm,
