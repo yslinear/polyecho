@@ -54,6 +54,8 @@ const rows: LeaderRow[] = [
     status: "active",
     created_at: new Date("2026-01-01T00:00:00Z"),
     last_seen_ts: new Date("2026-05-01T12:30:00Z"),
+    // Clean template — the B3 linter yields no warnings.
+    templateWarnings: [],
   },
   {
     id: "rel-paused",
@@ -63,6 +65,7 @@ const rows: LeaderRow[] = [
     status: "paused",
     created_at: new Date("2026-02-02T00:00:00Z"),
     last_seen_ts: null,
+    templateWarnings: [],
   },
 ];
 
@@ -155,5 +158,76 @@ describe("LeadersTable", () => {
       expect(label).not.toContain(t("common.liveTrading.locked"));
       expect(label).not.toContain(t("common.liveTrading.unlocked"));
     }
+  });
+});
+
+// ── B3 — TemplateConfig pre-flight risk advisory ─────────────────────────
+describe("LeadersTable — template risk advisory (B3)", () => {
+  it("renders no advisory when the template lints clean", () => {
+    render(<LeadersTable rows={rows} />);
+    expect(
+      screen.queryByText(t("tables.leaders.templateRisk.heading"))
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the high-severity advisory for a missing money-loss cap", () => {
+    const flagged: LeaderRow[] = [
+      {
+        ...rows[1],
+        templateWarnings: [
+          {
+            code: "missing.max_position_usd",
+            field: "max_position_usd",
+            severity: "high",
+            messageKey: "tables.leaders.templateRisk.codes.missingMaxPosition",
+            suggested: "500",
+          },
+        ],
+      },
+    ];
+    render(<LeadersTable rows={flagged} />);
+    expect(
+      screen.getByText(t("tables.leaders.templateRisk.heading"))
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        t("tables.leaders.templateRisk.codes.missingMaxPosition")
+      )
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        t("tables.leaders.templateRisk.summaryHigh", { count: 1 })
+      )
+    ).toBeInTheDocument();
+    // Suggested value surfaces so the operator has a concrete target.
+    expect(
+      screen.getByText(
+        t("tables.leaders.templateRisk.suggestedLabel", { value: "500" })
+      )
+    ).toBeInTheDocument();
+  });
+
+  it("shows the medium-only summary when no cap is missing outright", () => {
+    const flagged: LeaderRow[] = [
+      {
+        ...rows[1],
+        templateWarnings: [
+          {
+            code: "loose.max_concurrent_positions",
+            field: "max_concurrent_positions",
+            severity: "medium",
+            messageKey:
+              "tables.leaders.templateRisk.codes.looseConcurrency",
+            suggested: "25",
+          },
+        ],
+      },
+    ];
+    render(<LeadersTable rows={flagged} />);
+    expect(
+      screen.getByText(
+        t("tables.leaders.templateRisk.summaryMedium", { count: 1 })
+      )
+    ).toBeInTheDocument();
   });
 });

@@ -226,6 +226,29 @@ export const tables = {
      *  {{address}} = the leader's wallet address (literal, not translated). */
     resumeConfirmDescription:
       "這會恢復對 Leader {{address}} 的跟單。trader-core 將於下一筆 Leader 交易繼續跟。請完成二次確認後送出。",
+    /** B3 — TemplateConfig 風險預檢顧問（PolyHermes inspectRiskConfig）。
+     *  在操作員啟用 live 跟單前，先提示範本中缺失或過寬的風險上限。
+     *  這是平和的顧問訊息，不是阻擋；16 步風險閘仍會於下單時把關。 */
+    templateRisk: {
+      heading: "範本風險預檢",
+      summaryHigh: "此範本有 {{count}} 項風險上限未設定或過寬，其中含高風險項。",
+      summaryMedium: "此範本有 {{count}} 項風險上限建議調整。",
+      severityHigh: "高",
+      severityMedium: "中",
+      /** {{value}} = 建議值（金額或數量）。 */
+      suggestedLabel: "建議值 {{value}}",
+      codes: {
+        missingMaxPosition:
+          "未設定單一持倉價值上限，單筆跟單可建立無上限的部位。",
+        missingDailyLoss:
+          "未設定單日虧損上限，糟糕的一天無法觸發單日虧損斷路器。",
+        missingConcurrency:
+          "未設定同時持倉數上限，未平倉的跟單數量無上限。",
+        looseMaxPosition: "單一持倉上限高於建議的上限值。",
+        looseDailyLoss: "單日虧損上限高於建議的上限值。",
+        looseConcurrency: "同時持倉數上限高於建議的上限值。",
+      },
+    },
     skips: {
       heading: "近期略過",
       subtitleEmpty:

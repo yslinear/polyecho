@@ -26,6 +26,7 @@ import {
 } from "@/lib/db/schema";
 import { LiveTradingStatus } from "@/components/live-trading-status";
 import { t } from "@/lib/i18n";
+import { lintTemplateConfig } from "@/lib/template-linter";
 import { LeadersTable, type LeaderRow } from "./leaders-table";
 import { SkipsTable, type SkipRow } from "./skips-table";
 
@@ -35,7 +36,11 @@ const LIVE_ACK_KEY = "live_trading_ack";
 const SKIPS_LIMIT = 50;
 
 export default async function LeadersPage() {
-  const rows: LeaderRow[] = await db
+  // The template's risk-cap columns are joined in so the B3 pre-flight
+  // linter (lib/template-linter) can flag a dangerously-configured template
+  // BEFORE the operator resumes a paused live follow. The 16-step gate still
+  // enforces caps at trade time; this is a calm advisory, not a blocker.
+  const joined = await db
     .select({
       id: followRelations.id,
       leader_address: followRelations.leader_address,
@@ -44,11 +49,31 @@ export default async function LeadersPage() {
       status: followRelations.status,
       created_at: followRelations.created_at,
       last_seen_ts: followRelations.last_seen_ts,
+      max_position_usd: copyTemplates.max_position_usd,
+      daily_loss_limit_usd: copyTemplates.daily_loss_limit_usd,
+      max_concurrent_positions: copyTemplates.max_concurrent_positions,
     })
     .from(followRelations)
     .leftJoin(accounts, eq(followRelations.account_id, accounts.id))
     .leftJoin(copyTemplates, eq(followRelations.template_id, copyTemplates.id))
     .orderBy(asc(followRelations.created_at));
+
+  const rows: LeaderRow[] = joined.map((r) => ({
+    id: r.id,
+    leader_address: r.leader_address,
+    account_name: r.account_name,
+    template_name: r.template_name,
+    status: r.status,
+    created_at: r.created_at,
+    last_seen_ts: r.last_seen_ts,
+    // Lint server-side: the warnings are small + serialise cleanly to the
+    // client island, which renders them as the calm advisory.
+    templateWarnings: lintTemplateConfig({
+      max_position_usd: r.max_position_usd,
+      daily_loss_limit_usd: r.daily_loss_limit_usd,
+      max_concurrent_positions: r.max_concurrent_positions,
+    }),
+  }));
 
   const [ackRow] = await db
     .select({ key: settings.key })

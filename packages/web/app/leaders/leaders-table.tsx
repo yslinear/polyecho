@@ -30,6 +30,10 @@ import {
 } from "@/components/ui/table";
 import { shortAddress, formatDateTime } from "@/lib/format";
 import { t } from "@/lib/i18n";
+import {
+  hasHighSeverity,
+  type TemplateWarning,
+} from "@/lib/template-linter";
 import { setFollowStatus } from "./actions";
 
 export interface LeaderRow {
@@ -40,6 +44,65 @@ export interface LeaderRow {
   status: string;
   created_at: Date | string;
   last_seen_ts: Date | string | null;
+  /** B3 — pre-flight TemplateConfig risk-linter findings (lib/template-linter). */
+  templateWarnings: TemplateWarning[];
+}
+
+/**
+ * TemplateRiskAdvisory — the B3 pre-flight advisory (PolyHermes
+ * `inspectRiskConfig`). Renders the linter findings as a calm Badge-led
+ * notice so the operator sees a dangerously-configured template BEFORE
+ * resuming a live follow. DESIGN.md: Badge variants carry the severity (no
+ * raw colour-only signal); `outline` for the medium-only case so the row
+ * stays quiet, `destructive` only when a money-loss cap is unset.
+ */
+function TemplateRiskAdvisory({
+  warnings,
+}: {
+  warnings: TemplateWarning[];
+}) {
+  if (warnings.length === 0) return null;
+  const high = hasHighSeverity(warnings);
+  return (
+    <div className="mt-2 space-y-1.5 rounded-md border border-dashed bg-muted/40 p-2">
+      <div className="flex items-center gap-1.5">
+        <Badge variant={high ? "destructive" : "outline"} className="text-xs">
+          {t("tables.leaders.templateRisk.heading")}
+        </Badge>
+        <span className="text-xs text-muted-foreground">
+          {high
+            ? t("tables.leaders.templateRisk.summaryHigh", {
+                count: warnings.length,
+              })
+            : t("tables.leaders.templateRisk.summaryMedium", {
+                count: warnings.length,
+              })}
+        </span>
+      </div>
+      <ul className="space-y-1">
+        {warnings.map((w) => (
+          <li key={w.code} className="flex items-start gap-1.5 text-xs">
+            <Badge
+              variant={w.severity === "high" ? "destructive" : "secondary"}
+              className="shrink-0 text-[0.65rem]"
+            >
+              {w.severity === "high"
+                ? t("tables.leaders.templateRisk.severityHigh")
+                : t("tables.leaders.templateRisk.severityMedium")}
+            </Badge>
+            <span className="text-muted-foreground">
+              {t(w.messageKey)}{" "}
+              <span className="text-foreground">
+                {t("tables.leaders.templateRisk.suggestedLabel", {
+                  value: w.suggested,
+                })}
+              </span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 function RowAction({ row }: { row: LeaderRow }) {
@@ -267,8 +330,14 @@ export function LeadersTable({ rows }: { rows: LeaderRow[] }) {
               <TableCell className="whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground">
                 {formatDateTime(r.created_at)}
               </TableCell>
-              <TableCell className="text-right">
+              <TableCell className="text-right align-top">
                 <RowAction row={r} />
+                {/* B3 — pre-flight risk advisory, shown next to Resume so the
+                    operator reviews a loose/missing-cap template before
+                    enabling a live follow. */}
+                <div className="text-left">
+                  <TemplateRiskAdvisory warnings={r.templateWarnings} />
+                </div>
               </TableCell>
             </TableRow>
           ))}
