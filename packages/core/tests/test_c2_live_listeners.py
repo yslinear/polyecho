@@ -380,3 +380,284 @@ async def test_chain_listener_is_cancel_safe() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+# -- C2-P4: TaskGroup wiring + the queue-drain consumer ----------------
+#
+# These exercise the C2-P4 wiring on ``TraderCore`` itself: the live
+# listeners + the drain consumer attach to the supervised TaskGroup ONLY
+# when ``datasource == "live"``; fixture mode never starts them.
+
+
+def _live_core(*, follows: Any | None = None) -> Any:
+    """A ``TraderCore`` whose engine reports ``datasource == "live"``.
+
+    ``_settings`` is read once at construction and only ``datasource`` /
+    ``auto_redeem`` are consulted on the supervised path, so swapping in a
+    tiny stub flips :pyattr:`TraderCore._is_live` without standing up the
+    full live config (which would demand real RPC URLs etc.).
+    """
+    import types as _types
+
+    from polyecho.core.trader import TraderCore
+
+    core = TraderCore(follows=follows or [])
+    # ``_settings`` is a frozen pydantic model; a SimpleNamespace with the
+    # two fields the supervised path consults is sufficient and avoids
+    # standing up the full live config.
+    core._settings = _types.SimpleNamespace(  # type: ignore[assignment]
+        datasource="live", auto_redeem=False
+    )
+    return core
+
+
+def _fixture_core(*, follows: Any | None = None) -> Any:
+    """A default fixture-mode ``TraderCore`` (``datasource == "fixture"``)."""
+    from polyecho.core.trader import TraderCore
+
+    return TraderCore(follows=follows or [])
+
+
+def test_is_live_flag_tracks_datasource() -> None:
+    assert _fixture_core()._is_live is False
+    assert _live_core()._is_live is True
+
+
+def test_build_live_listeners_constructs_with_live_flag() -> None:
+    # Live: both listeners are built with live=True.
+    ws, chain = _live_core()._build_live_listeners()
+    assert ws._live is True
+    assert chain._live is True
+    # Fixture: byte-identical to today — both built with live=False.
+    ws2, chain2 = _fixture_core()._build_live_listeners()
+    assert ws2._live is False
+    assert chain2._live is False
+
+
+async def test_drain_consumer_routes_detected_trade_to_process_detected() -> None:
+    """A ``DetectedTrade`` put on ``_queue`` reaches ``process_detected``."""
+    core = _live_core()
+    seen: list[DetectedTrade] = []
+
+    async def _capture(trade: DetectedTrade) -> None:
+        seen.append(trade)
+
+    core.process_detected = _capture
+
+    task = asyncio.ensure_future(core._drain_consumer())
+    trade: DetectedTrade = {"leader_address": LEADER, "tx_hash": "0xqueued"}
+    await core._queue.put(trade)
+    await asyncio.wait_for(core._queue.join(), timeout=2.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert seen == [trade]
+
+
+async def test_drain_consumer_counts_errors_and_keeps_draining() -> None:
+    """A bad trade is counted, logged, and never aborts the drain loop."""
+    core = _live_core()
+    calls = 0
+
+    async def _flaky(_trade: DetectedTrade) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("boom")
+
+    core.process_detected = _flaky
+
+    task = asyncio.ensure_future(core._drain_consumer())
+    await core._queue.put({"tx_hash": "0xbad"})
+    await core._queue.put({"tx_hash": "0xgood"})
+    await asyncio.wait_for(core._queue.join(), timeout=2.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert calls == 2  # the loop survived the first trade's error
+    assert core.stats.errors == 1
+
+
+async def test_drain_consumer_is_cancel_safe() -> None:
+    """The drain consumer re-raises ONLY CancelledError (TaskGroup-safe)."""
+    core = _live_core()
+    task = asyncio.ensure_future(core._drain_consumer())
+    await asyncio.sleep(0.02)  # park on an empty queue
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_run_live_starts_listeners_and_drain_in_taskgroup() -> None:
+    """LIVE: ``run`` attaches ws + chain + the drain consumer as tasks."""
+    core = _live_core()
+    started: list[str] = []
+
+    async def _never_exit(label: str) -> None:
+        started.append(label)
+        await asyncio.Event().wait()
+
+    # Stub the three live coroutines so we can observe they were started
+    # without driving real WS streams; the drain consumer is replaced too.
+    class _StubWS:
+        async def run(self) -> None:
+            await _never_exit("ws")
+
+    class _StubChain:
+        async def run(self) -> None:
+            await _never_exit("chain")
+
+    core._build_live_listeners = lambda: (_StubWS(), _StubChain())
+    core._drain_consumer = lambda: _never_exit("drain")
+    # Keep the always-on siblings inert so the TaskGroup just parks.
+    core._integration_probe_loop = lambda: _never_exit("probe")
+    core._park = lambda: _never_exit("park")
+
+    task = asyncio.ensure_future(core.run())
+    await asyncio.sleep(0.05)
+    assert set(started) == {"ws", "chain", "drain", "probe", "park"}
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_run_fixture_does_not_start_live_listeners() -> None:
+    """FIXTURE: ``run`` starts NO live listeners / drain (byte-identical)."""
+    core = _fixture_core()
+    started: list[str] = []
+
+    async def _never_exit(label: str) -> None:
+        started.append(label)
+        await asyncio.Event().wait()
+
+    def _fail_build() -> Any:  # must never be called in fixture mode
+        raise AssertionError("live listeners must not be built in fixture mode")
+
+    core._build_live_listeners = _fail_build
+    core._drain_consumer = lambda: _never_exit("drain")
+    core._integration_probe_loop = lambda: _never_exit("probe")
+    core._park = lambda: _never_exit("park")
+
+    task = asyncio.ensure_future(core.run())
+    await asyncio.sleep(0.05)
+    # Only the always-on siblings ran; no ws / chain / drain.
+    assert set(started) == {"probe", "park"}
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_run_live_drain_consumer_processes_a_real_detected_trade() -> None:
+    """LIVE end-to-end: a trade enqueued during ``run`` is processed.
+
+    The drain consumer attached by ``run`` pulls a ``DetectedTrade`` off
+    ``_queue`` and runs it through the real ``process_detected`` pipeline.
+    """
+    core = _live_core()
+    seen: list[str] = []
+
+    async def _capture(trade: DetectedTrade) -> None:
+        seen.append(str(trade.get("tx_hash")))
+
+    core.process_detected = _capture
+
+    # No real WS streams: the listeners just park; only the drain runs.
+    class _Idle:
+        async def run(self) -> None:
+            await asyncio.Event().wait()
+
+    core._build_live_listeners = lambda: (_Idle(), _Idle())
+
+    async def _inert() -> None:
+        await asyncio.Event().wait()
+
+    core._integration_probe_loop = _inert
+    core._park = _inert
+
+    task = asyncio.ensure_future(core.run())
+    await asyncio.sleep(0.02)  # let run_once + the TaskGroup spin up
+    await core._queue.put({"tx_hash": "0xlive_e2e"})
+    await asyncio.wait_for(core._queue.join(), timeout=2.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert "0xlive_e2e" in seen
+
+
+# -- C2-P4: run_supervised (the DEPLOYED entrypoint) wiring ------------
+#
+# ``__main__`` deploys ``wiring.run_supervised`` (not ``TraderCore.run``),
+# so the live listeners + drain consumer must attach there too.  These
+# patch the heavy collaborators and capture the coroutine list handed to
+# ``asyncio.gather`` to assert exactly which loops were started.
+
+
+async def _gather_capture(monkeypatch: pytest.MonkeyPatch, core: Any) -> list[Any]:
+    """Run ``run_supervised(core)`` with all heavy I/O stubbed; capture
+    the coroutines passed to ``asyncio.gather``."""
+    from polyecho.core import wiring
+
+    captured: list[Any] = []
+
+    async def _noop_startup() -> None:
+        return None
+
+    def _fake_build_redeem_worker(_follows: Any) -> Any:
+        return object()
+
+    async def _fake_gather(*coros: Any, **_kw: Any) -> list[Any]:
+        captured.extend(coros)
+        # Close every coroutine so pytest does not warn "never awaited".
+        for c in coros:
+            if asyncio.iscoroutine(c):
+                c.close()
+        return []
+
+    monkeypatch.setattr(wiring, "startup_reconcile", _noop_startup)
+    monkeypatch.setattr(wiring, "build_redeem_worker", _fake_build_redeem_worker)
+    monkeypatch.setattr(asyncio, "gather", _fake_gather)
+    await wiring.run_supervised(core)
+    return captured
+
+
+async def test_run_supervised_live_adds_listeners_and_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LIVE: run_supervised hands ws + chain + drain to the gather."""
+    core = _live_core()
+    built: list[Any] = []
+
+    class _Idle:
+        async def run(self) -> None:  # pragma: no cover - never awaited
+            await asyncio.Event().wait()
+
+    def _build() -> Any:
+        ws, chain = _Idle(), _Idle()
+        built.extend([ws, chain])
+        return ws, chain
+
+    core._build_live_listeners = _build
+    captured = await _gather_capture(monkeypatch, core)
+
+    # 4 always-on loops + ws + chain + drain == 7 coroutines.
+    assert len(captured) == 7
+    assert len(built) == 2  # the live listeners WERE constructed
+
+
+async def test_run_supervised_fixture_adds_no_live_loops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIXTURE: run_supervised hands ONLY the 4 always-on loops."""
+    core = _fixture_core()
+
+    def _fail_build() -> Any:  # must never be called in fixture mode
+        raise AssertionError("live listeners must not be built in fixture mode")
+
+    core._build_live_listeners = _fail_build
+    captured = await _gather_capture(monkeypatch, core)
+
+    # redeem + daily-reconcile + integration-probe + park == 4, no more.
+    assert len(captured) == 4

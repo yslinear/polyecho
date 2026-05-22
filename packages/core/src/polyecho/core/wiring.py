@@ -760,6 +760,17 @@ async def run_supervised(
        ``integration_status`` row — and the /status connectivity panel —
        permanently empty.
 
+    C2-P4: when ``datasource == "live"`` this entrypoint ALSO drives the
+    two real-time detection producers (``UserChannelListener.run`` +
+    ``ChainCrossCheckListener.run``) plus the queue-drain consumer
+    (``core._drain_consumer``) as further independent fail-soft loops in
+    the same ``gather``.  ``TraderCore.run`` attaches them via its own
+    TaskGroup, but ``__main__`` deploys THIS entrypoint, so without this
+    the deployed live trader-core would never start the WS streams.  In
+    fixture mode none of the three live tasks are added — the supervised
+    loop is byte-identical to today.  Every actual copy still passes the
+    full risk gate downstream of ``process_detected``.
+
     Mirrors :meth:`TraderCore.run` (run one bounded pass then park) but
     additionally drives the real DB-backed RedeemWorker + reconcile
     cadence WITHOUT modifying the engine.
@@ -791,11 +802,24 @@ async def run_supervised(
     # without this line trader_heartbeat freezes at the single startup
     # pass and the dashboard false-flags Trader as 逾時/stale ~5 min
     # later (exact same deployed-entrypoint gap as the §7.1 probe above).
-    await asyncio.gather(  # pragma: no cover - supervised loop
+    #
+    # C2-P4: when ``datasource == "live"`` the two WS/RPC detection
+    # producers + the queue-drain consumer are added as further
+    # independent never-exit fail-soft coroutines in the SAME gather
+    # (same ``return_exceptions=True`` rationale — one loop faulting must
+    # never stop the siblings).  In fixture mode this list is empty and
+    # the gather is byte-identical to today.
+    coros: list[Any] = [
         _redeem_loop(worker, interval_seconds=redeem_interval_seconds),
         _daily_reconcile_loop(interval_seconds=reconcile_interval_seconds),
         core._integration_probe_loop(),
         core._park(),
+    ]
+    if getattr(core, "_is_live", False):
+        ws, chain = core._build_live_listeners()
+        coros += [ws.run(), chain.run(), core._drain_consumer()]
+    await asyncio.gather(  # pragma: no cover - supervised loop
+        *coros,
         return_exceptions=True,
     )
 

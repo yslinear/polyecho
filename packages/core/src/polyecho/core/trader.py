@@ -1565,13 +1565,99 @@ class TraderCore:
             except asyncio.CancelledError:
                 raise
 
+    # ------------------------------------------------------------------
+    # C2-P4: live WS listeners + queue-drain consumer
+    # ------------------------------------------------------------------
+
+    @property
+    def _is_live(self) -> bool:
+        """``True`` iff this engine runs the live WS/RPC detection path.
+
+        The single gate for the whole C2-P4 live wiring: the listeners are
+        constructed with ``live=`` from this flag and the drain consumer +
+        listener tasks are attached to the supervised ``TaskGroup`` ONLY
+        when it is set.  In fixture mode it is ``False`` and behaviour is
+        byte-identical to today.
+        """
+        return self._settings.datasource == "live"
+
+    def _build_live_listeners(
+        self,
+    ) -> tuple[UserChannelListener, ChainCrossCheckListener]:
+        """Construct the two detection producers for the supervised loop.
+
+        C2-P4: both listeners take ``live=(datasource == "live")``.  In
+        fixture mode ``live=False`` and ``run()`` is byte-identical to the
+        ``run_once`` fixture replay; in live mode ``run()`` drives the real
+        :class:`ReconnectingWSClient` streams.  Either way the producers
+        push :class:`DetectedTrade`s onto the SAME shared :attr:`_queue`
+        the drain consumer reads — exactly as ``run_once`` already does.
+        """
+        leaders = sorted({f.leader_address.lower() for f in self._follows})
+        ws = UserChannelListener(leaders, self._queue, datasource=self._ds, live=self._is_live)
+        chain = ChainCrossCheckListener(
+            leaders,
+            self._queue,
+            datasource=self._ds,
+            confirmations=self._confirmations,
+            live=self._is_live,
+        )
+        return ws, chain
+
+    async def _drain_consumer(self) -> None:
+        """Perpetual consumer: pull detected trades off :attr:`_queue`.
+
+        C2-P4: in the supervised LIVE loop the WS / on-chain listeners run
+        as long-lived producers, so the queue must have a dedicated
+        consumer (``run_once`` drains inline, but the live ``run()`` loops
+        never return).  Each :class:`DetectedTrade` is run through the full
+        :meth:`process_detected` pipeline — every actual copy still passes
+        the 16-step risk gate downstream; this consumer adds NO new
+        capability, it only moves the existing drain off ``run_once`` and
+        onto a never-exit task.
+
+        TaskGroup-safe: mirrors the ``run_once`` drain's contract — a bad
+        trade is counted and logged, never aborts the loop — and re-raises
+        ONLY :class:`asyncio.CancelledError`, so it can never trip the
+        supervising ``TaskGroup``'s "one child raises ⇒ cancel siblings"
+        rule.
+        """
+        while True:  # pragma: no cover - supervised loop
+            # ``queue.get()`` may itself be cancelled at a clean shutdown
+            # point — nothing was dequeued, so do NOT call ``task_done``.
+            trade = await self._queue.get()
+            try:
+                await self.process_detected(trade)
+            except asyncio.CancelledError:
+                raise  # cooperative shutdown — never swallow cancellation
+            except Exception as exc:  # noqa: BLE001 - count, never abort loop
+                self.stats.errors += 1
+                logger.warning(
+                    "drain_consumer_process_detected_failed_continuing",
+                    extra={"error": str(exc)},
+                )
+            finally:
+                # Balance the ``get()`` above: a dequeued item is always
+                # marked done, even when ``process_detected`` is cancelled.
+                self._queue.task_done()
+
     async def run(self) -> None:
         """Supervised loop: bounded pass + parked detection/probe TaskGroup.
 
         Fixture mode performs one bounded ``run_once`` pass then idles
-        (restart-safe; reconcile is the durable backfill).  The live WS /
-        RPC streams are the Phase-4 W2 deliverable behind the same
-        interface.
+        (restart-safe; reconcile is the durable backfill).
+
+        C2-P4: in LIVE mode (``datasource == "live"``) the supervised
+        TaskGroup additionally runs the two real-time detection producers
+        (``UserChannelListener.run`` + ``ChainCrossCheckListener.run``) as
+        long-lived siblings, plus a :meth:`_drain_consumer` task that
+        pulls every :class:`DetectedTrade` they enqueue through the full
+        :meth:`process_detected` pipeline.  In fixture mode none of those
+        three tasks are started — the bounded ``run_once`` pass + the
+        parked loop are byte-identical to today; the live path is the only
+        thing gated behind ``datasource == "live"``.  Every actual copy
+        still passes the full risk gate downstream of ``process_detected``;
+        the reconcile loop stays the durable backfill for any WS gap.
 
         Task 2: the periodic integration probe is attached HERE (the
         always-on supervised engine) as a detached sibling task — it runs
@@ -1586,8 +1672,7 @@ class TraderCore:
         await self.run_once()
         # Idle until cancelled by the supervising TaskGroup / signal — an
         # Event that is never set is the lint-clean "park forever" idiom
-        # (no busy sleep loop).  Live WS/RPC stream tasks attach here in
-        # the Phase-4 W2 live build behind the same interface.
+        # (no busy sleep loop).
         async with asyncio.TaskGroup() as tg:  # pragma: no cover - supervised loop
             tg.create_task(self._park())
             # Strong ref (asyncio holds only a WEAK ref to a created
@@ -1598,6 +1683,16 @@ class TraderCore:
             # "one child raises ⇒ cancel siblings" rule and abort the
             # parked engine.
             self._integration_probe_task = tg.create_task(self._integration_probe_loop())
+            # C2-P4: the live WS/RPC detection path.  Started ONLY when
+            # ``datasource == "live"``; fixture mode never reaches here so
+            # its behaviour is byte-identical.  Each listener's ``run()``
+            # and the drain consumer are never-exit + re-raise only
+            # ``CancelledError`` (TaskGroup-safe) — see their docstrings.
+            if self._is_live:
+                ws, chain = self._build_live_listeners()
+                tg.create_task(ws.run())
+                tg.create_task(chain.run())
+                tg.create_task(self._drain_consumer())
 
     async def _park(self) -> None:
         """Idle the parked fixture engine while keeping liveness fresh.
