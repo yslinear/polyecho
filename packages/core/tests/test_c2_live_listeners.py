@@ -491,7 +491,7 @@ async def test_drain_consumer_is_cancel_safe() -> None:
 
 
 async def _wait_until_started(
-    started: list[str], expected: set[str], *, timeout: float = 3.0
+    started: list[str], expected: set[str], *, max_wait: float = 3.0
 ) -> None:
     """Poll until the started-task set matches ``expected``.
 
@@ -501,7 +501,7 @@ async def _wait_until_started(
     on timeout the caller's assert still reports the real diff.
     """
     loop = asyncio.get_event_loop()
-    deadline = loop.time() + timeout
+    deadline = loop.time() + max_wait
     while loop.time() < deadline:
         if set(started) == expected:
             return
