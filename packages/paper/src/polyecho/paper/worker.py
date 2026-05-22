@@ -68,6 +68,16 @@ ADVISORY_LOCK_KEY = 0x504150_4552  # "PAPER" as hex, stable arbitrary key
 #: Default starting paper capital for a freshly opened paper session.
 DEFAULT_PAPER_CAPITAL_USD = 1000.0
 
+#: Max paper-state candidates simulated per cycle.  The FIRST simulation
+#: of a never-run session has a NULL cursor, so it fetches the leader's
+#: FULL trade history via get_user_activity through a rate-limited proxy.
+#: With a large pool (the live system has ~2137 paper-state candidates) an
+#: unbounded claim would run one all-or-nothing transaction for hours.
+#: claim_paper_candidates therefore claims at most this many per cycle,
+#: ordered stalest-first, so repeated cycles ROTATE fairly through the
+#: whole pool (mirroring PolyHermes' fixed per-cycle batch).
+PAPER_CYCLE_BATCH = 100
+
 #: BacktestParams the paper run simulates under.  Conservative, fixed
 #: defaults -- the paper ladder is a uniform shadow-copy harness, not a
 #: per-leader tuned backtest.
@@ -118,22 +128,46 @@ class PaperRepo:
         return bool(result.scalar())
 
     async def claim_paper_candidates(self, session: AsyncSession) -> list[CandidateLeader]:
-        """Claim ``paper``-state candidates with ``FOR UPDATE SKIP LOCKED``.
+        """Claim a bounded, stalest-first batch of ``paper``-state candidates.
+
+        At most :data:`PAPER_CYCLE_BATCH` rows are claimed per call.  The
+        first simulation of a never-run session fetches the leader's FULL
+        trade history through a rate-limited proxy, so an unbounded claim
+        would run one all-or-nothing transaction for hours on a large pool.
+        Bounding the batch keeps each cycle's single transaction short.
+
+        Ordering makes repeated cycles ROTATE fairly through the whole
+        pool: a never-simulated session (``paper_sessions.cursor_ts IS
+        NULL``) sorts first, then oldest ``cursor_ts`` ascending.  Once a
+        session is simulated its cursor advances, so it sorts to the back
+        and the next cycle picks up the next-stalest batch -- no candidate
+        is starved.  ``paper_sessions`` is LEFT JOINed on the open session
+        only; a ``paper``-state candidate with no open session yet still
+        has a NULL cursor and so remains claimable (``NULLS FIRST``).
 
         ``SKIP LOCKED`` means a row another worker / transaction already
         holds is silently skipped rather than blocking -- safe even though
         the advisory lock already serialises whole cycles (defence in
         depth, and it keeps per-row claiming correct if the cadence is
-        ever parallelised).  A ``locked`` candidate is excluded here so the
-        operator override is honoured before any work is done.
+        ever parallelised).  ``of=CandidateLeader`` locks ONLY the
+        candidate rows, not the LEFT-JOINed ``paper_sessions`` rows.  A
+        ``locked`` candidate is excluded here so the operator override is
+        honoured before any work is done.
         """
         stmt = (
             select(CandidateLeader)
+            .outerjoin(
+                PaperSession,
+                (PaperSession.leader_address == CandidateLeader.wallet_address)
+                & (PaperSession.state == "open"),
+            )
             .where(
                 CandidateLeader.lifecycle_state == LifecycleState.PAPER.value,
                 CandidateLeader.locked.is_(False),
             )
-            .with_for_update(skip_locked=True)
+            .order_by(PaperSession.cursor_ts.asc().nulls_first())
+            .limit(PAPER_CYCLE_BATCH)
+            .with_for_update(skip_locked=True, of=CandidateLeader)
         )
         result = await session.execute(stmt)
         return list(result.scalars().all())

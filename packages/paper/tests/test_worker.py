@@ -304,3 +304,122 @@ async def test_worker_skips_trades_at_or_before_cursor() -> None:
     with patch.object(worker_mod, "session_scope", lambda: _fake_session_scope(session)):
         result = await worker.run_cycle()
     assert result.trades_simulated == 1
+
+
+# ---------------------------------------------------------------------------
+# claim_paper_candidates batching (the scaling fix)
+#
+# The first simulation of a never-run session fetches the leader's FULL
+# trade history through a rate-limited proxy.  An unbounded claim would run
+# one all-or-nothing transaction for hours on the live ~2137-row pool, so
+# claim_paper_candidates bounds the batch and orders stalest-first.  These
+# tests assert the compiled query (LIMIT / NULLS-FIRST order / LEFT JOIN /
+# FOR UPDATE OF the candidate rows only) and prove fair rotation through a
+# faithful in-process model of that ordering.
+# ---------------------------------------------------------------------------
+
+
+async def _claim_paper_sql() -> str:
+    """Compile PaperRepo.claim_paper_candidates to a Postgres SQL string.
+
+    The repo only ever ``.execute()``s the one statement we want to
+    inspect; a recording stand-in captures it and we compile it under the
+    Postgres dialect with literal binds so the LIMIT / ORDER / JOIN /
+    FOR-UPDATE clauses are all visible in the rendered SQL.
+    """
+    from sqlalchemy.dialects import postgresql
+
+    captured: dict[str, Any] = {}
+
+    class _Recorder:
+        async def execute(self, stmt: Any, *a: Any, **kw: Any) -> Any:
+            captured["stmt"] = stmt
+            res = MagicMock()
+            res.scalars.return_value.all.return_value = []
+            return res
+
+    await PaperRepo().claim_paper_candidates(cast("Any", _Recorder()))
+    compiled = captured["stmt"].compile(
+        dialect=cast("Any", postgresql.dialect)(),
+        compile_kwargs={"literal_binds": True},
+    )
+    return str(compiled)
+
+
+async def test_claim_paper_candidates_query_is_bounded_and_stalest_first() -> None:
+    sql = (await _claim_paper_sql()).lower()
+    # Bounded batch: at most PAPER_CYCLE_BATCH rows per claim.
+    assert f"limit {worker_mod.PAPER_CYCLE_BATCH}" in sql
+    assert worker_mod.PAPER_CYCLE_BATCH == 100
+    # Stalest-first: never-simulated (NULL cursor) sessions sort first,
+    # then oldest cursor_ts ascending.
+    assert "order by" in sql
+    assert "cursor_ts asc nulls first" in sql
+    # LEFT JOIN paper_sessions so a paper-state candidate with no open
+    # session yet is still claimable (its cursor reads as NULL).
+    assert "left outer join paper_sessions" in sql
+    assert "paper_sessions.state = 'open'" in sql
+    # FOR UPDATE SKIP LOCKED, locking ONLY the candidate rows.
+    assert "for update of candidate_leaders skip locked" in sql
+    # The operator-lock + state filters survive.
+    assert "candidate_leaders.lifecycle_state = 'paper'" in sql
+    assert "candidate_leaders.locked is false" in sql
+
+
+def test_claim_paper_candidates_rotation_covers_whole_pool() -> None:
+    """Across repeated cycles every candidate is eventually claimed.
+
+    Models the live behaviour: a pool of POOL candidates, each claim takes
+    the PAPER_CYCLE_BATCH stalest (NULL-cursor first, else oldest cursor),
+    and simulating a claimed session advances its cursor to "now" so it
+    rotates to the back.  Proves no starvation and no double-processing
+    within a cycle.
+    """
+    batch = worker_mod.PAPER_CYCLE_BATCH
+    pool = 250  # > 2 * batch so rotation spans 3 cycles
+    # cursor_ts: None means never simulated; an int is a logical clock.
+    cursors: dict[int, int | None] = {i: None for i in range(pool)}
+    tick = 0
+    seen: set[int] = set()
+    cycles = 0
+    while len(seen) < pool:
+        cycles += 1
+        # Stalest-first ordering: NULL cursors first, then oldest cursor.
+        order = sorted(
+            cursors,
+            key=lambda i: (cursors[i] is not None, cursors[i] if cursors[i] is not None else -1),
+        )
+        claimed = order[:batch]
+        # No candidate is double-processed within one cycle.
+        assert len(claimed) == len(set(claimed))
+        assert len(claimed) <= batch
+        for cand_id in claimed:
+            seen.add(cand_id)
+            tick += 1
+            cursors[cand_id] = tick  # simulated -> cursor advances
+        assert cycles < pool, "rotation must terminate (no starvation)"
+    # 250 / 100 -> 3 cycles cover the whole pool.
+    assert cycles == 3
+    assert seen == set(range(pool))
+
+
+def test_claim_paper_candidates_null_cursor_sessions_claimed_first() -> None:
+    """A never-simulated (NULL cursor) session outranks an older cursor.
+
+    Mirrors the SQL ``ORDER BY cursor_ts ASC NULLS FIRST``: even a very
+    old (small) cursor sorts AFTER a NULL one, so a brand-new paper-state
+    candidate is never starved behind long-running sessions.
+    """
+    batch = worker_mod.PAPER_CYCLE_BATCH
+    # batch+5 candidates with an old finite cursor + 3 never-run (NULL).
+    cursors: dict[int, int | None] = {i: 1 for i in range(batch + 5)}
+    cursors[batch + 5] = None
+    cursors[batch + 6] = None
+    cursors[batch + 7] = None
+    order = sorted(
+        cursors,
+        key=lambda i: (cursors[i] is not None, cursors[i] if cursors[i] is not None else -1),
+    )
+    claimed = set(order[:batch])
+    # All three NULL-cursor candidates are in the first claimed batch.
+    assert {batch + 5, batch + 6, batch + 7} <= claimed
