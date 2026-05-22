@@ -213,6 +213,10 @@ class PolymarketClient:
                 creds=api_creds,
                 signature_type=signature_type,
                 funder=funder,
+                # A1: anchor L2 HMAC auth timestamps to the CLOB server clock —
+                # a drifting Docker host clock would otherwise cause silent
+                # signature-timestamp rejections.
+                use_server_time=True,
             )
 
     # ------------------------------------------------------------------
@@ -240,10 +244,7 @@ class PolymarketClient:
     # alternative; do NOT raise NotImplementedError (which historically
     # read as "Phase 1 TODO, just hasn't been written yet").
 
-    _RETIRED_READ_HINT = (
-        "PolymarketClient.{method}() is intentionally not implemented. "
-        "{alt}"
-    )
+    _RETIRED_READ_HINT = "PolymarketClient.{method}() is intentionally not implemented. {alt}"
 
     async def get_leaderboard(
         self,
@@ -406,8 +407,7 @@ class PolymarketClient:
             sdk_order_type = _ORDER_TYPE_MAP[order_type]
         except KeyError as exc:
             raise ValueError(
-                f"Unknown order_type {order_type!r}; expected one of "
-                f"{sorted(_ORDER_TYPE_MAP)}"
+                f"Unknown order_type {order_type!r}; expected one of {sorted(_ORDER_TYPE_MAP)}"
             ) from exc
 
         order_args = OrderArgs(
