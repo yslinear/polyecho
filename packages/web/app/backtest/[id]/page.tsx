@@ -31,6 +31,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { BacktestPnlChart } from "./backtest-pnl-chart";
+import {
+  adaptScenarioKeyedLeader,
+  isScenarioKeyedLeader,
+} from "./adapt-result";
 
 export const revalidate = 10; // re-fetch every 10s (SSR cache)
 
@@ -202,6 +206,34 @@ export default async function BacktestResultPage({ params }: PageProps) {
           error: (leaderResult as LeaderResult).error as string,
         }))
     : [];
+
+  // P13: resolve the scenario triple the UI renders.
+  //
+  // The page predates the worker's actual JSONB shape. The worker nests a
+  // per-leader, scenario-keyed dict (`result.leaders[wallet] = { optimistic,
+  // neutral, pessimistic }`) where each scenario carries worker-native field
+  // names. The historic UI expected a flat `result.scenarios` / `result.stats`.
+  //
+  // Resolution order (legacy shapes win — never override an explicit one):
+  //   1. `result.scenarios`  → use as-is (legacy / future top-level triple).
+  //   2. `result.stats` only → leave to the single-scenario branch below.
+  //   3. else, scan `result.leaders` for the FIRST scenario-keyed leader
+  //      (the job's `leader_addresses[0]`) and adapt it to ScenarioResult[].
+  // A per-leader `{ error }` envelope is NOT scenario-keyed, so step 3 skips
+  // it and the destructive Alert above remains the only surface for it.
+  const adaptedScenarios: ScenarioResult[] | undefined = (() => {
+    if (result?.scenarios || result?.stats) return undefined;
+    if (!result?.leaders) return undefined;
+    for (const leaderResult of Object.values(result.leaders)) {
+      if (isScenarioKeyedLeader(leaderResult)) {
+        return adaptScenarioKeyedLeader(leaderResult);
+      }
+    }
+    return undefined;
+  })();
+  // The scenario triple the completed-state body renders: an explicit
+  // top-level `result.scenarios` if present, else the adapter's output.
+  const scenarios = result?.scenarios ?? adaptedScenarios;
 
   return (
     <div className="space-y-6">
@@ -418,8 +450,11 @@ export default async function BacktestResultPage({ params }: PageProps) {
         </Card>
       )}
 
-      {/* Completed: triple scenario */}
-      {job.status === "completed" && result?.scenarios && (
+      {/* Completed: triple scenario.
+          `scenarios` is `result.scenarios` when the worker (or a legacy row)
+          wrote a top-level triple, else the P13 adapter's output from the
+          first scenario-keyed leader in `result.leaders`. */}
+      {job.status === "completed" && scenarios && scenarios.length > 0 && (
         <>
           <Separator />
           {/* One comparison surface: scenarios as columns, metrics as rows.
@@ -435,7 +470,7 @@ export default async function BacktestResultPage({ params }: PageProps) {
                 {t("backtest.result.scenario.desc")}
               </p>
             </div>
-            <ScenarioComparison scenarios={result.scenarios} />
+            <ScenarioComparison scenarios={scenarios} />
           </div>
 
           {/* PnL curve — all 3 scenarios */}
@@ -444,7 +479,7 @@ export default async function BacktestResultPage({ params }: PageProps) {
               <CardTitle>{t("backtest.result.pnlCurves")}</CardTitle>
             </CardHeader>
             <CardContent>
-              <BacktestPnlChart scenarios={result.scenarios} />
+              <BacktestPnlChart scenarios={scenarios} />
             </CardContent>
           </Card>
         </>
