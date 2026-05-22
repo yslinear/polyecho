@@ -2,6 +2,12 @@
 
 PRD reference: §5.2 (dual-dimension scoring).
 
+Versioning & confidence (PolyHermes deep-dive B2 — copy-trading-risk-seatbelt)
+    Every scored candidate records :data:`SCORE_VERSION` plus a
+    ``low_confidence`` flag (set when the score rests on an under-sized
+    sample or an unavailable input) via :func:`score_metadata`.  A consumer
+    MUST NOT treat a low-confidence high score as "verified profitable".
+
 Final score formula:
     final_score = profit_score × (replicability_score / 100)
 
@@ -38,6 +44,31 @@ from __future__ import annotations
 
 import math
 from typing import Any
+
+# ---------------------------------------------------------------------------
+# Score version (PolyHermes deep-dive B2 — copy-trading-risk-seatbelt)
+# ---------------------------------------------------------------------------
+# Every scored candidate records this string alongside its score so a
+# future scoring-formula change is distinguishable in the persisted data
+# (CandidateLeader.stats_30d / candidate_score_history.stats JSONB).  Bump
+# this string whenever the profit/replicability/final formula, a sub-metric
+# normaliser constant, or the weight vector changes — historic rows then
+# remain unambiguously attributable to the formula that produced them.
+#
+# v2: introduces SCORE_VERSION recording + low-confidence flag +
+#     unavailable-vs-zero handling (was implicit "v1" with none of these).
+SCORE_VERSION: str = "discovery-v2"
+
+# ---------------------------------------------------------------------------
+# Minimum sample size for a trustworthy score (PolyHermes deep-dive B2)
+# ---------------------------------------------------------------------------
+# A positive score driven by a tiny trade sample is an unvalidated
+# hypothesis, NOT a "verified profitable" leader.  When a candidate's 30d
+# window has fewer than this many TRADE observations the score is flagged
+# ``low_confidence`` so the UI / consumer never treats a tiny-sample high
+# score as trustworthy.  10 mirrors PolyHermes' own promotion-gate sample
+# floor (its score hard-caps below the promotion threshold for <10 trades).
+MIN_SAMPLE_TRADES: int = 10
 
 # ---------------------------------------------------------------------------
 # Follower waking-hours reference (Asia/Taipei, UTC+8)
@@ -119,10 +150,10 @@ def profit_score(stats: dict[str, Any]) -> float:
     """
     # ── sub-metric extraction with sensible defaults ──────────────────────────
     pnl_usd: float = float(stats.get("pnl_usd", 0.0))
-    win_rate: float = float(stats.get("win_rate", 0.0))      # 0–1
+    win_rate: float = float(stats.get("win_rate", 0.0))  # 0–1
     sharpe: float = float(stats.get("sharpe", 0.0))
     max_drawdown: float = float(stats.get("max_drawdown", 1.0))  # 0–1
-    consistency: float = float(stats.get("consistency", 0.0))   # 0–1
+    consistency: float = float(stats.get("consistency", 0.0))  # 0–1
     specialization: float = float(stats.get("specialization", 0.0))  # 0–1
 
     # ── normalise each sub-metric to [0, 100] ─────────────────────────────────
@@ -214,9 +245,7 @@ def replicability_score(
     median_gap_min: float = float(frequency_stats.get("median_gap_minutes", 0.0))
     burstiness: float = float(frequency_stats.get("burstiness", 1.0))
     active_hours: list[int] = list(frequency_stats.get("active_hours_utc", []))
-    concurrent_avg: float = float(
-        frequency_stats.get("concurrent_positions_avg", 1.0)
-    )
+    concurrent_avg: float = float(frequency_stats.get("concurrent_positions_avg", 1.0))
     concurrent_avg = max(concurrent_avg, 1.0)
 
     # 1. Frequency match: gap ≥ 30 min → 1.0; < 30 min → proportional.
@@ -243,13 +272,7 @@ def replicability_score(
     else:
         time_overlap = 0.0
 
-    score = (
-        frequency_match
-        * capital_match
-        * burstiness_factor
-        * time_overlap
-        * 100.0
-    )
+    score = frequency_match * capital_match * burstiness_factor * time_overlap * 100.0
 
     return round(_clamp(score, 0.0, 100.0), 4)
 
@@ -274,3 +297,64 @@ def final_score(
         Final score in [0, 100].
     """
     return round(_clamp(p_score * (r_score / 100.0), 0.0, 100.0), 4)
+
+
+def score_metadata(stats: dict[str, Any]) -> dict[str, Any]:
+    """Build the score-trust metadata block for a scored candidate.
+
+    PolyHermes deep-dive B2 (``copy-trading-risk-seatbelt``): a positive
+    score below a minimum sample size MUST be flagged low-confidence and
+    never described as "verified profitable"; the score also carries a
+    version string so a future formula change is distinguishable in the
+    persisted data.
+
+    The returned dict is merged into the candidate's ``stats_30d`` JSONB
+    payload (which is also what ``candidate_score_history.stats`` stores) —
+    no new DB column is required, the version + flag travel inside the
+    existing schema-free JSONB.
+
+    Keys produced
+    -------------
+    score_version
+        :data:`SCORE_VERSION` — the formula identity.
+    low_confidence
+        ``True`` when the score rests on an under-sized observation set,
+        i.e. ``total_trades < MIN_SAMPLE_TRADES`` OR a scoring input was
+        genuinely unavailable (a failed/missing data fetch) rather than a
+        measured zero.  A consumer MUST NOT treat a low-confidence high
+        score as a trustworthy "profitable" signal.
+    low_confidence_reasons
+        Sorted list of machine-readable reason codes (empty when the score
+        is trustworthy).  ``small_sample`` = below the trade floor;
+        ``unavailable_inputs`` = at least one input could not be measured.
+    sample_trades
+        The observed ``total_trades`` count the confidence call was made
+        on (echoed for the UI so it can show "n=N").
+
+    Args:
+        stats: The ``stats_30d`` dict from :func:`_compute_stats`.  Reads
+            ``total_trades`` and the ``unavailable_inputs`` audit list (a
+            list of input names whose source data was missing — see
+            ``_compute_stats``); both default to a safe value when absent.
+
+    Returns:
+        A metadata dict ready to merge into the score JSON payload.
+    """
+    total_trades = int(stats.get("total_trades", 0) or 0)
+    # ``unavailable_inputs`` is the explicit audit list of metric inputs
+    # that could NOT be measured (no data) — distinct from a measured 0.
+    # ``_compute_stats`` populates it; an absent key means "fully measured".
+    unavailable_inputs: list[str] = list(stats.get("unavailable_inputs", []))
+
+    reasons: list[str] = []
+    if total_trades < MIN_SAMPLE_TRADES:
+        reasons.append("small_sample")
+    if unavailable_inputs:
+        reasons.append("unavailable_inputs")
+
+    return {
+        "score_version": SCORE_VERSION,
+        "low_confidence": bool(reasons),
+        "low_confidence_reasons": sorted(reasons),
+        "sample_trades": total_trades,
+    }

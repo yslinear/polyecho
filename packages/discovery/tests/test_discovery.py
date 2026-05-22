@@ -31,7 +31,14 @@ from polyecho.discovery.frequency import (
     detect_drift,
 )
 from polyecho.discovery.riskflags import detect_risk_flags
-from polyecho.discovery.scoring import final_score, profit_score, replicability_score
+from polyecho.discovery.scoring import (
+    MIN_SAMPLE_TRADES,
+    SCORE_VERSION,
+    final_score,
+    profit_score,
+    replicability_score,
+    score_metadata,
+)
 from polyecho.discovery.worker import DiscoveryWorker, _compute_stats
 from polyecho.shared.datasource import ActivityRecord, FixtureDataSource, PositionRecord
 from polyecho.shared.events import EventType, Severity
@@ -163,9 +170,7 @@ class TestComputeFrequencyStats:
         # Cluster 2: 5 trades 1 min apart, 10 days later
         offset = timedelta(days=10)
         for i in range(5):
-            records.append(
-                _make_record(ts=base + offset + timedelta(minutes=i), condition_id="b")
-            )
+            records.append(_make_record(ts=base + offset + timedelta(minutes=i), condition_id="b"))
         stats = compute_frequency_stats(records, window_days=30)
         assert stats.burstiness > 0.5
 
@@ -272,13 +277,13 @@ class TestDetectDrift:
         )
 
     def test_no_drift_same_type(self) -> None:
-        fs30 = self._fs(tpd=3.0, hold_h=48.0)   # SWING
-        fs7 = self._fs(tpd=2.0, hold_h=36.0)    # SWING
+        fs30 = self._fs(tpd=3.0, hold_h=48.0)  # SWING
+        fs7 = self._fs(tpd=2.0, hold_h=36.0)  # SWING
         assert detect_drift(fs30, fs7) is False
 
     def test_drift_detected(self) -> None:
-        fs30 = self._fs(tpd=3.0, hold_h=48.0)   # SWING
-        fs7 = self._fs(tpd=25.0, hold_h=0.3)    # SCALPER
+        fs30 = self._fs(tpd=3.0, hold_h=48.0)  # SWING
+        fs7 = self._fs(tpd=25.0, hold_h=0.3)  # SCALPER
         assert detect_drift(fs30, fs7) is True
 
 
@@ -429,9 +434,7 @@ class TestScoringCollapseRegression:
     def test_burstiness_never_pins_at_one_for_heavy_tailed_gaps(
         self,
     ) -> None:
-        stats = compute_frequency_stats(
-            self._realistic_irregular_activity(), window_days=30
-        )
+        stats = compute_frequency_stats(self._realistic_irregular_activity(), window_days=30)
         # The invariant the clip bug violated: a finite-CV leader must
         # NOT saturate burstiness to exactly 1.0 (which would hard-zero
         # the whole multiplicative replicability score).
@@ -440,15 +443,10 @@ class TestScoringCollapseRegression:
     def test_realistic_leader_has_nonzero_replicability_and_total(
         self,
     ) -> None:
-        fs = compute_frequency_stats(
-            self._realistic_irregular_activity(), window_days=30
-        ).to_dict()
+        fs = compute_frequency_stats(self._realistic_irregular_activity(), window_days=30).to_dict()
 
         rep = replicability_score(fs, follower_capital_usd=1000.0)
-        assert rep > 0.0, (
-            "replicability collapsed to 0 — the burstiness clip "
-            "regression is back"
-        )
+        assert rep > 0.0, "replicability collapsed to 0 — the burstiness clip regression is back"
 
         prof = profit_score(
             {
@@ -472,6 +470,107 @@ class TestScoringCollapseRegression:
 
     def test_output_in_range(self) -> None:
         assert 0.0 <= final_score(60.0, 70.0) <= 100.0
+
+
+# ---------------------------------------------------------------------------
+# §2b — score_metadata: version + low-confidence + unavailable-vs-zero
+#       (PolyHermes deep-dive B2 — copy-trading-risk-seatbelt)
+# ---------------------------------------------------------------------------
+
+
+class TestScoreMetadata:
+    """B2 — score-trust metadata: version string + low-confidence flag.
+
+    A positive score on a tiny sample must NOT be read as "verified
+    profitable", and a failed/missing data fetch must NOT be counted as a
+    confirmed zero.  ``score_metadata`` records both signals inside the
+    existing ``stats`` JSONB payload (no new DB column).
+    """
+
+    def test_score_version_recorded(self) -> None:
+        # A large, fully-measured sample is still stamped with the version
+        # so a future formula change is distinguishable in the data.
+        meta = score_metadata({"total_trades": 500, "unavailable_inputs": []})
+        assert meta["score_version"] == SCORE_VERSION
+        assert isinstance(SCORE_VERSION, str) and SCORE_VERSION
+
+    def test_large_fully_measured_sample_is_trustworthy(self) -> None:
+        meta = score_metadata({"total_trades": 500, "unavailable_inputs": []})
+        assert meta["low_confidence"] is False
+        assert meta["low_confidence_reasons"] == []
+        assert meta["sample_trades"] == 500
+
+    def test_small_sample_flagged_low_confidence(self) -> None:
+        # Below the trade floor → low-confidence even with all inputs measured.
+        meta = score_metadata({"total_trades": MIN_SAMPLE_TRADES - 1, "unavailable_inputs": []})
+        assert meta["low_confidence"] is True
+        assert "small_sample" in meta["low_confidence_reasons"]
+
+    def test_sample_exactly_at_floor_is_trustworthy(self) -> None:
+        meta = score_metadata({"total_trades": MIN_SAMPLE_TRADES, "unavailable_inputs": []})
+        assert "small_sample" not in meta["low_confidence_reasons"]
+
+    def test_unavailable_input_flagged_low_confidence(self) -> None:
+        # A genuinely unavailable input (failed/missing fetch) on an
+        # otherwise large sample must STILL flag low-confidence — it is not
+        # a confirmed zero.
+        meta = score_metadata({"total_trades": 500, "unavailable_inputs": ["sharpe"]})
+        assert meta["low_confidence"] is True
+        assert "unavailable_inputs" in meta["low_confidence_reasons"]
+
+    def test_missing_audit_key_defaults_safe(self) -> None:
+        # An absent ``unavailable_inputs`` key means "fully measured" — it
+        # must not crash and must not spuriously flag.
+        meta = score_metadata({"total_trades": 500})
+        assert meta["low_confidence"] is False
+
+
+class TestComputeStatsUnavailableVsZero:
+    """B2 — ``_compute_stats`` distinguishes 'no data' from a measured 0."""
+
+    def test_no_trades_marks_every_input_unavailable(self) -> None:
+        stats = _compute_stats([], window_days=30)
+        # The numeric placeholders are present (so profit_score won't
+        # crash) but every input is audited as unavailable, NOT a real 0.
+        assert set(stats["unavailable_inputs"]) == {
+            "pnl_usd",
+            "win_rate",
+            "sharpe",
+            "max_drawdown",
+            "consistency",
+            "specialization",
+        }
+        # And score_metadata turns that into a low-confidence flag.
+        assert score_metadata(stats)["low_confidence"] is True
+
+    def test_pure_buy_sample_marks_win_rate_unavailable(self) -> None:
+        # All BUYs, no SELL → there is no win/lose ratio to measure.
+        # win_rate must NOT be read as a confirmed 0 % (a losing leader).
+        base = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+        buys = [_make_record(side="BUY", ts=base + timedelta(hours=i)) for i in range(12)]
+        stats = _compute_stats(buys, window_days=30)
+        assert "win_rate" in stats["unavailable_inputs"]
+
+    def test_single_day_sample_marks_sharpe_unavailable(self) -> None:
+        # < 2 daily-PnL points → no deviation → Sharpe cannot be measured.
+        base = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+        same_day = [
+            _make_record(side="SELL", ts=base + timedelta(minutes=10 * i)) for i in range(12)
+        ]
+        stats = _compute_stats(same_day, window_days=30)
+        assert "sharpe" in stats["unavailable_inputs"]
+
+    def test_rich_multiday_sample_has_no_unavailable_inputs(self) -> None:
+        # Priced SELLs spanning multiple days → win_rate AND sharpe are
+        # both genuinely measurable; the audit list is empty.
+        base = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+        records = [
+            _make_record(side="SELL", usdc_size=20.0, ts=base + timedelta(days=i))
+            for i in range(15)
+        ]
+        stats = _compute_stats(records, window_days=30)
+        assert stats["unavailable_inputs"] == []
+        assert score_metadata(stats)["low_confidence"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -526,8 +625,8 @@ class TestDetectRiskFlags:
             _make_record(side="BUY", ts=base + timedelta(days=i), usdc_size=200.0)
             for i in range(60)
         ]
-        fs_30d = self._freq_stats(tpd=3.0, hold_h=48.0)   # SWING
-        fs_7d = self._freq_stats(tpd=25.0, hold_h=0.3)    # SCALPER
+        fs_30d = self._freq_stats(tpd=3.0, hold_h=48.0)  # SWING
+        fs_7d = self._freq_stats(tpd=25.0, hold_h=0.3)  # SCALPER
         flags = detect_risk_flags(
             self._base_stats(),
             activity,
@@ -605,7 +704,7 @@ class TestDetectRiskFlags:
         )
         stats = {
             "pnl_usd": 50000.0,
-            "win_rate": 0.95,   # > 0.80
+            "win_rate": 0.95,  # > 0.80
             "total_trades": 5,  # <= 50
             "trades_per_day": 1.0,  # < 5
         }
@@ -614,14 +713,12 @@ class TestDetectRiskFlags:
 
     def test_low_liquidity_flag(self) -> None:
         positions = [
-            _make_position(current_value=50.0),   # thin
-            _make_position(current_value=30.0, condition_id="0xb"),   # thin
-            _make_position(current_value=20.0, condition_id="0xc"),   # thin
+            _make_position(current_value=50.0),  # thin
+            _make_position(current_value=30.0, condition_id="0xb"),  # thin
+            _make_position(current_value=20.0, condition_id="0xc"),  # thin
         ]
         base = datetime(2026, 1, 1, tzinfo=UTC)
-        activity = [
-            _make_record(side="BUY", ts=base + timedelta(days=i)) for i in range(40)
-        ]
+        activity = [_make_record(side="BUY", ts=base + timedelta(days=i)) for i in range(40)]
         flags = detect_risk_flags(self._base_stats(), activity, positions)
         assert "low_liquidity" in flags
 
@@ -764,9 +861,7 @@ class TestInsiderArchetype:
         stats = _compute_stats(activity, window_days=90)
         # Manually override to match insider archetype expectations
         stats["win_rate"] = max(stats.get("win_rate", 0.0), 0.85)
-        stats["total_trades"] = len(
-            [r for r in activity if r.activity_type == "TRADE"]
-        )
+        stats["total_trades"] = len([r for r in activity if r.activity_type == "TRADE"])
         stats["trades_per_day"] = stats["total_trades"] / 90.0
 
         fs = compute_frequency_stats(activity, window_days=90)
@@ -794,9 +889,7 @@ class TestInsiderArchetype:
 
         async def _run() -> None:
             with (
-                patch(
-                    "polyecho.discovery.worker.session_scope"
-                ) as mock_scope,
+                patch("polyecho.discovery.worker.session_scope") as mock_scope,
                 patch("polyecho.discovery.worker.select"),
             ):
                 mock_session = AsyncMock()
@@ -870,9 +963,7 @@ class TestScoreHistoryPersistence:
                 # statement we capture & assert on.
                 async def _exec(stmt: Any) -> MagicMock:
                     executed.append(stmt)
-                    return MagicMock(
-                        scalar_one_or_none=MagicMock(return_value=None)
-                    )
+                    return MagicMock(scalar_one_or_none=MagicMock(return_value=None))
 
                 mock_session.execute = AsyncMock(side_effect=_exec)
                 mock_scope.return_value.__aenter__ = AsyncMock(return_value=mock_session)
@@ -988,9 +1079,7 @@ class TestProfitScoreNumericalStability:
 
 
 class TestClassifyStrategyEdges:
-    def _fs(
-        self, *, tpd: float, hold_h: float, htr: float = 0.0
-    ) -> FrequencyStats:
+    def _fs(self, *, tpd: float, hold_h: float, htr: float = 0.0) -> FrequencyStats:
         return FrequencyStats(
             trades_per_day=tpd,
             active_days=30,
@@ -1013,16 +1102,12 @@ class TestClassifyStrategyEdges:
             StrategyType.HOLD_TO_RESOLVE
         )
         # Just below threshold must NOT be Hold-to-Resolve.
-        assert classify_strategy(self._fs(tpd=3.0, hold_h=48.0, htr=59.9)) == (
-            StrategyType.SWING
-        )
+        assert classify_strategy(self._fs(tpd=3.0, hold_h=48.0, htr=59.9)) == (StrategyType.SWING)
 
     def test_scalper_requires_both_high_freq_and_short_hold(self) -> None:
         assert classify_strategy(self._fs(tpd=25.0, hold_h=0.5)) == StrategyType.SCALPER
         # >20/day but hold >= 1h → not a scalper; falls back to Day Trader.
-        assert classify_strategy(self._fs(tpd=21.0, hold_h=1.5)) == (
-            StrategyType.DAY_TRADER
-        )
+        assert classify_strategy(self._fs(tpd=21.0, hold_h=1.5)) == (StrategyType.DAY_TRADER)
 
     def test_swing_lower_boundary_inclusive(self) -> None:
         # tpd exactly 1.0, hold exactly 24h (1 day) → Swing sweet-spot.
@@ -1032,28 +1117,25 @@ class TestClassifyStrategyEdges:
 
     def test_position_requires_hold_over_seven_days(self) -> None:
         # < 1/day but only ~1 day hold → NOT Position (gap → Unknown).
-        assert classify_strategy(self._fs(tpd=0.5, hold_h=24.0)) == (
-            StrategyType.UNKNOWN
-        )
+        assert classify_strategy(self._fs(tpd=0.5, hold_h=24.0)) == (StrategyType.UNKNOWN)
         # < 1/day and > 7 day hold → Position.
-        assert classify_strategy(self._fs(tpd=0.5, hold_h=200.0)) == (
-            StrategyType.POSITION
-        )
+        assert classify_strategy(self._fs(tpd=0.5, hold_h=200.0)) == (StrategyType.POSITION)
 
     def test_prd_matrix_gap_is_unknown_not_misclassified(self) -> None:
         # tpd=4/day, hold=8h: Day-Trader band needs tpd>=5; Swing needs
         # hold>=1d; the PRD matrix has no row here → honest UNKNOWN.
-        assert classify_strategy(self._fs(tpd=4.0, hold_h=8.0)) == (
-            StrategyType.UNKNOWN
-        )
+        assert classify_strategy(self._fs(tpd=4.0, hold_h=8.0)) == (StrategyType.UNKNOWN)
 
     def test_drift_false_when_both_windows_degenerate_unknown(self) -> None:
         # Two different degenerate inputs that both classify UNKNOWN must
         # NOT be reported as drift (UNKNOWN == UNKNOWN).
-        assert detect_drift(
-            self._fs(tpd=4.0, hold_h=8.0),
-            self._fs(tpd=0.1, hold_h=0.5),
-        ) is False
+        assert (
+            detect_drift(
+                self._fs(tpd=4.0, hold_h=8.0),
+                self._fs(tpd=0.1, hold_h=0.5),
+            )
+            is False
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1076,8 +1158,7 @@ class TestRiskFlagBoundaries:
     def _old_activity(self, n: int = 60) -> list[ActivityRecord]:
         base = datetime(2026, 1, 1, tzinfo=UTC)
         return [
-            _make_record(side="BUY", ts=base + timedelta(days=i), usdc_size=200.0)
-            for i in range(n)
+            _make_record(side="BUY", ts=base + timedelta(days=i), usdc_size=200.0) for i in range(n)
         ]
 
     def test_low_liquidity_strictly_greater_than_60pct(self) -> None:
@@ -1089,9 +1170,7 @@ class TestRiskFlagBoundaries:
             _make_position(current_value=500.0, condition_id="d"),
             _make_position(current_value=500.0, condition_id="e"),
         ]
-        assert "low_liquidity" not in detect_risk_flags(
-            self._stats(), self._old_activity(), p_eq
-        )
+        assert "low_liquidity" not in detect_risk_flags(self._stats(), self._old_activity(), p_eq)
         # 4/5 thin = 0.80 → > 0.60 → flag.
         p_gt = [
             _make_position(current_value=50.0, condition_id="a"),
@@ -1100,68 +1179,84 @@ class TestRiskFlagBoundaries:
             _make_position(current_value=50.0, condition_id="d"),
             _make_position(current_value=500.0, condition_id="e"),
         ]
-        assert "low_liquidity" in detect_risk_flags(
-            self._stats(), self._old_activity(), p_gt
-        )
+        assert "low_liquidity" in detect_risk_flags(self._stats(), self._old_activity(), p_gt)
 
     def test_high_concentration_strictly_greater_than_50pct(self) -> None:
         base = datetime(2026, 1, 1, tzinfo=UTC)
         # Exactly 50/50 across two conditions → top share 0.50, NOT > 0.50.
         even = [
             _make_record(
-                side="BUY", ts=base + timedelta(days=i),
-                usdc_size=1000.0, condition_id="A",
+                side="BUY",
+                ts=base + timedelta(days=i),
+                usdc_size=1000.0,
+                condition_id="A",
             )
             for i in range(10)
         ] + [
             _make_record(
-                side="BUY", ts=base + timedelta(days=i),
-                usdc_size=1000.0, condition_id="B",
+                side="BUY",
+                ts=base + timedelta(days=i),
+                usdc_size=1000.0,
+                condition_id="B",
             )
             for i in range(10)
         ]
-        assert "high_concentration" not in detect_risk_flags(
-            self._stats(total_trades=20), even, []
-        )
+        assert "high_concentration" not in detect_risk_flags(self._stats(total_trades=20), even, [])
         # 60/40 → top 0.60 > 0.50 → flag.
         skew = [
             _make_record(
-                side="BUY", ts=base + timedelta(days=i),
-                usdc_size=1000.0, condition_id="A",
+                side="BUY",
+                ts=base + timedelta(days=i),
+                usdc_size=1000.0,
+                condition_id="A",
             )
             for i in range(12)
         ] + [
             _make_record(
-                side="BUY", ts=base + timedelta(days=i),
-                usdc_size=1000.0, condition_id="B",
+                side="BUY",
+                ts=base + timedelta(days=i),
+                usdc_size=1000.0,
+                condition_id="B",
             )
             for i in range(8)
         ]
-        assert "high_concentration" in detect_risk_flags(
-            self._stats(total_trades=20), skew, []
-        )
+        assert "high_concentration" in detect_risk_flags(self._stats(total_trades=20), skew, [])
 
     def test_insider_suspect_clean_case_flags(self) -> None:
         base = datetime(2026, 1, 1, tzinfo=UTC)
         cond = "0xcond_ins"
         act: list[ActivityRecord] = [
             ActivityRecord(
-                wallet=W_INSIDER, activity_type="TRADE", condition_id=cond,
-                side="BUY", size=2000.0, price=0.05, usdc_size=8000.0,
-                timestamp=base + timedelta(hours=i), raw={},
+                wallet=W_INSIDER,
+                activity_type="TRADE",
+                condition_id=cond,
+                side="BUY",
+                size=2000.0,
+                price=0.05,
+                usdc_size=8000.0,
+                timestamp=base + timedelta(hours=i),
+                raw={},
             )
             for i in range(5)
         ]
         act.append(
             ActivityRecord(
-                wallet=W_INSIDER, activity_type="REDEEM", condition_id=cond,
-                side=None, size=1e4, price=None, usdc_size=1e4,
-                timestamp=base + timedelta(hours=20), raw={},
+                wallet=W_INSIDER,
+                activity_type="REDEEM",
+                condition_id=cond,
+                side=None,
+                size=1e4,
+                price=None,
+                usdc_size=1e4,
+                timestamp=base + timedelta(hours=20),
+                raw={},
             )
         )
         stats = {
-            "pnl_usd": 5e4, "win_rate": 0.95,
-            "total_trades": 5, "trades_per_day": 1.0,
+            "pnl_usd": 5e4,
+            "win_rate": 0.95,
+            "total_trades": 5,
+            "trades_per_day": 1.0,
         }
         assert "insider_suspect" in detect_risk_flags(stats, act, [])
 
@@ -1187,17 +1282,29 @@ class TestRiskFlagBoundaries:
         # condition (held into resolution, redeemed).
         act: list[ActivityRecord] = [
             ActivityRecord(
-                wallet=W_INSIDER, activity_type="TRADE", condition_id=cond_win,
-                side="BUY", size=2000.0, price=0.05, usdc_size=8000.0,
-                timestamp=base + timedelta(hours=i), raw={},
+                wallet=W_INSIDER,
+                activity_type="TRADE",
+                condition_id=cond_win,
+                side="BUY",
+                size=2000.0,
+                price=0.05,
+                usdc_size=8000.0,
+                timestamp=base + timedelta(hours=i),
+                raw={},
             )
             for i in range(5)
         ]
         act.append(
             ActivityRecord(
-                wallet=W_INSIDER, activity_type="REDEEM", condition_id=cond_win,
-                side=None, size=1e4, price=None, usdc_size=1e4,
-                timestamp=base + timedelta(hours=20), raw={},
+                wallet=W_INSIDER,
+                activity_type="REDEEM",
+                condition_id=cond_win,
+                side=None,
+                size=1e4,
+                price=None,
+                usdc_size=1e4,
+                timestamp=base + timedelta(hours=20),
+                raw={},
             )
         )
         # Condition B: only a near-resolution SELL (no BUY) before its
@@ -1205,21 +1312,35 @@ class TestRiskFlagBoundaries:
         # near_res_wr = 1/2 = 0.5 < 0.80.
         act.append(
             ActivityRecord(
-                wallet=W_INSIDER, activity_type="TRADE", condition_id=cond_loss,
-                side="SELL", size=100.0, price=0.9, usdc_size=5000.0,
-                timestamp=base + timedelta(hours=30), raw={},
+                wallet=W_INSIDER,
+                activity_type="TRADE",
+                condition_id=cond_loss,
+                side="SELL",
+                size=100.0,
+                price=0.9,
+                usdc_size=5000.0,
+                timestamp=base + timedelta(hours=30),
+                raw={},
             )
         )
         act.append(
             ActivityRecord(
-                wallet=W_INSIDER, activity_type="REDEEM", condition_id=cond_loss,
-                side=None, size=1e4, price=None, usdc_size=1e4,
-                timestamp=base + timedelta(hours=40), raw={},
+                wallet=W_INSIDER,
+                activity_type="REDEEM",
+                condition_id=cond_loss,
+                side=None,
+                size=1e4,
+                price=None,
+                usdc_size=1e4,
+                timestamp=base + timedelta(hours=40),
+                raw={},
             )
         )
         stats = {
-            "pnl_usd": 5e4, "win_rate": 0.95,
-            "total_trades": 6, "trades_per_day": 1.0,
+            "pnl_usd": 5e4,
+            "win_rate": 0.95,
+            "total_trades": 6,
+            "trades_per_day": 1.0,
         }
         assert "insider_suspect" not in detect_risk_flags(stats, act, [])
 
@@ -1230,22 +1351,36 @@ class TestRiskFlagBoundaries:
         cond = "0xcond_ins3"
         act: list[ActivityRecord] = [
             ActivityRecord(
-                wallet=W_INSIDER, activity_type="TRADE", condition_id=cond,
-                side="BUY", size=2000.0, price=0.05, usdc_size=8000.0,
-                timestamp=base + timedelta(hours=i), raw={},
+                wallet=W_INSIDER,
+                activity_type="TRADE",
+                condition_id=cond,
+                side="BUY",
+                size=2000.0,
+                price=0.05,
+                usdc_size=8000.0,
+                timestamp=base + timedelta(hours=i),
+                raw={},
             )
             for i in range(5)
         ]
         act.append(
             ActivityRecord(
-                wallet=W_INSIDER, activity_type="REDEEM", condition_id=cond,
-                side=None, size=1e4, price=None, usdc_size=1e4,
-                timestamp=base + timedelta(hours=20), raw={},
+                wallet=W_INSIDER,
+                activity_type="REDEEM",
+                condition_id=cond,
+                side=None,
+                size=1e4,
+                price=None,
+                usdc_size=1e4,
+                timestamp=base + timedelta(hours=20),
+                raw={},
             )
         )
         stats = {
-            "pnl_usd": 5e4, "win_rate": 0.95,
-            "total_trades": 200, "trades_per_day": 1.0,  # deep history
+            "pnl_usd": 5e4,
+            "win_rate": 0.95,
+            "total_trades": 200,
+            "trades_per_day": 1.0,  # deep history
         }
         assert "insider_suspect" not in detect_risk_flags(stats, act, [])
 
@@ -1285,9 +1420,7 @@ class TestCandidateHighScoreEvent:
         sess = AsyncMock()
         sess.execute = AsyncMock(
             side_effect=[
-                MagicMock(
-                    scalar_one_or_none=MagicMock(return_value=existing)
-                ),
+                MagicMock(scalar_one_or_none=MagicMock(return_value=existing)),
                 MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
             ]
         )
@@ -1308,11 +1441,17 @@ class TestCandidateHighScoreEvent:
         from polyecho.discovery.worker import _upsert_candidate
 
         await _upsert_candidate(
-            W_SWING, "leaderboard", display_name="Swing",
-            stats_7d={}, stats_30d={"pnl_usd": 1.0}, stats_90d={},
+            W_SWING,
+            "leaderboard",
+            display_name="Swing",
+            stats_7d={},
+            stats_30d={"pnl_usd": 1.0},
+            stats_90d={},
             freq_stats_30d=self._fs(),
             strategy_type=StrategyType.SWING,
-            p_score=90.0, r_score=80.0, f_score=f_score,
+            p_score=90.0,
+            r_score=80.0,
+            f_score=f_score,
             risk_flags=risk_flags,
             last_active_at=None,
         )
@@ -1320,9 +1459,7 @@ class TestCandidateHighScoreEvent:
     def test_emits_on_new_candidate_crossing_high(self) -> None:
         self._scope(existing=None)
         spy = self._emit_spy()
-        asyncio.get_event_loop().run_until_complete(
-            self._upsert(f_score=85.0, risk_flags=[])
-        )
+        asyncio.get_event_loop().run_until_complete(self._upsert(f_score=85.0, risk_flags=[]))
         assert spy.await_count == 1
         assert spy.await_args is not None
         kw = spy.await_args.kwargs
@@ -1334,9 +1471,7 @@ class TestCandidateHighScoreEvent:
     def test_no_emit_below_threshold(self) -> None:
         self._scope(existing=None)
         spy = self._emit_spy()
-        asyncio.get_event_loop().run_until_complete(
-            self._upsert(f_score=42.0, risk_flags=[])
-        )
+        asyncio.get_event_loop().run_until_complete(self._upsert(f_score=42.0, risk_flags=[]))
         spy.assert_not_awaited()
 
     def test_no_emit_when_already_above_no_recrossing(self) -> None:
@@ -1346,9 +1481,7 @@ class TestCandidateHighScoreEvent:
         existing.total_score = 82.0  # already above ⇒ no new crossing
         self._scope(existing=existing)
         spy = self._emit_spy()
-        asyncio.get_event_loop().run_until_complete(
-            self._upsert(f_score=88.0, risk_flags=[])
-        )
+        asyncio.get_event_loop().run_until_complete(self._upsert(f_score=88.0, risk_flags=[]))
         spy.assert_not_awaited()
 
     def test_no_emit_for_insider_rejected_candidate(self) -> None:
@@ -1364,9 +1497,7 @@ class TestCandidateHighScoreEvent:
         boom = AsyncMock(side_effect=RuntimeError("NOTIFY down"))
         patch("polyecho.discovery.worker.emit_event", boom).start()
         # Must complete despite emit_event raising (best-effort wrapper).
-        asyncio.get_event_loop().run_until_complete(
-            self._upsert(f_score=90.0, risk_flags=[])
-        )
+        asyncio.get_event_loop().run_until_complete(self._upsert(f_score=90.0, risk_flags=[]))
         boom.assert_awaited_once()
 
 
@@ -1404,11 +1535,17 @@ class TestUpsertCandidateBehaviour:
                 sess.add = lambda o: added.append(o)
 
                 await _upsert_candidate(
-                    W_SWING, "leaderboard", display_name="X",
-                    stats_7d={}, stats_30d={"pnl_usd": 1.0}, stats_90d={},
+                    W_SWING,
+                    "leaderboard",
+                    display_name="X",
+                    stats_7d={},
+                    stats_30d={"pnl_usd": 1.0},
+                    stats_90d={},
                     freq_stats_30d=self._fs(),
                     strategy_type=StrategyType.SWING,
-                    p_score=60.0, r_score=50.0, f_score=30.0,
+                    p_score=60.0,
+                    r_score=50.0,
+                    f_score=30.0,
                     risk_flags=["new_account"],  # NOT insider
                     last_active_at=None,
                 )
@@ -1433,9 +1570,7 @@ class TestUpsertCandidateBehaviour:
                 sess = AsyncMock()
                 sess.execute = AsyncMock(
                     side_effect=[
-                        MagicMock(
-                            scalar_one_or_none=MagicMock(return_value=existing)
-                        ),
+                        MagicMock(scalar_one_or_none=MagicMock(return_value=existing)),
                         MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
                     ]
                 )
@@ -1444,11 +1579,17 @@ class TestUpsertCandidateBehaviour:
                 sess.add = MagicMock()
 
                 await _upsert_candidate(
-                    W_SWING, "large_new_positions", display_name=None,
-                    stats_7d={}, stats_30d={"pnl_usd": 2.0}, stats_90d={},
+                    W_SWING,
+                    "large_new_positions",
+                    display_name=None,
+                    stats_7d={},
+                    stats_30d={"pnl_usd": 2.0},
+                    stats_90d={},
                     freq_stats_30d=self._fs(),
                     strategy_type=StrategyType.SWING,
-                    p_score=70.0, r_score=60.0, f_score=42.0,
+                    p_score=70.0,
+                    r_score=60.0,
+                    f_score=42.0,
                     risk_flags=[],
                     last_active_at=None,
                 )
@@ -1476,9 +1617,7 @@ class TestUpsertCandidateBehaviour:
                 sess = AsyncMock()
                 sess.execute = AsyncMock(
                     side_effect=[
-                        MagicMock(
-                            scalar_one_or_none=MagicMock(return_value=existing)
-                        ),
+                        MagicMock(scalar_one_or_none=MagicMock(return_value=existing)),
                         MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
                     ]
                 )
@@ -1487,11 +1626,17 @@ class TestUpsertCandidateBehaviour:
                 sess.add = MagicMock()
 
                 await _upsert_candidate(
-                    W_SWING, "leaderboard", display_name=None,
-                    stats_7d={}, stats_30d={}, stats_90d={},
+                    W_SWING,
+                    "leaderboard",
+                    display_name=None,
+                    stats_7d={},
+                    stats_30d={},
+                    stats_90d={},
                     freq_stats_30d=self._fs(),
                     strategy_type=StrategyType.SWING,
-                    p_score=70.0, r_score=60.0, f_score=42.0,
+                    p_score=70.0,
+                    r_score=60.0,
+                    f_score=42.0,
                     risk_flags=[],  # clean now
                     last_active_at=None,
                 )
@@ -1565,7 +1710,8 @@ class TestDiscoverLargeNewPositions:
 
     def test_wallet_with_recent_large_entry_is_detected(self) -> None:
         big = _make_record(
-            wallet=W_SWING, usdc_size=7_500.0,
+            wallet=W_SWING,
+            usdc_size=7_500.0,
             ts=datetime.now(tz=UTC) - timedelta(hours=2),
         )
         ds = _LargePositionStubDS({W_SWING: [big]})
@@ -1586,11 +1732,13 @@ class TestDiscoverLargeNewPositions:
 
     def test_sub_threshold_and_old_entries_excluded(self) -> None:
         sub = _make_record(
-            wallet=W_SWING, usdc_size=4_999.0,
+            wallet=W_SWING,
+            usdc_size=4_999.0,
             ts=datetime.now(tz=UTC) - timedelta(hours=1),
         )
         old_big = _make_record(
-            wallet=W_SCALPER, usdc_size=50_000.0,
+            wallet=W_SCALPER,
+            usdc_size=50_000.0,
             ts=datetime.now(tz=UTC) - timedelta(hours=48),  # outside 24h window
         )
         ds = _LargePositionStubDS({W_SWING: [sub], W_SCALPER: [old_big]})
@@ -1612,11 +1760,15 @@ class TestDiscoverLargeNewPositions:
     def test_size_fallback_when_no_usdc_size(self) -> None:
         # No usdc_size -> share-count fallback (>500 shares qualifies).
         rec = _make_record(
-            wallet=W_SWING, usdc_size=None, size=600.0,
+            wallet=W_SWING,
+            usdc_size=None,
+            size=600.0,
             ts=datetime.now(tz=UTC) - timedelta(hours=3),
         )
         small = _make_record(
-            wallet=W_SCALPER, usdc_size=None, size=10.0,
+            wallet=W_SCALPER,
+            usdc_size=None,
+            size=10.0,
             ts=datetime.now(tz=UTC) - timedelta(hours=3),
         )
         ds = _LargePositionStubDS({W_SWING: [rec], W_SCALPER: [small]})
@@ -1638,7 +1790,8 @@ class TestDiscoverLargeNewPositions:
     def test_dedupe_multiple_large_entries_single_process_call(self) -> None:
         recs = [
             _make_record(
-                wallet=W_SWING, usdc_size=6_000.0,
+                wallet=W_SWING,
+                usdc_size=6_000.0,
                 ts=datetime.now(tz=UTC) - timedelta(hours=h),
             )
             for h in (1, 2, 3)
@@ -1686,12 +1839,11 @@ class TestDiscoverLargeNewPositions:
     def test_cold_start_seeds_from_leaderboard(self) -> None:
         # known set empty -> must pull leaderboard slice as the pool.
         big = _make_record(
-            wallet=W_SWING, usdc_size=8_000.0,
+            wallet=W_SWING,
+            usdc_size=8_000.0,
             ts=datetime.now(tz=UTC) - timedelta(hours=1),
         )
-        ds = _LargePositionStubDS(
-            {W_SWING: [big]}, leaderboard_wallets=[W_SWING, W_SCALPER]
-        )
+        ds = _LargePositionStubDS({W_SWING: [big]}, leaderboard_wallets=[W_SWING, W_SCALPER])
         processed: list[str] = []
 
         async def _run() -> None:
@@ -1742,9 +1894,7 @@ class TestDiscoverLargeNewPositions:
             with patch("polyecho.discovery.worker.session_scope") as mock_scope:
                 sess = AsyncMock()
                 sess.execute = AsyncMock(
-                    return_value=MagicMock(
-                        scalar_one_or_none=MagicMock(return_value=None)
-                    )
+                    return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None))
                 )
                 mock_scope.return_value.__aenter__ = AsyncMock(return_value=sess)
                 mock_scope.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -1773,9 +1923,7 @@ class TestWorkerPipelineSmokeTest:
             with patch("polyecho.discovery.worker.session_scope") as mock_scope:
                 mock_session = AsyncMock()
                 mock_session.execute = AsyncMock(
-                    return_value=MagicMock(
-                        scalar_one_or_none=MagicMock(return_value=None)
-                    )
+                    return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None))
                 )
                 mock_scope.return_value.__aenter__ = AsyncMock(return_value=mock_session)
                 mock_scope.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -1796,9 +1944,7 @@ class TestWorkerPipelineSmokeTest:
             with patch("polyecho.discovery.worker.session_scope") as mock_scope:
                 mock_session = AsyncMock()
                 mock_session.execute = AsyncMock(
-                    return_value=MagicMock(
-                        scalar_one_or_none=MagicMock(return_value=None)
-                    )
+                    return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None))
                 )
                 mock_scope.return_value.__aenter__ = AsyncMock(return_value=mock_session)
                 mock_scope.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -1821,10 +1967,15 @@ class TestP19aUtcDateKeying:
     """
 
     _FS = FrequencyStats(
-        trades_per_day=2.0, active_days=25, median_gap_minutes=120.0,
-        avg_hold_hours=36.0, hold_to_resolution_pct=10.0,
-        concurrent_positions_avg=2.0, concurrent_positions_max=5,
-        burstiness=0.2, active_hours_utc=[0, 1, 2, 3],
+        trades_per_day=2.0,
+        active_days=25,
+        median_gap_minutes=120.0,
+        avg_hold_hours=36.0,
+        hold_to_resolution_pct=10.0,
+        concurrent_positions_avg=2.0,
+        concurrent_positions_max=5,
+        burstiness=0.2,
+        active_hours_utc=[0, 1, 2, 3],
     )
 
     def _capture_history_date(self, tz: str) -> Any:
@@ -1842,6 +1993,7 @@ class TestP19aUtcDateKeying:
         if hasattr(time, "tzset"):
             time.tzset()
         try:
+
             async def _run() -> None:
                 with patch("polyecho.discovery.worker.session_scope") as ms:
                     sess = AsyncMock()
@@ -1851,9 +2003,7 @@ class TestP19aUtcDateKeying:
                     # ``session.add``.  Capture the executed statements.
                     async def _exec(stmt: Any) -> MagicMock:
                         executed.append(stmt)
-                        return MagicMock(
-                            scalar_one_or_none=MagicMock(return_value=None)
-                        )
+                        return MagicMock(scalar_one_or_none=MagicMock(return_value=None))
 
                     sess.execute = AsyncMock(side_effect=_exec)
                     ms.return_value.__aenter__ = AsyncMock(return_value=sess)
@@ -1861,12 +2011,19 @@ class TestP19aUtcDateKeying:
                     sess.add = MagicMock()
 
                     await _upsert_candidate(
-                        W_SWING, "leaderboard", display_name="X",
-                        stats_7d={}, stats_30d={}, stats_90d={},
+                        W_SWING,
+                        "leaderboard",
+                        display_name="X",
+                        stats_7d={},
+                        stats_30d={},
+                        stats_90d={},
                         freq_stats_30d=self._FS,
                         strategy_type=StrategyType.SWING,
-                        p_score=10.0, r_score=10.0, f_score=5.0,
-                        risk_flags=[], last_active_at=None,
+                        p_score=10.0,
+                        r_score=10.0,
+                        f_score=5.0,
+                        risk_flags=[],
+                        last_active_at=None,
                     )
 
             asyncio.get_event_loop().run_until_complete(_run())
@@ -1886,9 +2043,7 @@ class TestP19aUtcDateKeying:
         hist_stmt = executed[1]
         params = hist_stmt.compile().params
         hist_date = params["date"]
-        assert isinstance(hist_date, _dt.date), (
-            f"history date param is not a date: {hist_date!r}"
-        )
+        assert isinstance(hist_date, _dt.date), f"history date param is not a date: {hist_date!r}"
         return hist_date
 
     def test_history_date_is_utc_under_non_utc_tz(self) -> None:
@@ -1915,12 +2070,15 @@ class TestP19bWinRateMissingUsdc:
         # 2 priced SELLs: one win (+), one loss (0).  win_rate must be 0.5
         # — the 3rd SELL (usdc_size=None) must NOT drag it to 1/3.
         trades = [
-            _make_record(side="SELL", usdc_size=100.0,
-                         ts=base + timedelta(hours=1), condition_id="a"),
-            _make_record(side="SELL", usdc_size=0.0,
-                         ts=base + timedelta(hours=2), condition_id="b"),
-            _make_record(side="SELL", usdc_size=None,
-                         ts=base + timedelta(hours=3), condition_id="c"),
+            _make_record(
+                side="SELL", usdc_size=100.0, ts=base + timedelta(hours=1), condition_id="a"
+            ),
+            _make_record(
+                side="SELL", usdc_size=0.0, ts=base + timedelta(hours=2), condition_id="b"
+            ),
+            _make_record(
+                side="SELL", usdc_size=None, ts=base + timedelta(hours=3), condition_id="c"
+            ),
         ]
         stats = _compute_stats(trades, window_days=30)
         assert stats["win_rate"] == pytest.approx(0.5)
@@ -1928,8 +2086,9 @@ class TestP19bWinRateMissingUsdc:
     def test_all_none_usdc_sells_yield_zero_not_div_error(self) -> None:
         base = datetime(2026, 1, 1, tzinfo=UTC)
         trades = [
-            _make_record(side="SELL", usdc_size=None,
-                         ts=base + timedelta(hours=i), condition_id=f"c{i}")
+            _make_record(
+                side="SELL", usdc_size=None, ts=base + timedelta(hours=i), condition_id=f"c{i}"
+            )
             for i in range(3)
         ]
         stats = _compute_stats(trades, window_days=30)
@@ -1941,11 +2100,11 @@ class TestP19bWinRateMissingUsdc:
         OLD code gave 1/4=0.25; the fix gives 1/1=1.0."""
         base = datetime(2026, 1, 1, tzinfo=UTC)
         trades = [
-            _make_record(side="SELL", usdc_size=500.0,
-                         ts=base, condition_id="a"),
+            _make_record(side="SELL", usdc_size=500.0, ts=base, condition_id="a"),
             *[
-                _make_record(side="SELL", usdc_size=None,
-                             ts=base + timedelta(hours=i), condition_id=f"n{i}")
+                _make_record(
+                    side="SELL", usdc_size=None, ts=base + timedelta(hours=i), condition_id=f"n{i}"
+                )
                 for i in range(1, 4)
             ],
         ]
@@ -1966,10 +2125,15 @@ class TestP19cConcurrentHighScoreEmitsOnce:
     """
 
     _FS = FrequencyStats(
-        trades_per_day=2.0, active_days=25, median_gap_minutes=120.0,
-        avg_hold_hours=36.0, hold_to_resolution_pct=10.0,
-        concurrent_positions_avg=2.0, concurrent_positions_max=5,
-        burstiness=0.2, active_hours_utc=[0, 1, 2, 3],
+        trades_per_day=2.0,
+        active_days=25,
+        median_gap_minutes=120.0,
+        avg_hold_hours=36.0,
+        hold_to_resolution_pct=10.0,
+        concurrent_positions_avg=2.0,
+        concurrent_positions_max=5,
+        burstiness=0.2,
+        active_hours_utc=[0, 1, 2, 3],
     )
 
     def test_emits_exactly_once_under_race(self) -> None:
@@ -2011,16 +2175,10 @@ class TestP19cConcurrentHighScoreEmitsOnce:
                     await row_lock.acquire()
                     state["locked"] = True
                     score = shared["total_score"]
-                    existing = (
-                        _fake_candidate(score) if score is not None else None
-                    )
-                    return MagicMock(
-                        scalar_one_or_none=MagicMock(return_value=existing)
-                    )
+                    existing = _fake_candidate(score) if score is not None else None
+                    return MagicMock(scalar_one_or_none=MagicMock(return_value=existing))
                 # Score-history SELECT (no existing row).
-                return MagicMock(
-                    scalar_one_or_none=MagicMock(return_value=None)
-                )
+                return MagicMock(scalar_one_or_none=MagicMock(return_value=None))
 
             def _add(obj: Any) -> None:
                 # Commit-equivalent: persist total_score so the NEXT
@@ -2046,12 +2204,19 @@ class TestP19cConcurrentHighScoreEmitsOnce:
 
         async def _one() -> None:
             await _upsert_candidate(
-                W_SWING, "leaderboard", display_name="Swing",
-                stats_7d={}, stats_30d={"pnl_usd": 1.0}, stats_90d={},
+                W_SWING,
+                "leaderboard",
+                display_name="Swing",
+                stats_7d={},
+                stats_30d={"pnl_usd": 1.0},
+                stats_90d={},
                 freq_stats_30d=self._FS,
                 strategy_type=StrategyType.SWING,
-                p_score=90.0, r_score=80.0, f_score=85.0,  # crosses 70
-                risk_flags=[], last_active_at=None,
+                p_score=90.0,
+                r_score=80.0,
+                f_score=85.0,  # crosses 70
+                risk_flags=[],
+                last_active_at=None,
             )
 
         async def _run() -> None:
@@ -2065,8 +2230,7 @@ class TestP19cConcurrentHighScoreEmitsOnce:
         asyncio.get_event_loop().run_until_complete(_run())
 
         assert emit_spy.await_count == 1, (
-            f"expected exactly one CANDIDATE_HIGH_SCORE emit, "
-            f"got {emit_spy.await_count}"
+            f"expected exactly one CANDIDATE_HIGH_SCORE emit, got {emit_spy.await_count}"
         )
 
     def test_select_requests_for_update_lock(self) -> None:
@@ -2082,9 +2246,7 @@ class TestP19cConcurrentHighScoreEmitsOnce:
 
                 async def _exec(stmt: Any) -> MagicMock:
                     captured.append(stmt)
-                    return MagicMock(
-                        scalar_one_or_none=MagicMock(return_value=None)
-                    )
+                    return MagicMock(scalar_one_or_none=MagicMock(return_value=None))
 
                 sess.execute = AsyncMock(side_effect=_exec)
                 ms.return_value.__aenter__ = AsyncMock(return_value=sess)
@@ -2092,12 +2254,19 @@ class TestP19cConcurrentHighScoreEmitsOnce:
                 sess.add = MagicMock()
 
                 await _upsert_candidate(
-                    W_SWING, "leaderboard", display_name="X",
-                    stats_7d={}, stats_30d={}, stats_90d={},
+                    W_SWING,
+                    "leaderboard",
+                    display_name="X",
+                    stats_7d={},
+                    stats_30d={},
+                    stats_90d={},
                     freq_stats_30d=self._FS,
                     strategy_type=StrategyType.SWING,
-                    p_score=10.0, r_score=10.0, f_score=5.0,
-                    risk_flags=[], last_active_at=None,
+                    p_score=10.0,
+                    r_score=10.0,
+                    f_score=5.0,
+                    risk_flags=[],
+                    last_active_at=None,
                 )
 
         asyncio.get_event_loop().run_until_complete(_run())
@@ -2105,9 +2274,7 @@ class TestP19cConcurrentHighScoreEmitsOnce:
         # The candidate SELECT is the first execute; it must be FOR UPDATE.
         sel = captured[0]
         compiled = str(sel).upper()
-        assert "FOR UPDATE" in compiled, (
-            f"candidate SELECT is not FOR UPDATE:\n{sel}"
-        )
+        assert "FOR UPDATE" in compiled, f"candidate SELECT is not FOR UPDATE:\n{sel}"
 
 
 class TestI1RetrySleepDistinctFromInterval:
@@ -2191,9 +2358,7 @@ class TestI1RetrySleepDistinctFromInterval:
             worker = MagicMock()
             worker.run_daily = _flaky
             worker.run_hourly = AsyncMock(side_effect=asyncio.CancelledError)
-            with patch(
-                "polyecho.discovery.__main__.asyncio.sleep", _fake_sleep
-            ):
+            with patch("polyecho.discovery.__main__.asyncio.sleep", _fake_sleep):
                 with pytest.raises(asyncio.CancelledError):
                     await m._scheduled_loop(worker)
 
@@ -2222,12 +2387,12 @@ class TestI4LargePositionNoTruncation:
         # 250 small trades + ONE huge one at the END (would be dropped by
         # the old limit=100 timestamp-ordered fetch).
         small = [
-            _make_record(wallet=W_SWING, usdc_size=10.0,
-                         ts=ts + timedelta(seconds=i))
+            _make_record(wallet=W_SWING, usdc_size=10.0, ts=ts + timedelta(seconds=i))
             for i in range(250)
         ]
         huge = _make_record(
-            wallet=W_SWING, usdc_size=80_000.0,
+            wallet=W_SWING,
+            usdc_size=80_000.0,
             ts=ts + timedelta(seconds=500),
         )
         ds = _LargePositionStubDS({W_SWING: [*small, huge]})
@@ -2288,13 +2453,11 @@ class TestI7BurstinessDefinitionConsistent:
         base = datetime(2026, 1, 1, tzinfo=UTC)
         recs: list[ActivityRecord] = []
         for i in range(8):  # tight cluster
-            recs.append(_make_record(ts=base + timedelta(seconds=i),
-                                      condition_id="a"))
-        recs.append(_make_record(ts=base + timedelta(days=20),
-                                  condition_id="b"))  # one huge gap
+            recs.append(_make_record(ts=base + timedelta(seconds=i), condition_id="a"))
+        recs.append(_make_record(ts=base + timedelta(days=20), condition_id="b"))  # one huge gap
         stats = compute_frequency_stats(recs, window_days=30)
-        assert 0.0 <= stats.burstiness < 1.0          # never the clip 1.0
-        assert stats.burstiness > 0.5                 # still high (bursty)
+        assert 0.0 <= stats.burstiness < 1.0  # never the clip 1.0
+        assert stats.burstiness > 0.5  # still high (bursty)
 
     def test_downstream_factor_well_defined(self) -> None:
         # For any burstiness in [0, 1], 1 - burstiness ∈ [0, 1] so the
@@ -2310,15 +2473,21 @@ class TestI7BurstinessDefinitionConsistent:
             assert 0.0 <= score <= 100.0
         # Strictly decreasing in burstiness (penalty direction correct).
         low = replicability_score(
-            {"median_gap_minutes": 60.0, "burstiness": 0.1,
-             "active_hours_utc": list(range(0, 15)),
-             "concurrent_positions_avg": 1.0},
+            {
+                "median_gap_minutes": 60.0,
+                "burstiness": 0.1,
+                "active_hours_utc": list(range(0, 15)),
+                "concurrent_positions_avg": 1.0,
+            },
             follower_capital_usd=1000.0,
         )
         high = replicability_score(
-            {"median_gap_minutes": 60.0, "burstiness": 0.9,
-             "active_hours_utc": list(range(0, 15)),
-             "concurrent_positions_avg": 1.0},
+            {
+                "median_gap_minutes": 60.0,
+                "burstiness": 0.9,
+                "active_hours_utc": list(range(0, 15)),
+                "concurrent_positions_avg": 1.0,
+            },
             follower_capital_usd=1000.0,
         )
         assert low > high
@@ -2395,9 +2564,15 @@ class TestR10I3NearResolutionSymmetricCounting:
         # so near_res_total=1, near_res_wins=1 → wr = 1.0 ≥ 0.80.
         act: list[ActivityRecord] = [
             ActivityRecord(
-                wallet=W_INSIDER, activity_type="TRADE", condition_id=cond,
-                side="BUY", size=2000.0, price=0.05, usdc_size=8000.0,
-                timestamp=base + timedelta(hours=i), raw={},
+                wallet=W_INSIDER,
+                activity_type="TRADE",
+                condition_id=cond,
+                side="BUY",
+                size=2000.0,
+                price=0.05,
+                usdc_size=8000.0,
+                timestamp=base + timedelta(hours=i),
+                raw={},
             )
             for i in range(5)
         ]
@@ -2407,22 +2582,35 @@ class TestR10I3NearResolutionSymmetricCounting:
         for h in (15, 16, 17):
             act.append(
                 ActivityRecord(
-                    wallet=W_INSIDER, activity_type="TRADE",
-                    condition_id=cond, side="SELL", size=10.0,
-                    price=0.9, usdc_size=6000.0,
-                    timestamp=base + timedelta(hours=h), raw={},
+                    wallet=W_INSIDER,
+                    activity_type="TRADE",
+                    condition_id=cond,
+                    side="SELL",
+                    size=10.0,
+                    price=0.9,
+                    usdc_size=6000.0,
+                    timestamp=base + timedelta(hours=h),
+                    raw={},
                 )
             )
         act.append(
             ActivityRecord(
-                wallet=W_INSIDER, activity_type="REDEEM", condition_id=cond,
-                side=None, size=1e4, price=None, usdc_size=1e4,
-                timestamp=base + timedelta(hours=20), raw={},
+                wallet=W_INSIDER,
+                activity_type="REDEEM",
+                condition_id=cond,
+                side=None,
+                size=1e4,
+                price=None,
+                usdc_size=1e4,
+                timestamp=base + timedelta(hours=20),
+                raw={},
             )
         )
         stats = {
-            "pnl_usd": 5e4, "win_rate": 0.95,
-            "total_trades": 8, "trades_per_day": 1.0,
+            "pnl_usd": 5e4,
+            "win_rate": 0.95,
+            "total_trades": 8,
+            "trades_per_day": 1.0,
         }
         flags = rf.detect_risk_flags(stats, act, [])
         # Symmetric per-condition: wr = 1/1 = 1.0 ≥ 0.80 → flagged.
@@ -2440,9 +2628,7 @@ class TestR10I4NinetyDayWindowing:
 
         captured: dict[str, Any] = {}
 
-        async def _fake_upsert(
-            *a: Any, **kw: Any
-        ) -> tuple[bool, datetime | None]:
+        async def _fake_upsert(*a: Any, **kw: Any) -> tuple[bool, datetime | None]:
             captured["stats_90d"] = kw["stats_90d"]
             captured["stats_30d"] = kw["stats_30d"]
             # Phase-3: _upsert_candidate now returns
@@ -2454,19 +2640,25 @@ class TestR10I4NinetyDayWindowing:
         # 10 trades inside the last 90d + 40 trades 200 days ago (must be
         # excluded from the 90d window).
         recent = [
-            _make_record(side="BUY", usdc_size=100.0,
-                         ts=now - timedelta(days=d), condition_id=f"r{d}")
+            _make_record(
+                side="BUY", usdc_size=100.0, ts=now - timedelta(days=d), condition_id=f"r{d}"
+            )
             for d in range(10)
         ]
         ancient = [
-            _make_record(side="BUY", usdc_size=100.0,
-                         ts=now - timedelta(days=200 + d), condition_id=f"a{d}")
+            _make_record(
+                side="BUY", usdc_size=100.0, ts=now - timedelta(days=200 + d), condition_id=f"a{d}"
+            )
             for d in range(40)
         ]
 
         class _DS:
             async def get_user_activity(
-                self, w: str, *, activity_type: str, limit: Any = None,
+                self,
+                w: str,
+                *,
+                activity_type: str,
+                limit: Any = None,
                 start: Any = None,
             ) -> list[ActivityRecord]:
                 if activity_type == "TRADE":
@@ -2474,7 +2666,10 @@ class TestR10I4NinetyDayWindowing:
                 return []
 
             async def get_positions(
-                self, w: str, *, size_threshold: float = 0.0,
+                self,
+                w: str,
+                *,
+                size_threshold: float = 0.0,
             ) -> list[PositionRecord]:
                 return []
 
@@ -2488,9 +2683,7 @@ class TestR10I4NinetyDayWindowing:
         # Only the 10 recent trades fall inside the 90d window; the 40
         # ancient ones must be excluded.  trades_per_day = 10/90.
         assert captured["stats_90d"]["total_trades"] == 10
-        assert captured["stats_90d"]["trades_per_day"] == pytest.approx(
-            10 / 90, rel=1e-3
-        )
+        assert captured["stats_90d"]["trades_per_day"] == pytest.approx(10 / 90, rel=1e-3)
 
 
 class TestR10C1C2HistoryRaceAndLockRelease:
@@ -2500,10 +2693,15 @@ class TestR10C1C2HistoryRaceAndLockRelease:
     """
 
     _FS = FrequencyStats(
-        trades_per_day=2.0, active_days=25, median_gap_minutes=120.0,
-        avg_hold_hours=36.0, hold_to_resolution_pct=10.0,
-        concurrent_positions_avg=2.0, concurrent_positions_max=5,
-        burstiness=0.2, active_hours_utc=[0, 1, 2, 3],
+        trades_per_day=2.0,
+        active_days=25,
+        median_gap_minutes=120.0,
+        avg_hold_hours=36.0,
+        hold_to_resolution_pct=10.0,
+        concurrent_positions_avg=2.0,
+        concurrent_positions_max=5,
+        burstiness=0.2,
+        active_hours_utc=[0, 1, 2, 3],
     )
 
     def test_history_write_is_on_conflict_upsert(self) -> None:
@@ -2520,9 +2718,7 @@ class TestR10C1C2HistoryRaceAndLockRelease:
 
                 async def _exec(stmt: Any) -> MagicMock:
                     executed.append(stmt)
-                    return MagicMock(
-                        scalar_one_or_none=MagicMock(return_value=None)
-                    )
+                    return MagicMock(scalar_one_or_none=MagicMock(return_value=None))
 
                 sess.execute = AsyncMock(side_effect=_exec)
                 ms.return_value.__aenter__ = AsyncMock(return_value=sess)
@@ -2530,12 +2726,19 @@ class TestR10C1C2HistoryRaceAndLockRelease:
                 sess.add = MagicMock()
 
                 await _upsert_candidate(
-                    W_SWING, "leaderboard", display_name="X",
-                    stats_7d={}, stats_30d={"pnl_usd": 1.0}, stats_90d={},
+                    W_SWING,
+                    "leaderboard",
+                    display_name="X",
+                    stats_7d={},
+                    stats_30d={"pnl_usd": 1.0},
+                    stats_90d={},
                     freq_stats_30d=self._FS,
                     strategy_type=StrategyType.SWING,
-                    p_score=10.0, r_score=10.0, f_score=5.0,
-                    risk_flags=[], last_active_at=None,
+                    p_score=10.0,
+                    r_score=10.0,
+                    f_score=5.0,
+                    risk_flags=[],
+                    last_active_at=None,
                 )
 
         asyncio.get_event_loop().run_until_complete(_run())
@@ -2584,15 +2787,11 @@ class TestR10C1C2HistoryRaceAndLockRelease:
                         existing.user_status = "new"
                         existing.total_score = score
                         existing.first_discovered_at = object()
-                    return MagicMock(
-                        scalar_one_or_none=MagicMock(return_value=existing)
-                    )
+                    return MagicMock(scalar_one_or_none=MagicMock(return_value=existing))
                 # Second execute = history ON CONFLICT upsert (idempotent
                 # — count it; it never raises a dup-key by construction).
                 hist_upserts["n"] += 1
-                return MagicMock(
-                    scalar_one_or_none=MagicMock(return_value=None)
-                )
+                return MagicMock(scalar_one_or_none=MagicMock(return_value=None))
 
             def _add(obj: Any) -> None:
                 if type(obj).__name__ == "CandidateLeader":
@@ -2616,20 +2815,25 @@ class TestR10C1C2HistoryRaceAndLockRelease:
 
         async def _one() -> None:
             await _upsert_candidate(
-                W_SWING, "leaderboard", display_name="Swing",
-                stats_7d={}, stats_30d={"pnl_usd": 1.0}, stats_90d={},
+                W_SWING,
+                "leaderboard",
+                display_name="Swing",
+                stats_7d={},
+                stats_30d={"pnl_usd": 1.0},
+                stats_90d={},
                 freq_stats_30d=self._FS,
                 strategy_type=StrategyType.SWING,
-                p_score=90.0, r_score=80.0, f_score=85.0,  # crosses 70
-                risk_flags=[], last_active_at=None,
+                p_score=90.0,
+                r_score=80.0,
+                f_score=85.0,  # crosses 70
+                risk_flags=[],
+                last_active_at=None,
             )
 
         async def _run() -> None:
             with (
                 patch.object(worker_mod, "session_scope", _fake_scope),
-                patch.object(
-                    worker_mod, "_safe_emit_high_score", _spy_emit
-                ),
+                patch.object(worker_mod, "_safe_emit_high_score", _spy_emit),
                 patch.object(worker_mod, "emit_event", emit_spy),
             ):
                 await asyncio.gather(_one(), _one())
@@ -2651,9 +2855,7 @@ class TestR10C1C2HistoryRaceAndLockRelease:
             elif ev == "unlock":
                 held -= 1
             elif ev == "emit":
-                assert held == 0, (
-                    f"emit happened while a row lock was held: {timeline}"
-                )
+                assert held == 0, f"emit happened while a row lock was held: {timeline}"
 
 
 # ---------------------------------------------------------------------------
@@ -2710,10 +2912,9 @@ class TestDiscoveryIdleKeepalive:
         async def _run() -> None:
             # Shrink the real ~90 s cadence so the loop ticks fast in-test;
             # the SHIPPED value is asserted separately below.
-            with patch.object(
-                m, "_emit_discovery_heartbeat", _capture_hb
-            ), patch.object(
-                m, "_IDLE_KEEPALIVE_INTERVAL", timedelta(seconds=0.001)
+            with (
+                patch.object(m, "_emit_discovery_heartbeat", _capture_hb),
+                patch.object(m, "_IDLE_KEEPALIVE_INTERVAL", timedelta(seconds=0.001)),
             ):
                 task = asyncio.create_task(m._idle_keepalive_loop(worker))
                 try:
@@ -2775,18 +2976,12 @@ class TestDiscoveryIdleKeepalive:
             saved = sys.modules.get("polyecho.shared.health")
             sys.modules["polyecho.shared.health"] = fake_health
             try:
-                with patch.object(
-                    m, "_IDLE_KEEPALIVE_INTERVAL", timedelta(seconds=0.001)
-                ):
-                    task = asyncio.create_task(
-                        m._idle_keepalive_loop(worker)
-                    )
+                with patch.object(m, "_IDLE_KEEPALIVE_INTERVAL", timedelta(seconds=0.001)):
+                    task = asyncio.create_task(m._idle_keepalive_loop(worker))
                     try:
                         # Several iterations despite EVERY heartbeat raising.
                         for _ in range(3):
-                            await asyncio.wait_for(
-                                gate.wait(), timeout=5.0
-                            )
+                            await asyncio.wait_for(gate.wait(), timeout=5.0)
                             gate.clear()
                         # Loop is alive (not crashed) and cancellable.
                         assert not task.done()
@@ -2820,10 +3015,9 @@ class TestDiscoveryIdleKeepalive:
             started.set()
 
         async def _run() -> None:
-            with patch.object(
-                m, "_emit_discovery_heartbeat", _hb
-            ), patch.object(
-                m, "_IDLE_KEEPALIVE_INTERVAL", timedelta(seconds=0.001)
+            with (
+                patch.object(m, "_emit_discovery_heartbeat", _hb),
+                patch.object(m, "_IDLE_KEEPALIVE_INTERVAL", timedelta(seconds=0.001)),
             ):
                 task = asyncio.create_task(m._idle_keepalive_loop(worker))
                 await asyncio.wait_for(started.wait(), timeout=5.0)
@@ -2852,10 +3046,15 @@ class TestFixturePersistenceGate:
     """
 
     _FS = FrequencyStats(
-        trades_per_day=2.0, active_days=25, median_gap_minutes=120.0,
-        avg_hold_hours=36.0, hold_to_resolution_pct=10.0,
-        concurrent_positions_avg=2.0, concurrent_positions_max=5,
-        burstiness=0.2, active_hours_utc=[0, 1, 2, 3],
+        trades_per_day=2.0,
+        active_days=25,
+        median_gap_minutes=120.0,
+        avg_hold_hours=36.0,
+        hold_to_resolution_pct=10.0,
+        concurrent_positions_avg=2.0,
+        concurrent_positions_max=5,
+        burstiness=0.2,
+        active_hours_utc=[0, 1, 2, 3],
     )
 
     @contextlib.contextmanager
@@ -2886,19 +3085,24 @@ class TestFixturePersistenceGate:
 
         async def _run() -> None:
             with self._gate(False):
-                with patch(
-                    "polyecho.discovery.worker.session_scope"
-                ) as ms:
+                with patch("polyecho.discovery.worker.session_scope") as ms:
                     ms.side_effect = lambda *a, **k: scope_calls.__setitem__(
                         "n", scope_calls["n"] + 1
                     )
                     emitted, prior = await _upsert_candidate(
-                        W_SWING, "leaderboard", display_name="X",
-                        stats_7d={}, stats_30d={"pnl_usd": 1.0}, stats_90d={},
+                        W_SWING,
+                        "leaderboard",
+                        display_name="X",
+                        stats_7d={},
+                        stats_30d={"pnl_usd": 1.0},
+                        stats_90d={},
                         freq_stats_30d=self._FS,
                         strategy_type=StrategyType.SWING,
-                        p_score=99.0, r_score=99.0, f_score=99.0,
-                        risk_flags=[], last_active_at=None,
+                        p_score=99.0,
+                        r_score=99.0,
+                        f_score=99.0,
+                        risk_flags=[],
+                        last_active_at=None,
                     )
             # Brand-new-wallet sentinel — callers must see "not in DB yet".
             assert emitted is False
@@ -2915,15 +3119,16 @@ class TestFixturePersistenceGate:
 
         async def _run() -> tuple[Any, Any, Any, Any]:
             with self._gate(False):
-                with patch(
-                    "polyecho.discovery.worker.session_scope"
-                ) as ms:
+                with patch("polyecho.discovery.worker.session_scope") as ms:
                     ms.side_effect = lambda *a, **k: scope_calls.__setitem__(
                         "n", scope_calls["n"] + 1
                     )
                     return await _upsert_thin(
-                        W_SWING, "leaderboard", display_name="X",
-                        rank=1, leaderboard_pnl=123.0,
+                        W_SWING,
+                        "leaderboard",
+                        display_name="X",
+                        rank=1,
+                        leaderboard_pnl=123.0,
                         leaderboard_volume=456.0,
                     )
 
@@ -2939,9 +3144,7 @@ class TestFixturePersistenceGate:
 
         async def _run() -> None:
             with self._gate(False):
-                with patch(
-                    "polyecho.discovery.worker.session_scope"
-                ) as ms:
+                with patch("polyecho.discovery.worker.session_scope") as ms:
                     ms.side_effect = lambda *a, **k: scope_calls.__setitem__(
                         "n", scope_calls["n"] + 1
                     )
@@ -2959,14 +3162,10 @@ class TestFixturePersistenceGate:
 
         async def _run() -> None:
             with self._gate(True):
-                with patch(
-                    "polyecho.discovery.worker.session_scope"
-                ) as ms:
+                with patch("polyecho.discovery.worker.session_scope") as ms:
                     sess = AsyncMock()
                     sess.execute = AsyncMock(
-                        return_value=MagicMock(
-                            scalar_one_or_none=MagicMock(return_value=None)
-                        )
+                        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None))
                     )
                     sess.add = MagicMock()
 
@@ -2979,8 +3178,12 @@ class TestFixturePersistenceGate:
 
                     ms.side_effect = _enter
                     await _upsert_thin(
-                        W_SWING, "leaderboard", display_name="X",
-                        rank=1, leaderboard_pnl=1.0, leaderboard_volume=2.0,
+                        W_SWING,
+                        "leaderboard",
+                        display_name="X",
+                        rank=1,
+                        leaderboard_pnl=1.0,
+                        leaderboard_volume=2.0,
                     )
 
         asyncio.get_event_loop().run_until_complete(_run())
@@ -3021,32 +3224,25 @@ class TestFixturePersistenceGate:
         real_cand = w._upsert_candidate
 
         async def _thin_spy(*a: Any, **k: Any):  # type: ignore[no-untyped-def]
-            with patch(
-                "polyecho.discovery.worker.session_scope"
-            ) as ms:
+            with patch("polyecho.discovery.worker.session_scope") as ms:
                 ms.side_effect = lambda *x, **y: upsert_thin_writes.__setitem__(
                     "n", upsert_thin_writes["n"] + 1
                 )
                 return await real_thin(*a, **k)
 
         async def _cand_spy(*a: Any, **k: Any):  # type: ignore[no-untyped-def]
-            with patch(
-                "polyecho.discovery.worker.session_scope"
-            ) as ms:
+            with patch("polyecho.discovery.worker.session_scope") as ms:
                 ms.side_effect = lambda *x, **y: upsert_cand_writes.__setitem__(
                     "n", upsert_cand_writes["n"] + 1
                 )
                 return await real_cand(*a, **k)
 
         async def _run() -> None:
-            with patch.object(
-                m, "get_datasource", return_value=FixtureDataSource()
-            ), patch.object(
-                m, "_run_once", _run_once_capture
-            ), patch.object(
-                w, "_upsert_thin", _thin_spy
-            ), patch.object(
-                w, "_upsert_candidate", _cand_spy
+            with (
+                patch.object(m, "get_datasource", return_value=FixtureDataSource()),
+                patch.object(m, "_run_once", _run_once_capture),
+                patch.object(w, "_upsert_thin", _thin_spy),
+                patch.object(w, "_upsert_candidate", _cand_spy),
             ):
                 await m.main(once=True)
 
@@ -3097,9 +3293,10 @@ class TestFixturePersistenceGate:
             seen["enabled"] = persistence_enabled()
 
         async def _run() -> None:
-            with patch.object(
-                m, "get_datasource", return_value=_NotFixture()
-            ), patch.object(m, "_run_once", _run_once_spy):
+            with (
+                patch.object(m, "get_datasource", return_value=_NotFixture()),
+                patch.object(m, "_run_once", _run_once_spy),
+            ):
                 await m.main(once=True)
 
         try:
@@ -3191,12 +3388,11 @@ class TestFetchHotMarketsGamma:
 
         async def _run() -> list[tuple[str, dict[str, Any]]]:
             with patch.object(
-                _markets, "make_async_client_resolved",
+                _markets,
+                "make_async_client_resolved",
                 AsyncMock(return_value=fake),
             ):
-                return await _markets.fetch_hot_markets_gamma(
-                    min_vol=100_000.0, limit=200
-                )
+                return await _markets.fetch_hot_markets_gamma(min_vol=100_000.0, limit=200)
 
         out = asyncio.get_event_loop().run_until_complete(_run())
         assert [cid for cid, _ in out] == ["0xa", "0xb"]
@@ -3220,12 +3416,11 @@ class TestFetchHotMarketsGamma:
 
         async def _run() -> list[tuple[str, dict[str, Any]]]:
             with patch.object(
-                _markets, "make_async_client_resolved",
+                _markets,
+                "make_async_client_resolved",
                 AsyncMock(return_value=fake),
             ):
-                return await _markets.fetch_hot_markets_gamma(
-                    min_vol=100_000.0, limit=500
-                )
+                return await _markets.fetch_hot_markets_gamma(min_vol=100_000.0, limit=500)
 
         out = asyncio.get_event_loop().run_until_complete(_run())
         assert len(out) == 101
@@ -3241,12 +3436,11 @@ class TestFetchHotMarketsGamma:
 
         async def _run() -> list[tuple[str, dict[str, Any]]]:
             with patch.object(
-                _markets, "make_async_client_resolved",
+                _markets,
+                "make_async_client_resolved",
                 AsyncMock(return_value=fake),
             ):
-                return await _markets.fetch_hot_markets_gamma(
-                    min_vol=0.0, limit=10
-                )
+                return await _markets.fetch_hot_markets_gamma(min_vol=0.0, limit=10)
 
         out = asyncio.get_event_loop().run_until_complete(_run())
         assert len(out) == 10
@@ -3265,12 +3459,11 @@ class TestFetchHotMarketsGamma:
 
         async def _run() -> list[tuple[str, dict[str, Any]]]:
             with patch.object(
-                _markets, "make_async_client_resolved",
+                _markets,
+                "make_async_client_resolved",
                 AsyncMock(return_value=fake),
             ):
-                return await _markets.fetch_hot_markets_gamma(
-                    min_vol=100_000.0, limit=200
-                )
+                return await _markets.fetch_hot_markets_gamma(min_vol=100_000.0, limit=200)
 
         out = asyncio.get_event_loop().run_until_complete(_run())
         assert out == []
@@ -3284,12 +3477,11 @@ class TestFetchHotMarketsGamma:
 
         async def _run() -> list[tuple[str, dict[str, Any]]]:
             with patch.object(
-                _markets, "make_async_client_resolved",
+                _markets,
+                "make_async_client_resolved",
                 AsyncMock(return_value=fake),
             ):
-                return await _markets.fetch_hot_markets_gamma(
-                    min_vol=100_000.0, limit=200
-                )
+                return await _markets.fetch_hot_markets_gamma(min_vol=100_000.0, limit=200)
 
         out = asyncio.get_event_loop().run_until_complete(_run())
         assert out == []
@@ -3304,12 +3496,8 @@ class TestFetchHotMarketsGamma:
             return _FakeGammaClient([])
 
         async def _run() -> list[tuple[str, dict[str, Any]]]:
-            with patch.object(
-                _markets, "make_async_client_resolved", _factory
-            ):
-                return await _markets.fetch_hot_markets_gamma(
-                    min_vol=0.0, limit=0
-                )
+            with patch.object(_markets, "make_async_client_resolved", _factory):
+                return await _markets.fetch_hot_markets_gamma(min_vol=0.0, limit=0)
 
         out = asyncio.get_event_loop().run_until_complete(_run())
         assert out == []
@@ -3337,12 +3525,8 @@ class _HotMarketFixtureSpyDS(FixtureDataSource):
     async def get_markets_by_volume(
         self, *, min_volume_24h: float = 100_000.0, limit: int = 200
     ) -> list[Any]:
-        self.gmbv_calls.append(
-            {"min_volume_24h": min_volume_24h, "limit": limit}
-        )
-        return await super().get_markets_by_volume(
-            min_volume_24h=min_volume_24h, limit=limit
-        )
+        self.gmbv_calls.append({"min_volume_24h": min_volume_24h, "limit": limit})
+        return await super().get_markets_by_volume(min_volume_24h=min_volume_24h, limit=limit)
 
 
 class TestDiscoverHotMarketHoldersDatasourceSplit:
@@ -3365,16 +3549,15 @@ class TestDiscoverHotMarketHoldersDatasourceSplit:
             async def _fake_process(w: str, s: str, **kw: Any) -> None:
                 processed.append((w, s))
 
-            with patch.object(
-                wmod, "fetch_hot_markets_gamma", _fake_gamma
-            ), patch.object(worker, "_process_wallet", _fake_process):
+            with (
+                patch.object(wmod, "fetch_hot_markets_gamma", _fake_gamma),
+                patch.object(worker, "_process_wallet", _fake_process),
+            ):
                 await worker.discover_hot_market_holders()
 
         asyncio.get_event_loop().run_until_complete(_run())
         # Fixture path used the frozen method with the unchanged args …
-        assert ds.gmbv_calls == [
-            {"min_volume_24h": 100_000.0, "limit": 200}
-        ]
+        assert ds.gmbv_calls == [{"min_volume_24h": 100_000.0, "limit": 200}]
         # … and the live gamma source was NOT touched.
         assert gamma_called["n"] == 0
         # All surfaced wallets are tagged with the hot_market_holders src.
@@ -3390,9 +3573,7 @@ class TestDiscoverHotMarketHoldersDatasourceSplit:
 
         class _LiveLikeDS:
             async def get_markets_by_volume(self, **_kw: Any) -> list[Any]:
-                raise AssertionError(
-                    "live path must NOT call the frozen (404) method"
-                )
+                raise AssertionError("live path must NOT call the frozen (404) method")
 
             async def get_market_top_holders(
                 self, condition_id: str, *, limit: int = 10
@@ -3404,9 +3585,7 @@ class TestDiscoverHotMarketHoldersDatasourceSplit:
                     )
                 ]
 
-        async def _fake_gamma(
-            *, min_vol: float, limit: int
-        ) -> list[tuple[str, dict[str, Any]]]:
+        async def _fake_gamma(*, min_vol: float, limit: int) -> list[tuple[str, dict[str, Any]]]:
             assert min_vol == 100_000.0
             return [("0xcond_a", {}), ("0xcond_b", {})]
 
@@ -3421,9 +3600,10 @@ class TestDiscoverHotMarketHoldersDatasourceSplit:
             async def _fake_process(w: str, s: str, **kw: Any) -> None:
                 processed.append((w, s))
 
-            with patch.object(
-                wmod, "fetch_hot_markets_gamma", _fake_gamma
-            ), patch.object(worker, "_process_wallet", _fake_process):
+            with (
+                patch.object(wmod, "fetch_hot_markets_gamma", _fake_gamma),
+                patch.object(worker, "_process_wallet", _fake_process),
+            ):
                 await worker.discover_hot_market_holders()
 
         asyncio.get_event_loop().run_until_complete(_run())
@@ -3445,13 +3625,9 @@ class TestDiscoverHotMarketHoldersDatasourceSplit:
             async def get_market_top_holders(
                 self, condition_id: str, *, limit: int = 10
             ) -> list[PositionRecord]:
-                raise AssertionError(
-                    "must not be reached when no markets resolved"
-                )
+                raise AssertionError("must not be reached when no markets resolved")
 
-        async def _empty_gamma(
-            *, min_vol: float, limit: int
-        ) -> list[tuple[str, dict[str, Any]]]:
+        async def _empty_gamma(*, min_vol: float, limit: int) -> list[tuple[str, dict[str, Any]]]:
             return []
 
         processed: list[tuple[str, str]] = []
@@ -3465,9 +3641,10 @@ class TestDiscoverHotMarketHoldersDatasourceSplit:
             async def _fake_process(w: str, s: str, **kw: Any) -> None:
                 processed.append((w, s))
 
-            with patch.object(
-                wmod, "fetch_hot_markets_gamma", _empty_gamma
-            ), patch.object(worker, "_process_wallet", _fake_process):
+            with (
+                patch.object(wmod, "fetch_hot_markets_gamma", _empty_gamma),
+                patch.object(worker, "_process_wallet", _fake_process),
+            ):
                 with caplog.at_level("WARNING"):
                     await worker.discover_hot_market_holders()
 
@@ -3509,15 +3686,9 @@ class TestPnlSigmoidScaleFidelity:
         # pnl_norm = 100*sigmoid(pnl/250k); profit_score weight = 0.25.
         # $50K → 13.7458, $250K → 18.2765, $1M → 24.5503  (4dp, the
         # documented discrimination band the 10K scale had flattened).
-        assert profit_score(self._pnl_only(50_000.0)) == pytest.approx(
-            13.7458, abs=1e-3
-        )
-        assert profit_score(self._pnl_only(250_000.0)) == pytest.approx(
-            18.2765, abs=1e-3
-        )
-        assert profit_score(self._pnl_only(1_000_000.0)) == pytest.approx(
-            24.5503, abs=1e-3
-        )
+        assert profit_score(self._pnl_only(50_000.0)) == pytest.approx(13.7458, abs=1e-3)
+        assert profit_score(self._pnl_only(250_000.0)) == pytest.approx(18.2765, abs=1e-3)
+        assert profit_score(self._pnl_only(1_000_000.0)) == pytest.approx(24.5503, abs=1e-3)
 
     def test_discriminates_across_real_top200_band(self) -> None:
         """The whole point of the fix: $250K and $1M must NOT collapse to
@@ -3534,18 +3705,12 @@ class TestPnlSigmoidScaleFidelity:
 
     def test_zero_pnl_still_midpoint(self) -> None:
         # Shape preserved: sigmoid(0)=0.5 → 12.5 with 0.25 weight.
-        assert profit_score(self._pnl_only(0.0)) == pytest.approx(
-            12.5, abs=1e-6
-        )
+        assert profit_score(self._pnl_only(0.0)) == pytest.approx(12.5, abs=1e-6)
 
     def test_extremes_still_saturate(self) -> None:
         # Numerical-stability contract is unchanged by the rescale.
-        assert profit_score(self._pnl_only(1e12)) == pytest.approx(
-            25.0, abs=1e-3
-        )
-        assert profit_score(self._pnl_only(-1e12)) == pytest.approx(
-            0.0, abs=1e-6
-        )
+        assert profit_score(self._pnl_only(1e12)) == pytest.approx(25.0, abs=1e-3)
+        assert profit_score(self._pnl_only(-1e12)) == pytest.approx(0.0, abs=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -3567,18 +3732,27 @@ class TestVerifiedFirstBudgetOrdering:
         # verified pair must be selected; the low-hex unverified loses.
         entries = [
             LeaderboardEntry(
-                rank=1, wallet="0x0000000000000000000000000000000000000001",
-                username="lowhex_unverified", pnl=1.0, volume=1.0,
+                rank=1,
+                wallet="0x0000000000000000000000000000000000000001",
+                username="lowhex_unverified",
+                pnl=1.0,
+                volume=1.0,
                 verified=False,
             ),
             LeaderboardEntry(
-                rank=2, wallet="0x00000000000000000000000000000000000000ff",
-                username="hi_verified_b", pnl=1.0, volume=1.0,
+                rank=2,
+                wallet="0x00000000000000000000000000000000000000ff",
+                username="hi_verified_b",
+                pnl=1.0,
+                volume=1.0,
                 verified=True,
             ),
             LeaderboardEntry(
-                rank=3, wallet="0x00000000000000000000000000000000000000aa",
-                username="hi_verified_a", pnl=1.0, volume=1.0,
+                rank=3,
+                wallet="0x00000000000000000000000000000000000000aa",
+                username="hi_verified_a",
+                pnl=1.0,
+                volume=1.0,
                 verified=True,
             ),
         ]
@@ -3603,12 +3777,10 @@ class TestVerifiedFirstBudgetOrdering:
             async def _fake_full(w: str, s: str, **_k: Any) -> None:
                 full_called.append(w)
 
-            with patch.object(
-                wmod, "_upsert_thin", _thin
-            ), patch.object(
-                wmod, "_DISCOVERY_DETAIL_BUDGET", 2
-            ), patch.object(
-                worker, "_process_wallet", _fake_full
+            with (
+                patch.object(wmod, "_upsert_thin", _thin),
+                patch.object(wmod, "_DISCOVERY_DETAIL_BUDGET", 2),
+                patch.object(worker, "_process_wallet", _fake_full),
             ):
                 await worker.discover_leaderboard()
 
@@ -3619,10 +3791,7 @@ class TestVerifiedFirstBudgetOrdering:
             "0x00000000000000000000000000000000000000aa",
             "0x00000000000000000000000000000000000000ff",
         ]
-        assert (
-            "0x0000000000000000000000000000000000000001"
-            not in full_called
-        )
+        assert "0x0000000000000000000000000000000000000001" not in full_called
 
 
 # ---------------------------------------------------------------------------
@@ -3637,9 +3806,7 @@ class TestVerifiedFirstBudgetOrdering:
 
 class TestPerSourceHeartbeatCounters:
     def test_counters_seeded_with_all_source_keys(self) -> None:
-        worker = DiscoveryWorker(
-            FixtureDataSource(), follower_capital_usd=1000.0
-        )
+        worker = DiscoveryWorker(FixtureDataSource(), follower_capital_usd=1000.0)
         for key in (
             "hot_market_holders",
             "leaderboard",
@@ -3679,9 +3846,7 @@ class TestPerSourceHeartbeatCounters:
     def test_drain_resets_all_keys_including_sources(self) -> None:
         """A drained heartbeat must keep reporting every source key (a
         dead source = ``<source>: 0``, never a vanished key)."""
-        worker = DiscoveryWorker(
-            FixtureDataSource(), follower_capital_usd=1000.0
-        )
+        worker = DiscoveryWorker(FixtureDataSource(), follower_capital_usd=1000.0)
         worker._pass_counters["hot_market_holders"] = 7
         worker._pass_counters["scanned"] = 9
 

@@ -62,7 +62,12 @@ from polyecho.discovery.frequency import (
     compute_frequency_stats,
 )
 from polyecho.discovery.riskflags import detect_risk_flags
-from polyecho.discovery.scoring import final_score, profit_score, replicability_score
+from polyecho.discovery.scoring import (
+    final_score,
+    profit_score,
+    replicability_score,
+    score_metadata,
+)
 from polyecho.shared.datasource import (
     ActivityRecord,
     DataSource,
@@ -121,6 +126,7 @@ def persistence_enabled() -> bool:
     """
     return _persist_enabled
 
+
 # --- High-score candidate notification threshold (PRD §5.2 / §8.1) --------
 # The PRD ties the dashboard "watching" tier to a strong dual-dimension
 # score; there is no hard-coded number in the PRD, so we pick a sensible
@@ -172,6 +178,7 @@ async def _safe_emit_high_score(
             "candidate_high_score_emit_failed_continuing",
             extra={"wallet": wallet, "error": str(exc)},
         )
+
 
 # --- Large-new-position discovery thresholds (PRD §5.2) --------------------
 # A wallet qualifies when a *single* recent trade has notional above this
@@ -382,10 +389,25 @@ def _compute_stats(
 
     trades_per_day, total_trades, first_trade_at
         Raw counts for risk-flag usage.
+
+    unavailable_inputs
+        PolyHermes deep-dive B2 — audit list of scoring-input names whose
+        SOURCE DATA was genuinely missing (a failed/empty fetch), as
+        opposed to a real measured zero.  ``win_rate`` lands here when no
+        priced SELL exists to measure a win/lose ratio; ``sharpe`` lands
+        here when there are < 2 daily-PnL points to compute a deviation.
+        When the wallet has NO trades at all every input is unavailable.
+        :func:`~polyecho.discovery.scoring.score_metadata` reads this list
+        to set the ``low_confidence`` flag — a consumer must not treat a
+        score built on unavailable inputs as a confirmed signal.
     """
     trades = [r for r in activity if r.activity_type == "TRADE"]
 
     if not trades:
+        # No trades at all: NOTHING was measured.  The numeric defaults
+        # below keep ``profit_score`` from crashing, but ``unavailable_inputs``
+        # records that they are placeholders, NOT measured zeros — so the
+        # score is flagged low-confidence and never read as "verified".
         return {
             "pnl_usd": 0.0,
             "win_rate": 0.0,
@@ -396,6 +418,14 @@ def _compute_stats(
             "trades_per_day": 0.0,
             "total_trades": 0,
             "first_trade_at": None,
+            "unavailable_inputs": [
+                "pnl_usd",
+                "win_rate",
+                "sharpe",
+                "max_drawdown",
+                "consistency",
+                "specialization",
+            ],
         }
 
     # ── daily PnL series ──────────────────────────────────────────────────────
@@ -412,6 +442,11 @@ def _compute_stats(
     pnl_series = [daily_pnl[d] for d in sorted(daily_pnl)]
     total_pnl = sum(pnl_series)
 
+    # PolyHermes deep-dive B2 — audit list of inputs that could NOT be
+    # measured (no data), kept distinct from a real measured zero so the
+    # score can be flagged low-confidence rather than silently trusted.
+    unavailable_inputs: list[str] = []
+
     # ── win_rate ──────────────────────────────────────────────────────────────
     # P1-9b: a SELL whose ``usdc_size is None`` is *missing data*, NOT a
     # zero-value (losing) close.  The old code counted it via
@@ -420,14 +455,15 @@ def _compute_stats(
     # Only SELLs with a known notional are admissible to the win/lose
     # denominator; ``usdc_size is None`` rows are excluded entirely.
     priced_sell_usdc: list[float] = [
-        r.usdc_size
-        for r in trades
-        if r.side == "SELL" and r.usdc_size is not None
+        r.usdc_size for r in trades if r.side == "SELL" and r.usdc_size is not None
     ]
     wins = sum(1 for u in priced_sell_usdc if u > 0)
-    win_rate = (
-        wins / len(priced_sell_usdc) if priced_sell_usdc else 0.0
-    )
+    win_rate = wins / len(priced_sell_usdc) if priced_sell_usdc else 0.0
+    # B2: with no priced SELL there is NO win/lose ratio to measure — the
+    # 0.0 above is a placeholder, not a 0 % win-rate.  Flag it unavailable
+    # so a pure-BUY or unpriced sample is not read as a confirmed loser.
+    if not priced_sell_usdc:
+        unavailable_inputs.append("win_rate")
 
     # ── Sharpe (daily, assume rf=0) ───────────────────────────────────────────
     if len(pnl_series) >= 2:
@@ -436,7 +472,10 @@ def _compute_stats(
         std_d = math.sqrt(var_d) if var_d > 0 else 1e-9
         sharpe = (mean_d / std_d) * math.sqrt(365.0)
     else:
+        # B2: < 2 daily-PnL points means a deviation cannot be computed —
+        # the 0.0 is "not enough data", NOT a measured Sharpe of zero.
         sharpe = 0.0
+        unavailable_inputs.append("sharpe")
 
     # ── max drawdown ──────────────────────────────────────────────────────────
     cum_pnl = 0.0
@@ -480,6 +519,9 @@ def _compute_stats(
         "trades_per_day": round(trades_per_day, 4),
         "total_trades": total_trades,
         "first_trade_at": first_trade_at,
+        # B2: empty when every input was measured; lists input names whose
+        # source data was missing so the score can be flagged low-confidence.
+        "unavailable_inputs": unavailable_inputs,
     }
 
 
@@ -679,9 +721,7 @@ async def _upsert_candidate(
             "total_score": f_score,
             "stats": stats_30d,
         }
-        dialect_name = (
-            session.bind.dialect.name if session.bind is not None else "postgresql"
-        )
+        dialect_name = session.bind.dialect.name if session.bind is not None else "postgresql"
         if dialect_name == "sqlite":
             sqlite_hist = sqlite_insert(CandidateScoreHistory).values(**hist_values)
             await session.execute(
@@ -1020,8 +1060,7 @@ def _needs_full_detail(
         leaderboard_pnl is not None
         and isinstance(prev_pnl, (int, float))
         and abs(prev_pnl) > 0.0
-        and abs(leaderboard_pnl - prev_pnl) / abs(prev_pnl)
-        >= _DISCOVERY_PNL_DELTA_FRAC
+        and abs(leaderboard_pnl - prev_pnl) / abs(prev_pnl) >= _DISCOVERY_PNL_DELTA_FRAC
     ):
         return True  # pnl swung materially either way
 
@@ -1084,9 +1123,7 @@ class DiscoveryWorker:
         # place so the source keys can never drift out of sync with the
         # ctor (a missing key would make a dead source *vanish* from the
         # heartbeat instead of reporting 0).
-        self._pass_counter_zero: dict[str, int] = dict.fromkeys(
-            self._pass_counters, 0
-        )
+        self._pass_counter_zero: dict[str, int] = dict.fromkeys(self._pass_counters, 0)
 
     @property
     def datasource_name(self) -> str:
@@ -1178,12 +1215,8 @@ class DiscoveryWorker:
             # (unchanged failure semantics: scanned-not-scored, early
             # return).
             activity_90d, redeems_90d, positions = await asyncio.gather(
-                self._ds.get_user_activity(
-                    wallet, start=start, activity_type="TRADE", limit=None
-                ),
-                self._ds.get_user_activity(
-                    wallet, start=start, activity_type="REDEEM", limit=None
-                ),
+                self._ds.get_user_activity(wallet, start=start, activity_type="TRADE", limit=None),
+                self._ds.get_user_activity(wallet, start=start, activity_type="REDEEM", limit=None),
                 self._ds.get_positions(wallet, size_threshold=0.0),
             )
             # Determinism (L1): the live/fixture sources return
@@ -1241,6 +1274,15 @@ class DiscoveryWorker:
             self._follower_capital,
         )
         f_score = final_score(p_score, r_score)
+
+        # PolyHermes deep-dive B2 — stamp the score-trust metadata
+        # (score_version + low_confidence flag + reasons) onto stats_30d
+        # BEFORE the upsert.  stats_30d is the JSONB that lands in BOTH
+        # candidate_leaders.stats_30d AND candidate_score_history.stats,
+        # so the version + flag travel inside the existing schema-free
+        # payload — no new DB column.  Built from the 30d window because
+        # that is the window profit_score is scored on.
+        stats_30d.update(score_metadata(stats_30d))
 
         # last_active_at: most recent trade timestamp in 90d window.
         # This same value is the L2 ``last_seen_ts`` cursor high-water
@@ -1383,8 +1425,7 @@ class DiscoveryWorker:
         # from ``ordered``); the budget slice is therefore deterministic.
         budgeted = detail_candidates[:_DISCOVERY_DETAIL_BUDGET]
         logger.info(
-            "discover_leaderboard: %d/%d entries selected for full detail "
-            "(budget %d)",
+            "discover_leaderboard: %d/%d entries selected for full detail (budget %d)",
             len(budgeted),
             len(ordered),
             _DISCOVERY_DETAIL_BUDGET,
@@ -1438,9 +1479,7 @@ class DiscoveryWorker:
         logger.info("discover_hot_market_holders: start")
         condition_ids: list[str] = []
         if isinstance(self._ds, FixtureDataSource):
-            markets = await self._ds.get_markets_by_volume(
-                min_volume_24h=100_000.0, limit=200
-            )
+            markets = await self._ds.get_markets_by_volume(min_volume_24h=100_000.0, limit=200)
             condition_ids = [m.condition_id for m in markets]
         else:
             # Live path: caller-side gamma-api source (data-api
@@ -1456,16 +1495,12 @@ class DiscoveryWorker:
                     },
                 )
             condition_ids = [cid for cid, _row in hot]
-        logger.info(
-            "discover_hot_market_holders: %d hot markets", len(condition_ids)
-        )
+        logger.info("discover_hot_market_holders: %d hot markets", len(condition_ids))
 
         seen: set[str] = set()
         for condition_id in condition_ids:
             try:
-                holders = await self._ds.get_market_top_holders(
-                    condition_id, limit=10
-                )
+                holders = await self._ds.get_market_top_holders(condition_id, limit=10)
             except Exception:
                 logger.exception(
                     "failed to fetch holders for market",
@@ -1569,9 +1604,7 @@ class DiscoveryWorker:
             except Exception:
                 logger.warning("could not fetch leaderboard for large-position scan")
 
-        window_start = datetime.now(tz=UTC) - timedelta(
-            hours=_LARGE_POSITION_WINDOW_HOURS
-        )
+        window_start = datetime.now(tz=UTC) - timedelta(hours=_LARGE_POSITION_WINDOW_HOURS)
         # L2: one batched cursor read for the whole pool (no per-wallet
         # query).  Per wallet the effective lower bound is the LATER of
         # the 24 h trailing window and its persisted cursor — so we never
@@ -1674,9 +1707,7 @@ class DiscoveryWorker:
                 extra={
                     "cycle": cycle,
                     "discovery_cycle_seconds": round(seconds, 3),
-                    "discovery_cycle_target_seconds": (
-                        DISCOVERY_CYCLE_TARGET_SECONDS
-                    ),
+                    "discovery_cycle_target_seconds": (DISCOVERY_CYCLE_TARGET_SECONDS),
                     "candidate_count": len(self._known_wallets),
                 },
             )
