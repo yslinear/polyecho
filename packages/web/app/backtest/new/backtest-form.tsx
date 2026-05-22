@@ -242,7 +242,11 @@ export function BacktestForm({
             )}
           />
 
-          <div className="grid grid-cols-2 gap-5">
+          {/* Stack on a narrow screen: a native date input has a wide
+              intrinsic min-width (iOS Safari especially) and will not
+              shrink, so a 2-up grid overflows and the two pickers visibly
+              overlap on a phone. Side-by-side only once there is room. */}
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
             <FormField
               control={form.control}
               name="start_date"
