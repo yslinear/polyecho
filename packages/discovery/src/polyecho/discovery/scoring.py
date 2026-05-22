@@ -71,6 +71,26 @@ SCORE_VERSION: str = "discovery-v2"
 MIN_SAMPLE_TRADES: int = 10
 
 # ---------------------------------------------------------------------------
+# Sample-size promotion-score cap (C1-P4 — the "59 below 60" trick)
+# ---------------------------------------------------------------------------
+# The C1 lifecycle ladder (C1-P3 state machine) gates both
+# ``discovered -> candidate`` and ``candidate -> paper`` on ``score >= 60``.
+# PolyHermes' leader-research scoring caps the total score at 59 (exactly
+# ONE point below that 60 promotion gate) whenever the candidate's trade
+# sample is too small, so a single big win can NEVER auto-promote a leader
+# up the ladder on an unvalidated tiny sample.
+#
+# PolyEcho mirrors that here: :func:`score_metadata` computes a dedicated
+# ``promotion_score`` field = the raw ``total_score`` normally, but HARD-
+# CAPPED at this value when the score is low-confidence on a small sample
+# (``small_sample`` reason — i.e. ``total_trades < MIN_SAMPLE_TRADES``).
+# The C1-P3 gate reads ``promotion_score``; the raw ``total_score`` stays
+# untouched and fully visible (column + UI) so the cap is non-destructive
+# and auditable.  60.0 - 1.0 = 59.0: just below the gate, by construction.
+PROMOTION_SCORE_GATE: float = 60.0
+PROMOTION_SCORE_CAP: float = PROMOTION_SCORE_GATE - 1.0  # 59.0
+
+# ---------------------------------------------------------------------------
 # Follower waking-hours reference (Asia/Taipei, UTC+8)
 # Assumed monitoring window: 08:00–23:00 Taipei = 00:00–15:00 UTC
 # ---------------------------------------------------------------------------
@@ -299,7 +319,11 @@ def final_score(
     return round(_clamp(p_score * (r_score / 100.0), 0.0, 100.0), 4)
 
 
-def score_metadata(stats: dict[str, Any]) -> dict[str, Any]:
+def score_metadata(
+    stats: dict[str, Any],
+    *,
+    total_score: float | None = None,
+) -> dict[str, Any]:
     """Build the score-trust metadata block for a scored candidate.
 
     PolyHermes deep-dive B2 (``copy-trading-risk-seatbelt``): a positive
@@ -308,10 +332,18 @@ def score_metadata(stats: dict[str, Any]) -> dict[str, Any]:
     version string so a future formula change is distinguishable in the
     persisted data.
 
+    C1-P4 (the "59 below 60" trick): the C1 lifecycle ladder gates
+    ``discovered -> candidate`` and ``candidate -> paper`` on
+    ``score >= 60``.  This function additionally derives a
+    ``promotion_score`` that the ladder gate reads INSTEAD of the raw
+    ``total_score`` — capped at :data:`PROMOTION_SCORE_CAP` (59.0) on a
+    small sample so a single big win can never auto-promote a leader on an
+    unvalidated tiny sample.  The raw ``total_score`` is left untouched.
+
     The returned dict is merged into the candidate's ``stats_30d`` JSONB
     payload (which is also what ``candidate_score_history.stats`` stores) —
-    no new DB column is required, the version + flag travel inside the
-    existing schema-free JSONB.
+    no new DB column is required, the version + flag + capped promotion
+    score all travel inside the existing schema-free JSONB.
 
     Keys produced
     -------------
@@ -330,12 +362,24 @@ def score_metadata(stats: dict[str, Any]) -> dict[str, Any]:
     sample_trades
         The observed ``total_trades`` count the confidence call was made
         on (echoed for the UI so it can show "n=N").
+    promotion_score
+        The C1 lifecycle-ladder gating score.  Equals the raw
+        ``total_score`` EXCEPT when the candidate's trade sample is below
+        :data:`MIN_SAMPLE_TRADES` (the ``small_sample`` reason): then it
+        is hard-capped at :data:`PROMOTION_SCORE_CAP` (59.0), one point
+        below the 60 promotion gate, so a tiny-sample candidate can never
+        be auto-promoted up the ladder.  When ``total_score`` is not
+        supplied this key is omitted (callers that only want the trust
+        flags — e.g. the B2 unit tests — need not pass a score).
 
     Args:
         stats: The ``stats_30d`` dict from :func:`_compute_stats`.  Reads
             ``total_trades`` and the ``unavailable_inputs`` audit list (a
             list of input names whose source data was missing — see
             ``_compute_stats``); both default to a safe value when absent.
+        total_score: The candidate's raw :func:`final_score` (0-100).  When
+            given, a sample-size-capped ``promotion_score`` is added to the
+            returned dict.  ``None`` (the default) omits ``promotion_score``.
 
     Returns:
         A metadata dict ready to merge into the score JSON payload.
@@ -347,14 +391,28 @@ def score_metadata(stats: dict[str, Any]) -> dict[str, Any]:
     unavailable_inputs: list[str] = list(stats.get("unavailable_inputs", []))
 
     reasons: list[str] = []
-    if total_trades < MIN_SAMPLE_TRADES:
+    small_sample = total_trades < MIN_SAMPLE_TRADES
+    if small_sample:
         reasons.append("small_sample")
     if unavailable_inputs:
         reasons.append("unavailable_inputs")
 
-    return {
+    meta: dict[str, Any] = {
         "score_version": SCORE_VERSION,
         "low_confidence": bool(reasons),
         "low_confidence_reasons": sorted(reasons),
         "sample_trades": total_trades,
     }
+
+    # C1-P4: the lifecycle-ladder gating score.  CONSISTENT WITH the B2
+    # ``low_confidence`` flag by construction — the cap is keyed on the
+    # SAME ``small_sample`` predicate (``total_trades < MIN_SAMPLE_TRADES``)
+    # that adds the ``small_sample`` reason above, so a capped score is
+    # always also low-confidence.  An ``unavailable_inputs``-only
+    # low-confidence score is NOT capped: that flag means a metric could
+    # not be measured, not that the sample is too small to promote on.
+    if total_score is not None:
+        promo = min(float(total_score), PROMOTION_SCORE_CAP) if small_sample else float(total_score)
+        meta["promotion_score"] = round(_clamp(promo, 0.0, 100.0), 4)
+
+    return meta

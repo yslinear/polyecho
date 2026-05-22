@@ -1289,7 +1289,14 @@ class DiscoveryWorker:
         # so the version + flag travel inside the existing schema-free
         # payload — no new DB column.  Built from the 30d window because
         # that is the window profit_score is scored on.
-        stats_30d.update(score_metadata(stats_30d))
+        #
+        # C1-P4 — also pass the raw final score so score_metadata derives
+        # the sample-size-capped ``promotion_score`` (== f_score normally,
+        # hard-capped at 59 on a <10-trade sample).  The C1 lifecycle
+        # ladder (C1-P3) reads ``stats_30d['promotion_score']`` for its
+        # ``score >= 60`` gate; the raw ``total_score`` column stays
+        # untouched so the cap is non-destructive and auditable.
+        stats_30d.update(score_metadata(stats_30d, total_score=f_score))
 
         # last_active_at: most recent trade timestamp in 90d window.
         # This same value is the L2 ``last_seen_ts`` cursor high-water

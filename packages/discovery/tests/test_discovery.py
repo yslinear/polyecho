@@ -33,6 +33,8 @@ from polyecho.discovery.frequency import (
 from polyecho.discovery.riskflags import detect_risk_flags
 from polyecho.discovery.scoring import (
     MIN_SAMPLE_TRADES,
+    PROMOTION_SCORE_CAP,
+    PROMOTION_SCORE_GATE,
     SCORE_VERSION,
     final_score,
     profit_score,
@@ -571,6 +573,109 @@ class TestComputeStatsUnavailableVsZero:
         stats = _compute_stats(records, window_days=30)
         assert stats["unavailable_inputs"] == []
         assert score_metadata(stats)["low_confidence"] is False
+
+
+# ---------------------------------------------------------------------------
+# §2c — promotion_score: the sample-size cap (C1-P4 — "59 below 60")
+# ---------------------------------------------------------------------------
+
+
+class TestPromotionScoreCap:
+    """C1-P4 — the lifecycle-ladder gating score is capped on a tiny sample.
+
+    The C1 ladder (C1-P3 state machine) gates ``discovered -> candidate``
+    and ``candidate -> paper`` on ``score >= 60``.  ``score_metadata``
+    derives a dedicated ``promotion_score`` (== raw ``total_score``
+    normally) that is HARD-CAPPED at 59 — exactly one point below the
+    gate — whenever the candidate's trade sample is below
+    ``MIN_SAMPLE_TRADES``, so a single big win can never auto-promote a
+    leader on an unvalidated tiny sample.  The cap is keyed on the SAME
+    small-sample predicate as the B2 ``low_confidence`` flag.
+    """
+
+    def test_cap_is_one_below_the_gate(self) -> None:
+        # The cap must sit just below the C1-P3 promotion gate by
+        # construction — 60 gate → 59 cap.
+        assert PROMOTION_SCORE_GATE == 60.0
+        assert PROMOTION_SCORE_CAP == 59.0
+        assert PROMOTION_SCORE_CAP < PROMOTION_SCORE_GATE
+
+    def test_small_sample_high_score_cannot_reach_the_gate(self) -> None:
+        # A <10-trade candidate with a genuinely high raw score (95) gets a
+        # promotion_score capped at 59 → the C1-P3 ``>= 60`` gate FAILS.
+        meta = score_metadata(
+            {"total_trades": MIN_SAMPLE_TRADES - 1, "unavailable_inputs": []},
+            total_score=95.0,
+        )
+        assert meta["promotion_score"] == PROMOTION_SCORE_CAP
+        assert meta["promotion_score"] < PROMOTION_SCORE_GATE
+        # …and it is consistent with the B2 low-confidence flag.
+        assert meta["low_confidence"] is True
+        assert "small_sample" in meta["low_confidence_reasons"]
+
+    def test_small_sample_with_only_one_trade_still_capped(self) -> None:
+        # The 59-below-60 trick: even a single huge win cannot auto-promote.
+        meta = score_metadata(
+            {"total_trades": 1, "unavailable_inputs": []},
+            total_score=100.0,
+        )
+        assert meta["promotion_score"] == PROMOTION_SCORE_CAP
+
+    def test_large_sample_high_score_is_not_capped(self) -> None:
+        # A >=10-trade candidate with a genuine high score keeps it — the
+        # promotion_score equals the raw score and clears the 60 gate.
+        meta = score_metadata(
+            {"total_trades": 500, "unavailable_inputs": []},
+            total_score=87.5,
+        )
+        assert meta["promotion_score"] == 87.5
+        assert meta["promotion_score"] >= PROMOTION_SCORE_GATE
+        assert meta["low_confidence"] is False
+
+    def test_sample_exactly_at_floor_is_not_capped(self) -> None:
+        # Exactly MIN_SAMPLE_TRADES is a trustworthy sample → no cap.
+        meta = score_metadata(
+            {"total_trades": MIN_SAMPLE_TRADES, "unavailable_inputs": []},
+            total_score=72.0,
+        )
+        assert meta["promotion_score"] == 72.0
+
+    def test_small_sample_low_raw_score_is_left_below_the_cap(self) -> None:
+        # The cap is a CEILING, never a floor — a small-sample score
+        # already below 59 is not raised up to it.
+        meta = score_metadata(
+            {"total_trades": 3, "unavailable_inputs": []},
+            total_score=20.0,
+        )
+        assert meta["promotion_score"] == 20.0
+
+    def test_unavailable_inputs_only_does_not_cap(self) -> None:
+        # An unavailable-input low-confidence score on a LARGE sample is
+        # NOT capped: that flag means a metric could not be measured, not
+        # that the sample is too small to promote on.
+        meta = score_metadata(
+            {"total_trades": 500, "unavailable_inputs": ["sharpe"]},
+            total_score=88.0,
+        )
+        assert meta["low_confidence"] is True
+        assert meta["promotion_score"] == 88.0
+
+    def test_promotion_score_omitted_when_no_total_score(self) -> None:
+        # Callers that only want the B2 trust flags need not pass a score;
+        # promotion_score is then absent (back-compat with the B2 callers).
+        meta = score_metadata({"total_trades": 500, "unavailable_inputs": []})
+        assert "promotion_score" not in meta
+
+    def test_capped_score_consistent_with_low_confidence(self) -> None:
+        # Whenever promotion_score is capped, low_confidence MUST be True
+        # (the cap and the flag share the small-sample predicate).
+        for n in range(0, MIN_SAMPLE_TRADES):
+            meta = score_metadata(
+                {"total_trades": n, "unavailable_inputs": []},
+                total_score=99.0,
+            )
+            assert meta["promotion_score"] == PROMOTION_SCORE_CAP
+            assert meta["low_confidence"] is True
 
 
 # ---------------------------------------------------------------------------
