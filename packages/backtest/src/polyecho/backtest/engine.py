@@ -177,6 +177,7 @@ class BacktestResult:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to a JSONB-compatible dict for storage in backtest_jobs.result."""
+
         # Convert pnl_curve pd.Series → list of [date_str, value] pairs
         def series_to_list(s: pd.Series) -> list[list[Any]]:
             if s.empty:
@@ -425,6 +426,7 @@ class BacktestEngine:
         # Re-use params but with effective_leader baked in for to_dict()
         if effective_leader != params.leader_address:
             from dataclasses import replace
+
             params = replace(params, leader_address=effective_leader)
 
         logger.info(
@@ -477,9 +479,7 @@ class BacktestEngine:
             cond_id = trade.condition_id or ""
 
             # ---- Track leader's own PnL (no slippage, no risk gate) --------
-            self._update_leader_tracking(
-                leader_open, leader_daily_pnl, trade, positions_map
-            )
+            self._update_leader_tracking(leader_open, leader_daily_pnl, trade, positions_map)
 
             # ---- C4: SELL with no matching open BUY ------------------------
             # A SELL whose condition_id is not in open_positions has no copy
@@ -495,23 +495,16 @@ class BacktestEngine:
             if side == "SELL" and cond_id not in open_positions:
                 skip_stats.risk_triggered += 1
                 skip_stats.total += 1
-                trade_log.append(
-                    self._skip_entry(trade, "no_open_position", params)
-                )
+                trade_log.append(self._skip_entry(trade, "no_open_position", params))
                 continue
 
             # ---- Category whitelist filter ---------------------------------
             if params.category_whitelist is not None:
                 title = str(trade.raw.get("title") or "")
-                if not any(
-                    cat.lower() in title.lower()
-                    for cat in params.category_whitelist
-                ):
+                if not any(cat.lower() in title.lower() for cat in params.category_whitelist):
                     skip_stats.category_filtered += 1
                     skip_stats.total += 1
-                    trade_log.append(
-                        self._skip_entry(trade, "category_filtered", params)
-                    )
+                    trade_log.append(self._skip_entry(trade, "category_filtered", params))
                     continue
 
             # ---- Risk gate: daily loss limit --------------------------------
@@ -551,9 +544,7 @@ class BacktestEngine:
             if leader_usdc > 0.0 and copy_usdc > 10.0 * leader_usdc:
                 skip_stats.insufficient_liquidity += 1
                 skip_stats.total += 1
-                trade_log.append(
-                    self._skip_entry(trade, "insufficient_liquidity", params)
-                )
+                trade_log.append(self._skip_entry(trade, "insufficient_liquidity", params))
                 continue
 
             # ---- Adverse fill price (slippage + delay) ---------------------
@@ -591,9 +582,7 @@ class BacktestEngine:
                     # Partial fill not modelled; skip to keep it simple
                     skip_stats.risk_triggered += 1
                     skip_stats.total += 1
-                    trade_log.append(
-                        self._skip_entry(trade, "risk_insufficient_capital", params)
-                    )
+                    trade_log.append(self._skip_entry(trade, "risk_insufficient_capital", params))
                     continue
                 capital_remaining -= copy_usdc + fee_usd
 
@@ -701,9 +690,7 @@ class BacktestEngine:
         last_in_window_price = self._derive_last_known_prices(trade_log)
         mtm_pnl = 0.0
         for cond_id, pos in open_positions.items():
-            last_price = self._get_mtm_price(
-                cond_id, pos, last_in_window_price, positions_map
-            )
+            last_price = self._get_mtm_price(cond_id, pos, last_in_window_price, positions_map)
             resolved, voided = self._resolution_flags(cond_id, positions_map)
             settle_price = compute_settlement_price(
                 last_price,
@@ -715,9 +702,7 @@ class BacktestEngine:
             mtm_pnl += mtm
             trade_log.append(
                 {
-                    "timestamp": datetime.combine(
-                        params.end_date, datetime.min.time()
-                    )
+                    "timestamp": datetime.combine(params.end_date, datetime.min.time())
                     .replace(tzinfo=UTC)
                     .isoformat(),
                     "date": str(params.end_date),
@@ -729,9 +714,7 @@ class BacktestEngine:
                     "copy_shares": pos["shares"],
                     "pnl_usd": mtm,
                     "fee_usd": 0.0,
-                    "opened_at": pos["opened_at"].isoformat()
-                    if pos.get("opened_at")
-                    else None,
+                    "opened_at": pos["opened_at"].isoformat() if pos.get("opened_at") else None,
                     "closed_at": str(params.end_date),
                     "skipped": False,
                 }
@@ -750,11 +733,7 @@ class BacktestEngine:
         # ---- 7. Compute statistics -----------------------------------------
         stats = self._compute_statistics(pnl_curve, trade_log, params)
         total_fees_usd = float(
-            sum(
-                float(e.get("fee_usd") or 0.0)
-                for e in trade_log
-                if not e.get("skipped")
-            )
+            sum(float(e.get("fee_usd") or 0.0) for e in trade_log if not e.get("skipped"))
         )
 
         result = BacktestResult(
@@ -790,66 +769,173 @@ class BacktestEngine:
     # Private helpers
     # -----------------------------------------------------------------------
 
+    # A2: defensive upper bound on cursor iterations so a misbehaving source
+    # (e.g. one that ignores ``start`` and returns the same page forever)
+    # can never spin the backtest into an unbounded loop.  Each datasource
+    # call is itself record-bounded (LiveDataSource stops at offset >= 3000
+    # per call), so 200 pages still admits ~600k trades for one window, far
+    # beyond any real leader's history.
+    _MAX_CURSOR_PAGES = 200
+
     async def _fetch_leader_trades(
         self,
         leader_address: str,
         start_date: date,
         end_date: date,
     ) -> list[ActivityRecord]:
-        """Retrieve all leader TRADE records for the backtest window, time-ordered."""
-        start_dt = datetime.combine(start_date, datetime.min.time()).replace(
-            tzinfo=UTC
-        )
-        end_dt = datetime.combine(end_date, datetime.max.time()).replace(
-            tzinfo=UTC
-        )
-        records = await self._ds.get_user_activity(
-            leader_address,
-            start=start_dt,
-            end=end_dt,
-            activity_type="TRADE",
-        )
+        """Retrieve all leader TRADE records for the backtest window, time-ordered.
 
-        # I7: silent activity truncation.
-        # context7-verified (Polymarket Data API `GET /activity`,
-        # docs.polymarket.com/api-reference/core/get-user-activity): this
-        # endpoint paginates by ``offset`` (max 10000) + ``limit`` (max 500)
-        # ONLY — it exposes NO cursor / next_cursor (cursor pagination exists
-        # only for `GET /markets` keyset and the CLOB `GET /orders`).  Because
-        # the API itself offers no cursor for this endpoint, switching to
-        # cursor pagination is impossible at the source; per the remediation
-        # plan (B-backtest I7: "改 cursor（或記錄 10k 截斷警告）") we take the
-        # documented fallback: emit a loud truncation warning so a very
-        # active leader's window is never silently incomplete.  LiveDataSource
-        # stops at ``offset >= 10_000``, so a returned count at/above that cap
-        # means trades were dropped from the tail of the window.
-        _ACTIVITY_OFFSET_CAP = 10_000  # Polymarket /activity offset hard cap
-        if len(records) >= _ACTIVITY_OFFSET_CAP:
+        A2 (PolyHermes deep-dive): the Polymarket Data API ``/activity``
+        endpoint paginates by ``offset`` only, and ``LiveDataSource`` bounds
+        each call at a fixed record cap (offset >= 3000) to avoid an
+        unbounded sweep.  A single ``get_user_activity`` call therefore
+        truncates a very active leader's history at that cap, silently
+        biasing the backtest toward the most recent trades.
+
+        Per PolyHermes' own ``DATA_API_CURSOR_PAGINATION`` note this is fixed
+        with a ``start`` TIMESTAMP cursor instead of an offset: page forward
+        by re-issuing the query with ``start`` advanced to the maximum
+        timestamp seen so far.  Crucially the cursor is set to
+        ``max(timestamp)`` WITHOUT ``+1`` second, because multiple trades can
+        share the same one-second timestamp; a ``+1`` would skip every
+        same-second sibling of the last record.  Re-including the boundary
+        second instead means the boundary trades reappear on the next page,
+        so the loop dedups by ``transactionHash`` across page boundaries.
+        The ``start`` parameter already exists on the (FROZEN) datasource
+        protocol, so this is implemented entirely here in the engine.
+
+        Fixture mode is unaffected: ``FixtureDataSource`` returns the whole
+        in-window slice in the first call, so the second page yields no new
+        ``transactionHash`` values and the loop terminates after one
+        iteration.
+        """
+        start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=UTC)
+        end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=UTC)
+
+        # Dedup keyed on the on-chain transaction hash.  The hash lives in the
+        # ActivityRecord ``raw`` blob under the data-api field name
+        # ``transactionHash``; ``transaction_hash`` is accepted as a defensive
+        # alias.  A record with no usable hash falls back to a composite key
+        # of its identifying fields so it is still dedup-able across the
+        # boundary-second overlap (it would otherwise be dropped or doubled).
+        seen_keys: set[str] = set()
+        collected: list[ActivityRecord] = []
+        cursor: datetime = start_dt
+        truncated = False
+
+        # The previous batch length, used purely to detect the terminal page:
+        # the per-call record cap is a property of the datasource (it differs
+        # between LiveDataSource and tests), so the engine MUST NOT hardcode
+        # it.  Instead: keep paging while each page keeps yielding new,
+        # cursor-advancing records; stop when a page is strictly shorter than
+        # the prior page (the unambiguous "last page" signal) or yields
+        # nothing new.
+        prev_batch_len: int | None = None
+
+        for _page in range(self._MAX_CURSOR_PAGES):
+            batch = await self._ds.get_user_activity(
+                leader_address,
+                start=cursor,
+                end=end_dt,
+                activity_type="TRADE",
+            )
+            if not batch:
+                break
+
+            new_in_page = 0
+            max_ts: datetime | None = None
+            for rec in batch:
+                key = self._activity_dedup_key(rec)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                collected.append(rec)
+                new_in_page += 1
+                if max_ts is None or rec.timestamp > max_ts:
+                    max_ts = rec.timestamp
+
+            # A page strictly shorter than the previous one is the terminal
+            # page (the source returned fewer records than its per-call cap).
+            # A page no shorter than the previous one means the cap may still
+            # be jamming records, so another cursor step is required.
+            page_looks_full = prev_batch_len is None or len(batch) >= prev_batch_len
+            prev_batch_len = len(batch)
+
+            # The page added nothing new: either the source ignores ``start``
+            # (every record already deduped) or we genuinely reached the tail.
+            # A still-full page that advanced the cursor by zero NEW records
+            # means the per-call cap is jamming the cursor and the tail is
+            # unreachable -> a real truncation.
+            if new_in_page == 0:
+                if page_looks_full:
+                    truncated = True
+                break
+
+            # Advance the cursor to the newest timestamp WITHOUT +1 so
+            # same-second siblings of the boundary trade are not skipped;
+            # the txhash dedup above absorbs the resulting overlap.
+            if max_ts is not None:
+                # If the cursor cannot advance at all (every record shares the
+                # window's first second) a still-full page means the tail past
+                # that second is unreachable -> truncation.
+                if max_ts <= cursor and page_looks_full:
+                    truncated = True
+                    break
+                cursor = max_ts
+
+            # A page shorter than the previous one is, by definition, the
+            # last page; nothing past it remains to fetch.
+            if not page_looks_full:
+                break
+        else:
+            # Loop ran the full _MAX_CURSOR_PAGES without a natural stop.
+            truncated = True
+
+        if truncated:
             logger.warning(
                 "backtest.activity_truncated",
                 extra={
                     "leader": leader_address,
-                    "fetched": len(records),
-                    "offset_cap": _ACTIVITY_OFFSET_CAP,
+                    "fetched": len(collected),
+                    "max_pages": self._MAX_CURSOR_PAGES,
                     "start": str(start_date),
                     "end": str(end_date),
                     "detail": (
-                        "Polymarket /activity offset cap reached; trades "
-                        "beyond the 10,000th in this window were silently "
-                        "dropped (no cursor pagination available for this "
-                        "endpoint). Backtest results for this leader are "
-                        "based on a TRUNCATED activity history."
+                        "Timestamp-cursor pagination could not advance past "
+                        "the datasource per-call record cap (the cursor "
+                        "stalled or the page limit was exhausted). Backtest "
+                        "results for this leader are based on a TRUNCATED "
+                        "activity history."
                     ),
                 },
             )
 
         # DataSource guarantees ascending timestamp order per fixture README,
-        # but sort defensively for live source compatibility.
-        return sorted(records, key=lambda r: r.timestamp)
+        # but sort defensively: cursor pages arrive newest-first per call and
+        # are concatenated across calls, so a final stable sort is required.
+        return sorted(collected, key=lambda r: r.timestamp)
 
-    async def _fetch_positions_map(
-        self, leader_address: str
-    ) -> dict[str, PositionRecord]:
+    @staticmethod
+    def _activity_dedup_key(rec: ActivityRecord) -> str:
+        """Cross-page dedup key for one activity record.
+
+        A2: prefers the on-chain ``transactionHash`` (data-api field name;
+        ``transaction_hash`` accepted as an alias) carried in ``raw``.  When
+        no hash is present (e.g. fixtures, which omit it) a composite of the
+        record's identifying fields is used so the boundary-second overlap
+        introduced by the no-``+1`` cursor is still collapsed deterministically.
+        """
+        raw = rec.raw or {}
+        tx = raw.get("transactionHash") or raw.get("transaction_hash")
+        if tx:
+            return f"tx:{tx}"
+        return (
+            "k:"
+            f"{rec.timestamp.isoformat()}|{rec.condition_id or ''}|"
+            f"{rec.side or ''}|{rec.size}|{rec.price}|{rec.usdc_size}"
+        )
+
+    async def _fetch_positions_map(self, leader_address: str) -> dict[str, PositionRecord]:
         """Return leader's open positions keyed by condition_id (for MTM)."""
         positions = await self._ds.get_positions(leader_address)
         return {p.condition_id: p for p in positions}
@@ -915,9 +1001,7 @@ class BacktestEngine:
         raw = p.raw or {}
         uma = str(raw.get("umaResolutionStatus") or "").lower()
         voided = bool(
-            raw.get("voided")
-            or raw.get("invalid")
-            or uma in ("void", "voided", "invalid")
+            raw.get("voided") or raw.get("invalid") or uma in ("void", "voided", "invalid")
         )
         resolved_flag = raw.get("resolved")
         closed_flag = raw.get("closed")
@@ -929,9 +1013,7 @@ class BacktestEngine:
         # Only assert "not voided" when the raw blob actually carries a
         # void/invalid/uma signal; otherwise leave it unknown (None) so the
         # price-band rule alone decides.
-        void_signal_present = bool(
-            "voided" in raw or "invalid" in raw or uma
-        )
+        void_signal_present = bool("voided" in raw or "invalid" in raw or uma)
         return (resolved, voided if void_signal_present else None)
 
     def _get_mtm_price(
@@ -1028,9 +1110,7 @@ class BacktestEngine:
             pnl = pos["shares"] * (settle_price - pos["price"])
             daily[end_date] += pnl
 
-        series = pd.Series(
-            [daily.get(d, 0.0) for d in idx], index=idx, dtype=float
-        )
+        series = pd.Series([daily.get(d, 0.0) for d in idx], index=idx, dtype=float)
         return series.cumsum()
 
     def _build_pnl_curve(
@@ -1072,9 +1152,7 @@ class BacktestEngine:
                 continue
             daily[d] += pnl
 
-        series = pd.Series(
-            [daily.get(d, 0.0) for d in idx], index=idx, dtype=float
-        )
+        series = pd.Series([daily.get(d, 0.0) for d in idx], index=idx, dtype=float)
         return series.cumsum()
 
     def _compute_statistics(
@@ -1115,9 +1193,7 @@ class BacktestEngine:
         n_days = len(pnl_curve)
         capital = float(params.initial_capital_usd)
         if n_days > 0 and capital > 0.0:
-            annualised_return_pct = (
-                (total_return_usd / capital) * (365.0 / n_days) * 100.0
-            )
+            annualised_return_pct = (total_return_usd / capital) * (365.0 / n_days) * 100.0
         else:
             annualised_return_pct = 0.0
 
@@ -1137,9 +1213,9 @@ class BacktestEngine:
         # entries are both excluded so win_rate reflects only realised
         # closing trades.
         closed = [
-            e for e in trade_log
-            if not e.get("skipped") and e.get("side") == "SELL"
-            and e.get("pnl_usd") is not None
+            e
+            for e in trade_log
+            if not e.get("skipped") and e.get("side") == "SELL" and e.get("pnl_usd") is not None
         ]
         if closed:
             winners = sum(1 for e in closed if float(e["pnl_usd"]) > 0.0)
@@ -1185,9 +1261,7 @@ class BacktestEngine:
         return apply_slippage(price, side, slippage_bps)
 
     @staticmethod
-    def _skip_entry(
-        trade: ActivityRecord, reason: str, params: BacktestParams
-    ) -> dict[str, Any]:
+    def _skip_entry(trade: ActivityRecord, reason: str, params: BacktestParams) -> dict[str, Any]:
         return {
             "timestamp": trade.timestamp.isoformat(),
             "date": str(trade.timestamp.date()),

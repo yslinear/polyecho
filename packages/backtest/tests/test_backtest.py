@@ -21,7 +21,7 @@ Tests:
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, cast
 
 import pytest
@@ -188,6 +188,7 @@ async def test_swing_leader_stats_are_sane() -> None:
 
     # Sharpe should be finite
     import math
+
     assert math.isfinite(result.sharpe_ratio)
 
     # max_drawdown should be non-negative
@@ -206,10 +207,7 @@ async def test_swing_leader_skip_analysis_complete() -> None:
     ss = result.skip_stats
     # total must equal sum of individual categories
     assert ss.total == (
-        ss.insufficient_liquidity
-        + ss.risk_triggered
-        + ss.below_min_size
-        + ss.category_filtered
+        ss.insufficient_liquidity + ss.risk_triggered + ss.below_min_size + ss.category_filtered
     )
 
 
@@ -341,8 +339,14 @@ async def test_to_dict_structure() -> None:
     assert "daily_pnl_curve" in d
     assert isinstance(d["daily_pnl_curve"], list)
     assert "stats" in d
-    for key in ("total_return_usd", "annualized_return_pct", "sharpe_ratio",
-                "max_drawdown_pct", "win_rate", "avg_hold_hours"):
+    for key in (
+        "total_return_usd",
+        "annualized_return_pct",
+        "sharpe_ratio",
+        "max_drawdown_pct",
+        "win_rate",
+        "avg_hold_hours",
+    ):
         assert key in d["stats"]
     assert "skip_analysis" in d
     assert "leader_vs_copy" in d
@@ -358,6 +362,7 @@ async def test_category_whitelist_filters_all_when_no_match() -> None:
     engine = make_engine()
     params = base_params(SWING)
     from dataclasses import replace
+
     filtered_params = replace(params, category_whitelist=["__NONEXISTENT_CATEGORY__"])
     result = await engine.run(filtered_params)
 
@@ -518,9 +523,7 @@ def _patch_status_recorder(
         progress: float | None = None,
         result: dict[str, object] | None = None,
     ) -> None:
-        transitions.append(
-            {"status": status, "progress": progress, "result": result}
-        )
+        transitions.append({"status": status, "progress": progress, "result": result})
 
     monkeypatch.setattr(jobs_mod, "session_scope", _fake_scope)
     monkeypatch.setattr(jobs_mod, "_set_status", _record_set_status)
@@ -559,9 +562,7 @@ async def test_job_lifecycle_pending_to_running_to_done(
     # No transition may be the dropped duplicate (running AND progress==0):
     # re-writing it would double-clobber the claim under the fallback path.
     assert not any(
-        t["status"] == "running"
-        and t["progress"] is not None
-        and float(t["progress"]) == 0.0  # type: ignore[arg-type]
+        t["status"] == "running" and t["progress"] is not None and float(t["progress"]) == 0.0  # type: ignore[arg-type]
         for t in transitions
     )
 
@@ -817,18 +818,15 @@ async def test_fee_reduces_pnl_on_both_legs_and_appears_in_to_dict() -> None:
     # Both legs charged: at least one BUY entry and one SELL/MTM entry
     # carry a positive fee_usd, and the per-entry sum reconciles.
     fee_entries = [
-        e for e in res_fee.trade_log
+        e
+        for e in res_fee.trade_log
         if not e.get("skipped") and float(e.get("fee_usd") or 0.0) > 0.0
     ]
     buy_fees = [e for e in fee_entries if e["side"] == "BUY"]
     sell_fees = [e for e in fee_entries if e["side"] == "SELL"]
     assert len(buy_fees) > 0, "BUY-leg fee must be charged"
     assert len(sell_fees) > 0, "SELL-leg fee must be charged"
-    summed = sum(
-        float(e.get("fee_usd") or 0.0)
-        for e in res_fee.trade_log
-        if not e.get("skipped")
-    )
+    summed = sum(float(e.get("fee_usd") or 0.0) for e in res_fee.trade_log if not e.get("skipped"))
     assert summed == pytest.approx(res_fee.total_fees_usd)
 
 
@@ -865,13 +863,9 @@ class TestComputeSettlementPrice:
 
     def test_voided_returns_entry_price_zero_mtm(self) -> None:
         # Voided market → unwind at entry → shares*(entry-entry)=0 MTM.
-        assert compute_settlement_price(
-            0.97, voided=True, entry_price=0.42
-        ) == pytest.approx(0.42)
+        assert compute_settlement_price(0.97, voided=True, entry_price=0.42) == pytest.approx(0.42)
         # Void wins even over a >=0.95 price.
-        assert compute_settlement_price(
-            0.99, voided=True, entry_price=0.10
-        ) == pytest.approx(0.10)
+        assert compute_settlement_price(0.99, voided=True, entry_price=0.10) == pytest.approx(0.10)
 
 
 @pytest.mark.asyncio
@@ -915,9 +909,7 @@ async def test_period_end_price_independent_of_runtime_live_positions() -> None:
 
     engine_b = make_engine()
 
-    async def _fake_positions(
-        wallet: str, *, size_threshold: float = 1.0
-    ) -> list[PositionRecord]:
+    async def _fake_positions(wallet: str, *, size_threshold: float = 1.0) -> list[PositionRecord]:
         # Absurd, contradictory "current" state — must NOT leak into MTM.
         return [
             PositionRecord(
@@ -942,14 +934,10 @@ async def test_period_end_price_independent_of_runtime_live_positions() -> None:
     assert result_a.total_return_usd == pytest.approx(result_b.total_return_usd)
     assert list(result_a.pnl_curve) == list(result_b.pnl_curve)
     mtm_a = [
-        (e["condition_id"], e["fill_price"])
-        for e in result_a.trade_log
-        if e.get("side") == "MTM"
+        (e["condition_id"], e["fill_price"]) for e in result_a.trade_log if e.get("side") == "MTM"
     ]
     mtm_b = [
-        (e["condition_id"], e["fill_price"])
-        for e in result_b.trade_log
-        if e.get("side") == "MTM"
+        (e["condition_id"], e["fill_price"]) for e in result_b.trade_log if e.get("side") == "MTM"
     ]
     assert mtm_a == mtm_b
 
@@ -987,7 +975,8 @@ async def test_sell_without_open_buy_is_skipped_with_reason() -> None:
     result = await make_engine().run(params)
 
     no_open = [
-        e for e in result.trade_log
+        e
+        for e in result.trade_log
         if e.get("skipped") and e.get("skip_reason") == "no_open_position"
     ]
     assert len(no_open) > 0, "expected at least one SELL-without-BUY skip"
@@ -1001,8 +990,7 @@ async def test_sell_without_open_buy_is_skipped_with_reason() -> None:
 
     # win_rate must be computed only over genuinely closed trades.
     closed = [
-        e for e in result.trade_log
-        if not e.get("skipped") and e.get("side") not in (None, "BUY")
+        e for e in result.trade_log if not e.get("skipped") and e.get("side") not in (None, "BUY")
     ]
     for e in closed:
         assert e.get("skip_reason") != "no_open_position"
@@ -1010,10 +998,7 @@ async def test_sell_without_open_buy_is_skipped_with_reason() -> None:
     # Skip-stat accounting stays consistent.
     ss = result.skip_stats
     assert ss.total == (
-        ss.insufficient_liquidity
-        + ss.risk_triggered
-        + ss.below_min_size
-        + ss.category_filtered
+        ss.insufficient_liquidity + ss.risk_triggered + ss.below_min_size + ss.category_filtered
     )
 
 
@@ -1089,9 +1074,7 @@ async def test_worker_loop_recovers_stale_then_polls(
 
     await process_pending_jobs(make_ds(), once=True)
 
-    assert order == ["recover", "fetch"], (
-        f"recovery must run before fetch; got {order}"
-    )
+    assert order == ["recover", "fetch"], f"recovery must run before fetch; got {order}"
 
 
 # ---------------------------------------------------------------------------
@@ -1128,26 +1111,162 @@ def test_annualised_return_uses_initial_capital() -> None:
 
 
 # ---------------------------------------------------------------------------
-# I7 — activity truncation warning when the 10k offset cap is hit
+# A2 — timestamp-cursor pagination for the backtest leader-trade fetch
+#   * cursor advances past the datasource per-call record cap (no 10k ceiling)
+#   * transactionHash dedup collapses the no-`+1` boundary-second overlap
+#   * a source that ignores `start` (cursor stalls) still emits the warning
+#   * fixture mode (whole window in one call) terminates after one page
 # ---------------------------------------------------------------------------
+
+from polyecho.shared.datasource import (  # noqa: E402
+    ActivityRecord,
+    PositionRecord,
+)
+
+
+class _PagedActivityDS:
+    """Datasource that emulates the live `start`-cursor + per-call record cap.
+
+    Holds one chronologically-ascending corpus of ActivityRecords.  Each
+    `get_user_activity(start=...)` call returns at most `page_cap` records
+    whose timestamp is >= `start` (the live `/activity` per-call ceiling),
+    so the engine MUST advance the `start` cursor to reach the tail.  This
+    proves the cursor loop pages past the cap with no 10k-style ceiling.
+    """
+
+    def __init__(self, corpus: list[ActivityRecord], page_cap: int) -> None:
+        self._corpus = sorted(corpus, key=lambda r: r.timestamp)
+        self._page_cap = page_cap
+        self.calls: list[datetime | None] = []
+
+    async def get_user_activity(
+        self,
+        wallet: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        activity_type: str | None = "TRADE",
+        limit: int | None = None,
+    ) -> list[ActivityRecord]:
+        self.calls.append(start)
+        rows = [
+            r
+            for r in self._corpus
+            if (start is None or r.timestamp >= start) and (end is None or r.timestamp <= end)
+        ]
+        return rows[: self._page_cap]
+
+    async def get_positions(self, wallet: str) -> list[PositionRecord]:
+        return []
+
+
+def _mk_trade(ts: datetime, tx: str, side: str = "BUY") -> ActivityRecord:
+    return ActivityRecord(
+        wallet=SWING,
+        activity_type="TRADE",
+        condition_id="0xc",
+        side=side,
+        size=1.0,
+        price=0.5,
+        usdc_size=1.0,
+        timestamp=ts,
+        raw={"transactionHash": tx},
+    )
 
 
 @pytest.mark.asyncio
-async def test_activity_truncation_emits_warning(
+async def test_cursor_pages_past_the_record_cap(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """When get_user_activity returns >= the 10k offset cap, the engine
-    must emit a loud truncation warning (cursor pagination is not offered
-    by the Polymarket /activity endpoint — context7-verified)."""
+    """A 25k-trade leader history must be fetched IN FULL via the timestamp
+    cursor even though each datasource call is capped well below 25k.
+
+    Proves: (1) no 10k offset ceiling — all 25_000 records are returned,
+    (2) the `start` cursor advances across pages, (3) no truncation warning
+    because the cursor genuinely reached the tail of the window.
+    """
+    import logging
+
+    base = datetime.fromisoformat("2026-03-01T00:00:00+00:00")
+    # 25_000 trades, one per second → 25_000 distinct timestamps + txhashes.
+    corpus = [_mk_trade(base + timedelta(seconds=i), f"0xtx{i:06d}") for i in range(25_000)]
+    ds = _PagedActivityDS(corpus, page_cap=3_000)
+    engine = BacktestEngine(datasource=cast(Any, ds))
+
+    with caplog.at_level(logging.WARNING):
+        records = await engine._fetch_leader_trades(SWING, START, END)
+
+    # Every trade fetched — no 10k-style ceiling.
+    assert len(records) == 25_000
+    # Multiple paged calls were needed (25k / 3k → 9 pages).
+    assert len(ds.calls) >= 9
+    # The cursor advanced: each successive `start` is strictly later.
+    starts = [c for c in ds.calls if c is not None]
+    assert starts == sorted(starts)
+    assert starts[-1] > starts[0]
+    # Records are time-ordered ascending and unique.
+    assert records == sorted(records, key=lambda r: r.timestamp)
+    assert len({r.raw["transactionHash"] for r in records}) == 25_000
+    # The cursor reached the tail → NO truncation warning.
+    assert not any("activity_truncated" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_cursor_dedups_same_second_txhash_overlap() -> None:
+    """The cursor advances WITHOUT `+1`, so boundary-second trades reappear
+    on the next page.  transactionHash dedup must collapse that overlap.
+
+    A small per-page cap (10) plus a cluster of trades sharing ONE timestamp
+    that straddles a page boundary: page 1 ends mid-cluster, the cursor is
+    set to that shared second WITHOUT `+1`, so page 2 re-delivers the
+    already-seen siblings of that second alongside the rest of the cluster
+    and the later trades.  Every trade must appear exactly once -- the
+    no-`+1` overlap is absorbed purely by txhash dedup.
+    """
+    base = datetime.fromisoformat("2026-03-10T12:00:00+00:00")
+    shared_second = base + timedelta(seconds=5)
+    corpus: list[ActivityRecord] = []
+    # 5 trades on distinct early seconds.
+    for i in range(5):
+        corpus.append(_mk_trade(base + timedelta(seconds=i), f"0xearly{i:03d}"))
+    # 8 trades ALL on `shared_second` -- this cluster straddles the page
+    # boundary (page cap 10: page 1 holds 5 early + 5 of the cluster).
+    for i in range(8):
+        corpus.append(_mk_trade(shared_second, f"0xshared{i:03d}"))
+    # 6 trades on distinct later seconds.
+    for i in range(6):
+        corpus.append(_mk_trade(shared_second + timedelta(seconds=i + 1), f"0xlate{i:03d}"))
+
+    ds = _PagedActivityDS(corpus, page_cap=10)
+    engine = BacktestEngine(datasource=cast(Any, ds))
+
+    records = await engine._fetch_leader_trades(SWING, START, END)
+
+    # 5 early + 8 shared-second + 6 late = 19, each exactly once.
+    assert len(records) == 19
+    hashes = [r.raw["transactionHash"] for r in records]
+    assert len(hashes) == len(set(hashes)), "txhash overlap was not deduped"
+    assert sum(1 for h in hashes if h.startswith("0xshared")) == 8
+    assert sum(1 for h in hashes if h.startswith("0xlate")) == 6
+    # More than one page was needed (the cursor had to advance).
+    assert len(ds.calls) >= 2
+
+
+@pytest.mark.asyncio
+async def test_truncation_warning_when_cursor_cannot_advance(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """If a full page's records all share the window's first second, the
+    cursor cannot advance past the per-call cap and the tail is unreachable.
+    The engine must still emit the loud truncation warning."""
     import logging
 
     from polyecho.shared.datasource.dto import ActivityRecord
 
     engine = make_engine()
+    ts = datetime.fromisoformat("2026-03-01T00:00:00+00:00")
 
-    big_count = 10_000
-
-    async def _huge_activity(
+    async def _stuck_activity(
         wallet: str,
         *,
         start: object = None,
@@ -1155,7 +1274,10 @@ async def test_activity_truncation_emits_warning(
         activity_type: object = "TRADE",
         limit: object = None,
     ) -> list[ActivityRecord]:
-        ts = datetime.fromisoformat("2026-03-01T00:00:00+00:00")
+        # A fixed-size page, every record at the SAME second with a UNIQUE
+        # txhash, returned identically on every call.  The cursor advances
+        # to that second once, then pins there forever -- the tail past that
+        # second is unreachable, so the engine must flag truncation.
         return [
             ActivityRecord(
                 wallet=wallet,
@@ -1166,19 +1288,18 @@ async def test_activity_truncation_emits_warning(
                 price=0.5,
                 usdc_size=1.0,
                 timestamp=ts,
-                raw={},
+                raw={"transactionHash": f"0xstuck{i:06d}"},
             )
-            for _ in range(big_count)
+            for i in range(500)
         ]
 
-    cast(Any, engine._ds).get_user_activity = _huge_activity
+    cast(Any, engine._ds).get_user_activity = _stuck_activity
 
     with caplog.at_level(logging.WARNING):
         await engine._fetch_leader_trades(SWING, START, END)
 
     assert any(
-        "activity_truncated" in r.message or "activity_truncated" in r.name
-        for r in caplog.records
+        "activity_truncated" in r.message or "activity_truncated" in r.name for r in caplog.records
     ), "expected a backtest.activity_truncated warning"
 
 
@@ -1191,9 +1312,9 @@ async def test_no_truncation_warning_under_cap(
     engine = make_engine()
     with caplog.at_level(logging.WARNING):
         await engine._fetch_leader_trades(SWING, START, END)
-    assert not any(
-        "activity_truncated" in r.message for r in caplog.records
-    ), "swing fixture (295 trades) must not trigger the truncation warning"
+    assert not any("activity_truncated" in r.message for r in caplog.records), (
+        "swing fixture (295 trades) must not trigger the truncation warning"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1214,10 +1335,9 @@ async def test_avg_hold_hours_uses_buy_opened_at() -> None:
 
     # SELL entries that closed a position must carry the BUY's opened_at.
     closing_sells = [
-        e for e in result.trade_log
-        if not e.get("skipped")
-        and e.get("side") == "SELL"
-        and e.get("closed_at") is not None
+        e
+        for e in result.trade_log
+        if not e.get("skipped") and e.get("side") == "SELL" and e.get("closed_at") is not None
     ]
     assert len(closing_sells) > 0
     for e in closing_sells:
@@ -1270,9 +1390,6 @@ def test_avg_hold_hours_known_value() -> None:
 #   R12 IMP-1  stale-recovery never kills a backpressured running job
 #   R12 #2/#3  no stale 'pending', no duplicate status='running' write
 # ===========================================================================
-
-
-from polyecho.shared.datasource import ActivityRecord, PositionRecord  # noqa: E402
 
 
 class _ScriptedDS:
@@ -1382,10 +1499,7 @@ async def test_crit1_sell_returns_stored_buy_notional_on_partial_close() -> None
     )
     result = await eng.run(_e_params())
 
-    sells = [
-        e for e in result.trade_log
-        if e.get("side") == "SELL" and not e.get("skipped")
-    ]
+    sells = [e for e in result.trade_log if e.get("side") == "SELL" and not e.get("skipped")]
     assert len(sells) == 1
     # Round-trip net PnL is exactly 0 (no slippage, no fee, flat price).
     assert sells[0]["pnl_usd"] == pytest.approx(0.0, abs=1e-9)
@@ -1438,9 +1552,7 @@ async def test_imp1_buy_fee_in_pnl_curve_when_never_closed() -> None:
     → 0 MTM PnL, so the ONLY capital change is the −2.00 BUY fee.  Pre-fix the
     curve skipped pnl==0 BUY rows so total_return was 0.0 (fee leaked out).
     """
-    eng = _scripted_engine(
-        [_trade("BUY", 0.50, 100.0, when="2026-03-01T00:00:00+00:00")]
-    )
+    eng = _scripted_engine([_trade("BUY", 0.50, 100.0, when="2026-03-01T00:00:00+00:00")])
     result = await eng.run(_e_params(fee_bps=200))
 
     buys = [e for e in result.trade_log if e.get("side") == "BUY"]
@@ -1465,12 +1577,9 @@ async def test_imp2_win_rate_excludes_mtm_entries() -> None:
     """
     eng = _scripted_engine(
         [
-            _trade("BUY", 0.40, 100.0, cond="0xA",
-                   when="2026-03-01T00:00:00+00:00"),
-            _trade("SELL", 0.60, 100.0, cond="0xA",
-                   when="2026-03-02T00:00:00+00:00"),
-            _trade("BUY", 0.50, 100.0, cond="0xB",
-                   when="2026-03-03T00:00:00+00:00"),
+            _trade("BUY", 0.40, 100.0, cond="0xA", when="2026-03-01T00:00:00+00:00"),
+            _trade("SELL", 0.60, 100.0, cond="0xA", when="2026-03-02T00:00:00+00:00"),
+            _trade("BUY", 0.50, 100.0, cond="0xB", when="2026-03-03T00:00:00+00:00"),
         ]
     )
     result = await eng.run(_e_params())
@@ -1596,9 +1705,7 @@ async def test_r12_imp1_stale_recovery_spares_backpressured_running_job() -> Non
 
     compiled = str(captured["stmt"])
     # The WHERE clause must now also gate on progress (the backpressure fix).
-    assert "progress" in compiled, (
-        f"recovery UPDATE must gate on progress==0; got: {compiled}"
-    )
+    assert "progress" in compiled, f"recovery UPDATE must gate on progress==0; got: {compiled}"
     assert "status" in compiled and "backtest_jobs" in compiled
     # ORM-level: the column predicate object exists & compares to 0.
     assert jobs_mod._recover_stale_running is _recover_stale_running
@@ -1627,10 +1734,9 @@ async def test_r12_2_3_no_duplicate_running_write_in_process_job(
     # No transition may be the duplicate (status='running' AND progress==0):
     # the claim already set that; re-writing it double-clobbers the claim.
     dup = [
-        t for t in transitions
-        if t["status"] == "running"
-        and t["progress"] is not None
-        and float(t["progress"]) == 0.0  # type: ignore[arg-type]
+        t
+        for t in transitions
+        if t["status"] == "running" and t["progress"] is not None and float(t["progress"]) == 0.0  # type: ignore[arg-type]
     ]
     assert dup == [], f"unexpected duplicate running/progress=0 write: {dup}"
     # The job still completes (per-leader progress writes + terminal).
