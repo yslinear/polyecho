@@ -22,7 +22,6 @@ import {
   Users,
   Search,
   FlaskConical,
-  Microscope,
   History,
   TrendingUp,
   Wallet,
@@ -62,14 +61,14 @@ const NAV_GROUPS = [
     labelKey: "sidebar.groups.discovery",
     items: [
       { href: "/leaders", labelKey: "sidebar.items.leaders", icon: Users },
+      // /discovery is the merged "候選漏斗" candidates funnel: leaderboard,
+      // ongoing paper-trading evaluation (drives the C1 ladder), trial_ready
+      // / retired buckets — all chip-filtered on one page. /research used to
+      // be a sibling here; it now permanently redirects into /discovery.
       { href: "/discovery", labelKey: "sidebar.items.discovery", icon: Search },
       // Section "/backtest" matches /backtest, /backtest/new and
       // /backtest/<id> — see isNavItemActive.
       { href: "/backtest", labelKey: "sidebar.items.backtest", icon: FlaskConical },
-      // C1-P5: the forward paper-trading ladder (lifecycle_state + paper
-      // stats + operator-gated promote-to-live). Belongs in this group —
-      // it is the evaluation stage between discovery and a real follow.
-      { href: "/research", labelKey: "sidebar.items.research", icon: Microscope },
     ],
   },
   {

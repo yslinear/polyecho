@@ -33,8 +33,8 @@ describe("t() — key resolution", () => {
   });
 
   it("resolves a deeply nested key", () => {
-    expect(t("discovery.table.actions.follow")).toBe(
-      dict.discovery.table.actions.follow,
+    expect(t("discovery.table.actions.quickBacktest")).toBe(
+      dict.discovery.table.actions.quickBacktest,
     );
     expect(t("tables.common.notRecorded")).toBe(
       dict.tables.common.notRecorded,

@@ -120,9 +120,8 @@ export const sidebar = {
   items: {
     dashboard: "總覽",
     leaders: "Leaders",
-    discovery: "探索",
+    discovery: "候選漏斗",
     backtest: "回測",
-    research: "Paper 階梯",
     trades: "交易",
     positions: "持倉",
     accounts: "帳戶",
