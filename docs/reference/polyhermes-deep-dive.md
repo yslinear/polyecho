@@ -198,3 +198,26 @@ is incorrect — `accounts` exists in `infra/migrations/0000_init.sql`, has a
 SQLAlchemy model, an `importAccount` write path, and a 9-case test. The
 agent inspected a stale path. No action needed; noted to avoid a future
 re-investigation.
+
+## Postscript (2026-05-23)
+
+The Headline above praises PolyEcho's MULTIPLICATIVE scoring
+(`final = profit * (replicability / 100)`) as "better" than PolyHermes'
+additive sum. **That claim is superseded in production.** Once the C1
+paper-trading ladder shipped and the live pool of ~2200 candidates was
+exercised, the multiplicative score's distribution collapsed onto the
+low end (max 51, avg 2) so NO leader ever crossed the 60 promotion gate
+— the gate had been ported from PolyHermes' additive 0-100 scale where
+60 is a normal "good" score. The ladder was permanently blocked.
+
+The operator chose to fully port PolyHermes' additive
+`research-copyability-v1` (commit `8ed129d`): a paper-trade-based,
+11-component additive score computed from each `paper_session`, with the
+bootstrap clause `score>=60 OR can_bootstrap` so discovery-found leaders
+enter PAPER without a pre-paper score. The discovery `total_score` stays
+for the `/discovery` leaderboard ranking — it is a separate signal,
+no longer the ladder gate. After the switch, 630 of 2241 simulated
+sessions cleared 60 (avg 56.8, max 86.4); ladder unblocked. See
+[[polyhermes-deepdive-shipped]] in operator memory for the full
+post-shipping write-up (this includes a state-machine cooldown bug + a
+worker-batching gap, both found and fixed at the same time).
