@@ -29,10 +29,18 @@ SQLAlchemy 2.0 async ORM:
 - ``Event``                 — inserted for ``strategy_drift`` (severity warning)
                               and high-scoring new leaders.
 
-Auto-reject
------------
+Auto-reject (money-safety)
+--------------------------
 If ``insider_suspect`` appears in risk flags the record is saved with
-``user_status='rejected'`` immediately (PRD §8.1).
+``lifecycle_state='retired'`` immediately (PRD §8.1). ``retired`` is the
+C1 ladder terminal state (``TERMINAL_STATES`` in
+:mod:`polyecho.paper.state_machine`), and the state machine's
+:func:`advance` short-circuits a retired candidate with
+``reason="terminal_state"`` and ``changed=False`` — so an insider_suspect
+can never be auto-bootstrapped into the paper ladder. This replaces the
+prior ``user_status='rejected'`` exclusion mechanism (the column was
+removed from the schema along with this rewire); the exclusion semantic
+is preserved with no new schema.
 """
 
 from __future__ import annotations
@@ -617,7 +625,15 @@ async def _upsert_candidate(
     # other timestamp here uses ``datetime.now(tz=UTC)`` — a silent,
     # production-corrupting drift.  Use the UTC date explicitly.
     today = datetime.now(tz=UTC).date()
-    user_status = "rejected" if "insider_suspect" in risk_flags else "new"
+    # Money-safety: an ``insider_suspect`` candidate is parked at the C1
+    # ladder terminal state ``retired`` so the state machine
+    # (``polyecho.paper.state_machine.advance``) short-circuits with
+    # ``reason="terminal_state"`` and never auto-bootstraps it into paper
+    # trading. This replaces the prior ``user_status='rejected'`` gate
+    # (the column was removed); the exclusion semantic is preserved with
+    # no new schema.
+    is_insider = "insider_suspect" in risk_flags
+    insider_lifecycle_state = "retired" if is_insider else None
 
     async with session_scope() as session:
         # ── CandidateLeader upsert ────────────────────────────────────────────
@@ -662,7 +678,7 @@ async def _upsert_candidate(
             )
 
         if existing is None:
-            leader = CandidateLeader(
+            leader_kwargs: dict[str, Any] = dict(
                 wallet_address=wallet,
                 display_name=display_name,
                 sources=[source],
@@ -678,8 +694,14 @@ async def _upsert_candidate(
                 replicability_score=r_score,
                 total_score=f_score,
                 risk_flags=risk_flags,
-                user_status=user_status,
             )
+            # Money-safety: insider_suspect is parked at the ladder
+            # terminal ``retired`` so the C1 state machine can never
+            # auto-bootstrap it. Non-insider candidates keep the column
+            # default (``discovered``) and flow through the ladder.
+            if insider_lifecycle_state is not None:
+                leader_kwargs["lifecycle_state"] = insider_lifecycle_state
+            leader = CandidateLeader(**leader_kwargs)
             session.add(leader)
         else:
             # Merge sources (deduplicated)
@@ -702,9 +724,12 @@ async def _upsert_candidate(
             existing.replicability_score = r_score
             existing.total_score = f_score
             existing.risk_flags = risk_flags
-            # Only set rejected; never un-reject automatically
-            if user_status == "rejected":
-                existing.user_status = "rejected"
+            # Money-safety: only ever park at terminal ``retired`` on an
+            # insider_suspect detection; never auto-resurrect a retired
+            # candidate. ``retired`` is the C1 ladder terminal state
+            # (state machine short-circuits with ``terminal_state``).
+            if insider_lifecycle_state == "retired":
+                existing.lifecycle_state = "retired"
 
         # ── CandidateScoreHistory upsert — R10 C1 (atomic ON CONFLICT) ────────
         # The OLD code did an UNLOCKED ``SELECT … then session.add(...)``:
@@ -756,7 +781,11 @@ async def _upsert_candidate(
         # FOR UPDATE row lock until THIS txn commits, then re-reads
         # prev_score (now ≥ threshold) so crossed_high is False — the
         # event still fires EXACTLY ONCE per upward crossing.
-        should_emit_high_score = crossed_high and user_status != "rejected"
+        # Money-safety: do NOT fire a high-score event for an insider_suspect
+        # candidate. The leader is parked at the terminal ``retired`` state
+        # for the same reason — a notification would be a misleading signal
+        # for a wallet that will never be auto-promoted by the ladder.
+        should_emit_high_score = crossed_high and not is_insider
 
     # ── CANDIDATE_HIGH_SCORE emit — AFTER the txn commits & lock released ──
     # R10 C2: the FOR UPDATE row lock is dropped the moment session_scope()
@@ -783,7 +812,7 @@ async def _upsert_candidate(
             "replicability_score": r_score,
             "final_score": f_score,
             "risk_flags": risk_flags,
-            "user_status": user_status,
+            "insider_suspect": is_insider,
         },
     )
 
@@ -905,7 +934,6 @@ async def _upsert_thin(
                 sources=[source],
                 first_discovered_at=datetime.now(tz=UTC),
                 backtest_default={"stats_leaderboard": thin_signal},
-                user_status="new",
             )
             session.add(leader)
         else:

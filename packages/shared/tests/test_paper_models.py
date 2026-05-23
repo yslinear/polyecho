@@ -212,11 +212,14 @@ class TestCandidateLeaderLifecycleColumns:
         cols = set(_tbl(CandidateLeader).columns.keys())
         assert {"lifecycle_state", "cooldown_until", "cooldown_count", "locked"} <= cols
 
-    def test_user_status_untouched(self) -> None:
-        # lifecycle_state is a SEPARATE column; user_status is unchanged.
+    def test_user_status_column_removed(self) -> None:
+        # Money-safety cleanup: the legacy ``user_status`` column was
+        # dropped entirely from the ORM, Drizzle and SQL migration in sync.
+        # The insider_suspect exclusion that previously used
+        # user_status='rejected' is now enforced at the C1 ladder
+        # terminal lifecycle_state='retired'.
         cols = _tbl(CandidateLeader).columns
-        assert "user_status" in cols
-        assert cols["user_status"].nullable is False
+        assert "user_status" not in cols
 
     def test_lifecycle_state_not_null_text(self) -> None:
         col = _tbl(CandidateLeader).columns["lifecycle_state"]

@@ -1,16 +1,24 @@
 """
 polyecho.cli.discovery
 ======================
-Leader candidate-pool discovery sub-commands (Phase 1).
+Leader candidate-pool discovery sub-commands.
 
 Commands
 --------
-* ``polyecho discovery run [--once]``       — run discovery (one pass with
+* ``polyecho discovery run [--once]``        — run discovery (one pass with
   ``--once``; the scheduled loop otherwise).
-* ``polyecho discovery schedule``           — start the scheduled loop
+* ``polyecho discovery schedule``            — start the scheduled loop
   (alias for ``run`` without ``--once``).
-* ``polyecho discovery promote <wallet>``   — flip a candidate's
-  ``user_status`` to ``following`` (the §5.7 safe-write).
+* ``polyecho discovery score-wallet <addr>`` — force-evaluate ONE wallet
+  through the full per-wallet pipeline (bypasses the leaderboard budget
+  gate for niche seeds).
+
+The legacy ``polyecho discovery promote <wallet>`` command was REMOVED
+along with the ``candidate_leaders.user_status`` column it wrote to: the
+C1 ladder's bootstrap clause now admits every discovery-found candidate
+into paper trading automatically, so a manual ``user_status='following''
+flip is no longer the gate. Promotion to a real follow remains the
+explicit, danger-passphrase-gated operator action on the web UI.
 
 Design
 ------
@@ -19,14 +27,12 @@ existing discovery service entry-point logic verbatim — they call
 :func:`polyecho.discovery.__main__.main` (which builds the datasource and
 :class:`~polyecho.discovery.worker.DiscoveryWorker` and dispatches to a
 single pass or the scheduled loop).  Scoring / persistence is **never**
-reimplemented here.  ``promote`` is a single safe-write UPDATE on
-``candidate_leaders.user_status`` (the same surface the web UI uses).
+reimplemented here.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import typer
 from rich.console import Console
@@ -35,16 +41,10 @@ from rich.panel import Panel
 app = typer.Typer(no_args_is_help=True)
 _console = Console()
 
-# Allowed promotion target.  PRD §5.7 "following" is the watch-list /
-# copy-eligible status the trader engine reacts to.
-_FOLLOWING_STATUS = "following"
-
 
 @app.command(name="run")
 def run(
-    once: bool = typer.Option(
-        False, "--once", help="Run a single discovery pass and exit."
-    ),
+    once: bool = typer.Option(False, "--once", help="Run a single discovery pass and exit."),
 ) -> None:
     """Run the discovery worker (all 4 sources).
 
@@ -73,9 +73,7 @@ def run(
     try:
         asyncio.run(discovery_main(once=once))
     except KeyboardInterrupt:
-        _console.print(
-            "[yellow]Interrupted — discovery loop stopped.[/yellow]"
-        )
+        _console.print("[yellow]Interrupted — discovery loop stopped.[/yellow]")
         raise typer.Exit(code=130) from None
     except Exception as exc:  # noqa: BLE001 - clean CLI error, no traceback
         _console.print(f"[red]Discovery failed:[/red] {exc}")
@@ -102,132 +100,9 @@ def schedule() -> None:
     run(once=False)
 
 
-@app.command(name="promote")
-def promote(
-    wallet: str = typer.Argument(
-        ..., help="Wallet address (0x…) of a discovered candidate to follow."
-    ),
-) -> None:
-    """Promote a discovered candidate to ``following`` (safe-write, §5.7).
-
-    Sets ``candidate_leaders.user_status = 'following'`` for *wallet* — the
-    same DB surface the web UI uses.  This does NOT move money: actual
-    copying still requires active ``follow_relations``.  Read of an
-    unknown / already-rejected wallet is reported, not silently ignored.
-
-    Risk gate
-    ---------
-    ``promote`` is risk-increasing (it moves a wallet into the trader-core
-    follow set). To avoid misclick the CLI forces an interactive
-    ``typer.confirm`` BEFORE the DB write; there is intentionally no
-    ``--yes`` bypass (operator-side parity with the web
-    ``dangerous-action`` CONFIRM_PHRASE).
-    """
-    from sqlalchemy import select
-
-    from polyecho.shared.db import session_scope
-    from polyecho.shared.models import CandidateLeader
-
-    wallet_norm = wallet.strip().lower()
-
-    async def _fetch() -> Any | None:
-        async with session_scope() as session:
-            return (
-                await session.execute(
-                    select(CandidateLeader).where(
-                        CandidateLeader.wallet_address == wallet_norm
-                    )
-                )
-            ).scalar_one_or_none()
-
-    try:
-        existing = asyncio.run(_fetch())
-    except Exception as exc:  # noqa: BLE001 - clean CLI error surface
-        _console.print(f"[red]promote failed:[/red] {exc}")
-        raise typer.Exit(code=1) from exc
-
-    if existing is None:
-        _console.print(
-            Panel(
-                f"[red]No candidate found for wallet "
-                f"[bold]{wallet_norm}[/bold].[/red]\n"
-                "[dim]Only wallets discovered into candidate_leaders can be "
-                "promoted. Run `polyecho discovery run --once` first.[/dim]",
-                title="[dim]polyecho discovery promote[/dim]",
-                border_style="red",
-            )
-        )
-        raise typer.Exit(code=1)
-
-    prev_status = str(existing.user_status)
-    _console.print(
-        Panel(
-            f"Wallet           [bold]{wallet_norm}[/bold]\n"
-            f"Current status   [bold]{prev_status}[/bold]\n"
-            f"Target status    [bold green]{_FOLLOWING_STATUS}[/bold green]\n"
-            "[dim]Promoting marks this wallet as trader-core eligible "
-            "(may be evaluated for copying).[/dim]",
-            title="[dim]polyecho discovery promote (confirm)[/dim]",
-            border_style="cyan",
-        )
-    )
-    typer.confirm(
-        "Confirm promote this wallet to 'following'?", abort=True
-    )
-
-    async def _run() -> tuple[str, str] | None:
-        async with session_scope() as session:
-            row = (
-                await session.execute(
-                    select(CandidateLeader).where(
-                        CandidateLeader.wallet_address == wallet_norm
-                    )
-                )
-            ).scalar_one_or_none()
-            if row is None:
-                return None
-            prev = str(row.user_status)
-            row.user_status = _FOLLOWING_STATUS
-            return (prev, _FOLLOWING_STATUS)
-
-    try:
-        result = asyncio.run(_run())
-    except Exception as exc:  # noqa: BLE001 - clean CLI error surface
-        _console.print(f"[red]promote failed:[/red] {exc}")
-        raise typer.Exit(code=1) from exc
-
-    if result is None:
-        _console.print(
-            Panel(
-                f"[red]No candidate found for wallet "
-                f"[bold]{wallet_norm}[/bold].[/red]\n"
-                "[dim]Only wallets discovered into candidate_leaders can be "
-                "promoted. Run `polyecho discovery run --once` first.[/dim]",
-                title="[dim]polyecho discovery promote[/dim]",
-                border_style="red",
-            )
-        )
-        raise typer.Exit(code=1)
-
-    prev, now = result
-    _console.print(
-        Panel(
-            f"[bold green]Promoted[/bold green] candidate "
-            f"[bold]{wallet_norm}[/bold]\n"
-            f"user_status  {prev} → [bold green]{now}[/bold green]\n"
-            "[dim]This is a safe-write only. Real copying still requires "
-            "active follow_relations.[/dim]",
-            title="[dim]polyecho discovery promote[/dim]",
-            border_style="green",
-        )
-    )
-
-
 @app.command(name="score-wallet")
 def score_wallet(
-    wallet: str = typer.Argument(
-        ..., help="EVM address (0x + 40 hex) to force-evaluate."
-    ),
+    wallet: str = typer.Argument(..., help="EVM address (0x + 40 hex) to force-evaluate."),
     name: str | None = typer.Option(
         None, "--name", help="Optional display_name to upsert if not set."
     ),
@@ -294,16 +169,12 @@ def score_wallet(
             # prior test/process toggling it shut in the same interpreter).
             set_persistence_enabled(True)
             worker = DiscoveryWorker(ds)
-            await worker._process_wallet(
-                w_norm, source, display_name=name
-            )
+            await worker._process_wallet(w_norm, source, display_name=name)
 
         async with session_scope() as session:
             return (
                 await session.execute(
-                    select(CandidateLeader).where(
-                        CandidateLeader.wallet_address == w_norm
-                    )
+                    select(CandidateLeader).where(CandidateLeader.wallet_address == w_norm)
                 )
             ).scalar_one_or_none()
 

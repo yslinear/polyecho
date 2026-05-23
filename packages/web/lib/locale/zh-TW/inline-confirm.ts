@@ -1,12 +1,14 @@
 /**
  * Inline-confirm primitive (`components/inline-confirm.tsx`) zh-TW strings.
  *
- * Shared by the 5 RED Server Actions in P7d (R24 design intent):
+ * Shared by the RED Server Actions in P7d (R24 design intent):
  *   1. setGlobalPaused(false)   resume kill-switch  (REQUIRES passphrase)
- *   2. updateLeaderStatus("following") promote → follow
- *   3. setFollowStatus("active") resume one leader
- *   4. setRiskMode("normal")     leave conservative
- *   5. setPolymarketProxy(new)   set/change proxy
+ *   2. setFollowStatus("active") resume one leader
+ *   3. setRiskMode("normal")     leave conservative
+ *   4. setPolymarketProxy(new)   set/change proxy
+ *
+ * The legacy 5th hook (`updateLeaderStatus("following")` promote-to-follow)
+ * was removed when the `candidate_leaders.user_status` column was dropped.
  *
  * Safe-direction (pause / conservative / clear / etc.) is single-click and
  * does NOT use this primitive — see DESIGN.md "calm instrument chrome".

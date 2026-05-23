@@ -88,8 +88,15 @@ export const candidateLeaders = pgTable("candidate_leaders", {
   total_score: numeric("total_score", { precision: 6, scale: 2 }),
   risk_flags: text("risk_flags").array(),
   specialization: text("specialization").array(),
-  /** new | watching | following | rejected (operator-review intent) */
-  user_status: text("user_status").notNull().default("new"),
+  /**
+   * Operator notes. The legacy `user_status` column was removed once the
+   * /discovery + /research UI merger took its last UI dependency away
+   * (it was never read by the trader engine). The insider_suspect
+   * exclusion previously gated by `user_status='rejected'` now parks the
+   * candidate at the terminal `lifecycle_state='retired'` (see the
+   * paper-trading state machine). 3-way aligned with the SQLAlchemy
+   * model + 0000_init.sql DROP COLUMN.
+   */
   user_notes: text("user_notes"),
   /**
    * C1 paper-trading ladder — AUTOMATED state, kept SEPARATE from

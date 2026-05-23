@@ -14,7 +14,10 @@ insider_suspect
       avg size > 500 when usdc_size is absent
     - near_resolution_win_rate > 0.80 (computed here)
     - total_trades <= 50
-    PRD §8.1: this MUST cause auto-reject (user_status='rejected').
+    PRD §8.1: this MUST cause auto-reject. The worker parks the candidate
+    at the C1 ladder terminal state ``lifecycle_state='retired'`` so the
+    state machine never auto-bootstraps it into paper trading
+    (``polyecho.paper.state_machine.TERMINAL_STATES`` / ``advance``).
 
 strategy_drift
     30-day and 7-day strategy types differ (delegated to frequency.detect_drift).
@@ -49,17 +52,17 @@ from polyecho.shared.datasource import ActivityRecord, PositionRecord
 _INSIDER_MAX_TRADES_PER_DAY = 5.0
 _INSIDER_MIN_WIN_RATE = 0.80
 _INSIDER_MIN_AVG_USDC_SIZE = 5_000.0  # USD
-_INSIDER_MIN_AVG_SIZE = 500.0          # shares / tokens (fallback)
+_INSIDER_MIN_AVG_SIZE = 500.0  # shares / tokens (fallback)
 _INSIDER_NEAR_RESOLUTION_HOURS = 24
 _INSIDER_NEAR_RESOLUTION_WIN_RATE = 0.80
 _INSIDER_MAX_TOTAL_TRADES = 50
 
 _NEW_ACCOUNT_MIN_DAYS = 30
 
-_LOW_LIQUIDITY_THIN_POSITION_USD = 100.0   # USDC below this = thin market
-_LOW_LIQUIDITY_CONCENTRATION = 0.60         # fraction
+_LOW_LIQUIDITY_THIN_POSITION_USD = 100.0  # USDC below this = thin market
+_LOW_LIQUIDITY_CONCENTRATION = 0.60  # fraction
 
-_HIGH_CONCENTRATION_THRESHOLD = 0.50        # fraction of volume in one market
+_HIGH_CONCENTRATION_THRESHOLD = 0.50  # fraction of volume in one market
 
 
 def detect_risk_flags(
@@ -112,9 +115,7 @@ def detect_risk_flags(
     )
 
     # Step 2: large average trade size
-    usdc_sizes = [
-        r.usdc_size for r in trades if r.usdc_size is not None and r.usdc_size > 0
-    ]
+    usdc_sizes = [r.usdc_size for r in trades if r.usdc_size is not None and r.usdc_size > 0]
     if usdc_sizes:
         avg_usdc = sum(usdc_sizes) / len(usdc_sizes)
         large_trades = avg_usdc >= _INSIDER_MIN_AVG_USDC_SIZE
@@ -168,9 +169,7 @@ def detect_risk_flags(
             if has_near_res_buy:
                 near_res_wins += 1  # held into resolution & redeemed = won
 
-    near_res_wr = (
-        near_res_wins / near_res_total if near_res_total > 0 else 0.0
-    )
+    near_res_wr = near_res_wins / near_res_total if near_res_total > 0 else 0.0
     suspicious_near_res = (
         near_res_total > 0 and near_res_wr >= _INSIDER_NEAR_RESOLUTION_WIN_RATE
     ) or (
@@ -202,9 +201,7 @@ def detect_risk_flags(
     # ── low_liquidity ─────────────────────────────────────────────────────────
     # > 60 % of open positions have current_value < $100.
     if positions:
-        thin = sum(
-            1 for p in positions if p.current_value < _LOW_LIQUIDITY_THIN_POSITION_USD
-        )
+        thin = sum(1 for p in positions if p.current_value < _LOW_LIQUIDITY_THIN_POSITION_USD)
         if thin / len(positions) > _LOW_LIQUIDITY_CONCENTRATION:
             flags.append("low_liquidity")
 

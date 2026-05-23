@@ -50,16 +50,6 @@ function fmtDate(d: Date | null | undefined): string {
   return formatDateTime(d);
 }
 
-const STATUS_VARIANT: Record<
-  string,
-  "default" | "secondary" | "outline" | "destructive"
-> = {
-  new: "secondary",
-  watching: "outline",
-  following: "default",
-  rejected: "destructive",
-};
-
 // stats_*/frequency_stats JSONB keys are produced by the discovery worker
 // in English (snake_case DB keys). Route them through the discovery locale
 // via the dynamic `t(`prefix.${k}`)` seam (the i18n orphan-guard treats the
@@ -75,14 +65,6 @@ const STATUS_VARIANT: Record<
 function statFieldLabel(key: string): string {
   const out = t(`discovery.detail.stats.fields.${key}` as I18nKey);
   return out === `discovery.detail.stats.fields.${key}` ? key : out;
-}
-
-// candidate_leaders.user_status is a raw English enum; localise it for the
-// header Badge. An UNMAPPED status degrades to the raw enum verbatim. Same
-// inlined-literal-prefix rationale as statFieldLabel (orphan-guard coverage).
-function statusLabel(status: string): string {
-  const out = t(`discovery.detail.statusLabel.${status}` as I18nKey);
-  return out === `discovery.detail.statusLabel.${status}` ? status : out;
 }
 
 // Same degrade-to-raw pattern for the three raw-enum tag families that
@@ -222,12 +204,6 @@ export default async function LeaderDetailPage({ params }: PageProps) {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Badge
-            variant={STATUS_VARIANT[leader.user_status] ?? "secondary"}
-            className="px-3 py-1 text-sm"
-          >
-            {statusLabel(leader.user_status)}
-          </Badge>
           <Link
             href={`/backtest/new?leader=${encodeURIComponent(leader.wallet_address)}`}
             className="inline-flex h-9 items-center rounded-md border border-input px-4 text-sm font-medium transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"

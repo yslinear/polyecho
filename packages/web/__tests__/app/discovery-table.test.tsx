@@ -15,7 +15,9 @@ import { t } from "@/lib/i18n";
  *  - the 可升 live chip count badge appears only when count > 0;
  *  - the promote-to-live control is rendered ONLY on a trial_ready row
  *    inside the trial_ready chip view, NOT on other rows / chips;
- *  - user_status is NOT rendered anywhere (no column, no filter, no action).
+ *  - the legacy user_status surface is gone — no column, no filter, no row
+ *    action (the schema column itself was dropped, so there is nothing to
+ *    bind to even if a future commit accidentally re-introduces UI).
  *
  * The Server Action + db are mocked so the suite is DB-free.
  */

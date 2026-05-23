@@ -1,11 +1,13 @@
 /**
  * Shared server-side gate for the P7d INLINE-confirm Server Actions
- * (5 RED ops, R24 design intent). Imported by the 5 Server Actions in:
+ * (RED ops, R24 design intent). Imported by the Server Actions in:
  *   - app/settings/actions.ts:setGlobalPaused(false) ← REQUIRES passphrase
  *   - app/settings/actions.ts:setRiskMode("normal")
  *   - app/settings/actions.ts:setPolymarketProxy(new value)
- *   - app/discovery/actions.ts:updateLeaderStatus("following")
  *   - app/leaders/actions.ts:setFollowStatus("active")
+ *
+ * The legacy 5th caller (`updateLeaderStatus("following")`) was removed
+ * with the `candidate_leaders.user_status` column.
  *
  * Gate order (FAIL CLOSED, nothing is written until ALL pass):
  *   (a) verbatim type-to-confirm phrase == CONFIRM_PHRASE

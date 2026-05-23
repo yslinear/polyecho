@@ -62,11 +62,37 @@ CREATE TABLE IF NOT EXISTS candidate_leaders (
   total_score          NUMERIC(6,2),
   risk_flags           TEXT[],
   specialization       TEXT[],
-  -- new | watching | following | rejected
-  user_status          TEXT        NOT NULL DEFAULT 'new',
+  -- The legacy user_status column was REMOVED (operator-approved cleanup
+  -- following the /discovery + /research UI merger). The insider_suspect
+  -- exclusion previously gated by user_status='rejected' is now enforced
+  -- at lifecycle_state='retired' (the C1 ladder terminal state, never
+  -- auto-advanced). Idempotent forward-fill DROP COLUMN guarded below.
   user_notes           TEXT,
   updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Idempotent forward-fill: DROP user_status on a warm volume that still
+-- carries the legacy column. CREATE TABLE IF NOT EXISTS above already
+-- skips the column on a fresh DB; this DROP brings an existing warm DB
+-- in sync. DROP COLUMN IF EXISTS is a no-op on re-apply (warm-volume safe
+-- — same pattern as the redeem_jobs / leader_trades / backtest_jobs
+-- idempotent blocks). The index_dropped clause covers the legacy
+-- idx_candidate_leaders_user_status as well.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'candidate_leaders'
+      AND column_name = 'user_status'
+  ) THEN
+    -- Drop the dependent index first (DROP COLUMN would CASCADE it but
+    -- being explicit here keeps the warm-volume migration auditable).
+    DROP INDEX IF EXISTS idx_candidate_leaders_user_status;
+    ALTER TABLE candidate_leaders DROP COLUMN user_status;
+  END IF;
+END
+$$;
 
 -- Idempotent forward-fill for DBs created before the Phase-3
 -- last_seen_ts discovery cursor existed. CREATE TABLE IF NOT EXISTS
@@ -649,8 +675,9 @@ CREATE TABLE IF NOT EXISTS copy_skips (
 CREATE INDEX IF NOT EXISTS idx_candidate_leaders_total_score
   ON candidate_leaders (total_score DESC);
 
-CREATE INDEX IF NOT EXISTS idx_candidate_leaders_user_status
-  ON candidate_leaders (user_status);
+-- Legacy idx_candidate_leaders_user_status was DROPPED with its column
+-- (see the DO $$ block above); the warm-volume DROP INDEX IF EXISTS
+-- handles already-deployed DBs and a fresh DB never creates it.
 
 CREATE INDEX IF NOT EXISTS idx_candidate_leaders_strategy_type
   ON candidate_leaders (strategy_type);

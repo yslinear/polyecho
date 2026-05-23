@@ -122,7 +122,10 @@ class _Row:
         self.replicability_score: float | None = None
         self.total_score: float | None = None
         self.risk_flags: list[str] | None = None
-        self.user_status: str = "new"
+        # ``user_status`` was removed; ``lifecycle_state`` is the C1 ladder
+        # column (terminal ``retired`` exclusion for insider_suspects). The
+        # default mirrors the SQL/ORM ``server_default=text("'discovered'")``.
+        self.lifecycle_state: str = "discovered"
 
 
 class _Store:
@@ -173,11 +176,7 @@ def _make_session_scope(store: _Store) -> Any:
             # Batched cursor read — the ONLY CandidateLeader SELECT that
             # uses an IN (...) predicate (``_read_cursors``); returns
             # (wallet_address, last_seen_ts) row tuples.
-            if (
-                "CANDIDATE_LEADERS" in compiled
-                and "SELECT" in compiled
-                and " IN (" in compiled
-            ):
+            if "CANDIDATE_LEADERS" in compiled and "SELECT" in compiled and " IN (" in compiled:
                 wanted = _extract_in_wallets(stmt)
                 rows = [
                     (w, store.candidates[w].last_seen_ts)
@@ -239,9 +238,7 @@ def _extract_in_wallets(stmt: Any) -> list[str]:
         if isinstance(v, str) and v.startswith("0x"):
             out.append(v)
         elif isinstance(v, (list, tuple)):
-            out.extend(
-                x for x in v if isinstance(x, str) and x.startswith("0x")
-            )
+            out.extend(x for x in v if isinstance(x, str) and x.startswith("0x"))
     return out
 
 
@@ -322,9 +319,7 @@ class TestCursorAntiDuplication:
         # last_seen_ts = that trade ts.  W_SCALPER's ONLY trade is OLD
         # relative to a cursor we pre-seed → must never resurface.
         swing_big = _rec(wallet=W_SWING, usdc_size=9_000.0, ts=now - timedelta(hours=2))
-        scalper_old = _rec(
-            wallet=W_SCALPER, usdc_size=50_000.0, ts=now - timedelta(hours=5)
-        )
+        scalper_old = _rec(wallet=W_SCALPER, usdc_size=50_000.0, ts=now - timedelta(hours=5))
         ds = _CountingDS({W_SWING: [swing_big], W_SCALPER: [scalper_old]})
         store = _Store()
 
@@ -349,9 +344,7 @@ class TestCursorAntiDuplication:
                 return await real_process(w, s, **kw)
 
             with (
-                patch.object(
-                    worker_mod, "session_scope", _make_session_scope(store)
-                ),
+                patch.object(worker_mod, "session_scope", _make_session_scope(store)),
                 patch.object(worker, "_process_wallet", _spy),
             ):
                 await worker.discover_large_new_positions()
@@ -390,9 +383,7 @@ class TestCursorAntiDuplication:
         async def _go() -> None:
             worker = DiscoveryWorker(ds, follower_capital_usd=1000.0)  # type: ignore[arg-type]
             worker._known_wallets = {W_SWING}
-            with patch.object(
-                worker_mod, "session_scope", _make_session_scope(store)
-            ):
+            with patch.object(worker_mod, "session_scope", _make_session_scope(store)):
                 # Force a full score with an OLDER latest trade.
                 await worker._process_wallet(W_SWING, "leaderboard")
 
@@ -422,9 +413,7 @@ class TestIdempotentRescoreAndBudget:
                 return await real(w, s, **kw)
 
             with (
-                patch.object(
-                    worker_mod, "session_scope", _make_session_scope(store)
-                ),
+                patch.object(worker_mod, "session_scope", _make_session_scope(store)),
                 patch.object(worker, "_process_wallet", _spy),
             ):
                 await worker.run_daily()
@@ -454,9 +443,7 @@ class TestIdempotentRescoreAndBudget:
         # are capped; Phase-1 thin upserts still cover every entry.
         n = worker_mod._DISCOVERY_DETAIL_BUDGET + 12
         lb = [
-            _StubLeaderboardEntry(
-                _wallet("perf", i), rank=i + 1, pnl=1000.0 * (n - i), vol=1.0
-            )
+            _StubLeaderboardEntry(_wallet("perf", i), rank=i + 1, pnl=1000.0 * (n - i), vol=1.0)
             for i in range(n)
         ]
         ds = _CountingDS({}, leaderboard=lb)
@@ -472,9 +459,7 @@ class TestIdempotentRescoreAndBudget:
                 return await real(w, s, **kw)
 
             with (
-                patch.object(
-                    worker_mod, "session_scope", _make_session_scope(store)
-                ),
+                patch.object(worker_mod, "session_scope", _make_session_scope(store)),
                 patch.object(worker, "_process_wallet", _spy),
             ):
                 await worker.discover_leaderboard()
@@ -497,9 +482,7 @@ class TestConcurrencyBound:
         # for Phase-2 detail → maximal fan-out pressure on the semaphore.
         n = _DISCOVERY_CONCURRENCY * 4
         lb = [
-            _StubLeaderboardEntry(
-                _wallet("conc", i), rank=i + 1, pnl=float(n - i), vol=1.0
-            )
+            _StubLeaderboardEntry(_wallet("conc", i), rank=i + 1, pnl=float(n - i), vol=1.0)
             for i in range(n)
         ]
         ds = _CountingDS({}, leaderboard=lb)
@@ -523,9 +506,7 @@ class TestConcurrencyBound:
                     gauge["cur"] -= 1
 
             with (
-                patch.object(
-                    worker_mod, "session_scope", _make_session_scope(store)
-                ),
+                patch.object(worker_mod, "session_scope", _make_session_scope(store)),
                 patch.object(worker, "_process_wallet", _instrumented),
             ):
                 await worker.discover_leaderboard()
@@ -535,8 +516,7 @@ class TestConcurrencyBound:
         assert gauge["max"] >= 1  # work actually ran
         # NEVER more than the module concurrency cap in flight at once.
         assert gauge["max"] <= _DISCOVERY_CONCURRENCY, (
-            f"observed {gauge['max']} concurrent _process_wallet, "
-            f"cap is {_DISCOVERY_CONCURRENCY}"
+            f"observed {gauge['max']} concurrent _process_wallet, cap is {_DISCOVERY_CONCURRENCY}"
         )
 
 
@@ -553,9 +533,7 @@ class TestDeterminism:
 
             async def _go() -> None:
                 worker = DiscoveryWorker(ds, follower_capital_usd=1000.0)
-                with patch.object(
-                    worker_mod, "session_scope", _make_session_scope(store)
-                ):
+                with patch.object(worker_mod, "session_scope", _make_session_scope(store)):
                     await worker.discover_leaderboard()
 
             run(_go())
@@ -564,9 +542,9 @@ class TestDeterminism:
                 w: (
                     r.sources,
                     r.total_score,
-                    None if r.backtest_default is None else r.backtest_default.get(
-                        "stats_leaderboard"
-                    ),
+                    None
+                    if r.backtest_default is None
+                    else r.backtest_default.get("stats_leaderboard"),
                 )
                 for w, r in sorted(store.candidates.items())
             }

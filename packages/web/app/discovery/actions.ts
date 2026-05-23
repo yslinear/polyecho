@@ -6,22 +6,21 @@
  * - quickBacktest: inserts a backtest_jobs row for a single leader using a
  *   90-day window and the Balanced template preset (PRD §5.6), returning the
  *   new job id so the client can toast + navigate to /backtest/<id>.
- * - updateLeaderStatus: updates candidate_leaders.user_status for a wallet
- *   (PRD §3.2 lifecycle new → watching → following, or rejected).
+ *
+ * The legacy `updateLeaderStatus` / `LeaderStatus` Server Action was REMOVED
+ * along with the `candidate_leaders.user_status` column it wrote to. The C1
+ * paper-trading ladder's bootstrap clause now admits every discovery-found
+ * candidate into paper automatically; promotion to a real follow remains the
+ * existing danger-passphrase-gated Server Action in `app/research/actions.ts`.
  *
  * Mirrors the insert pattern in app/backtest/actions.ts (Drizzle client +
  * schema). No redirect here — the client island handles navigation/refresh
  * so it can also fire a sonner toast.
  */
 
-import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { backtestJobs, candidateLeaders } from "@/lib/db/schema";
+import { backtestJobs } from "@/lib/db/schema";
 import { EVM_ADDRESS_RE } from "@/lib/format";
-import {
-  checkInlineConfirm,
-  emitInlineConfirmAudit,
-} from "@/lib/inline-confirm-gate";
 
 // ---------------------------------------------------------------------------
 // Balanced template preset — PRD §5.6
@@ -42,20 +41,6 @@ const QUICK_BACKTEST_CAPITAL_USD = 1000;
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
-
-export type LeaderStatus = "watching" | "following" | "rejected";
-
-/**
- * rev-web I-2: server-side allowlist for candidate_leaders.user_status.
- * The client island only ever sends these three, but a Server Action is a
- * public RPC endpoint — never persist an arbitrary string. Anything not in
- * this set is rejected before the UPDATE.
- */
-const LEADER_STATUSES: ReadonlySet<string> = new Set<LeaderStatus>([
-  "watching",
-  "following",
-  "rejected",
-]);
 
 /**
  * quickBacktest — one-click 90-day Balanced backtest for a single leader.
@@ -104,58 +89,4 @@ export async function quickBacktest(
     .returning({ id: backtestJobs.id });
 
   return { id: inserted.id };
-}
-
-/**
- * updateLeaderStatus — set candidate_leaders.user_status for a wallet.
- * PRD §3.2 lifecycle: new → watching → following (or rejected).
- *
- * P7d / R24 asymmetry:
- *   - "watching" / "rejected" stay single-click (safe / safer-direction).
- *   - "following" is risk-increasing (the leader becomes copy-trade-eligible)
- *     and must pass the inline-confirm gate (CONFIRM_PHRASE only, no
- *     passphrase) BEFORE the user_status row is rewritten.
- *
- * The third arg carries the optional inline-confirm payload so existing
- * watching/rejected call sites keep the bare two-arg shape (back-compat).
- * For "following", the third arg is REQUIRED — a missing or wrong phrase
- * throws so the caller's catch surfaces the gate failure.
- */
-export async function updateLeaderStatus(
-  wallet: string,
-  status: LeaderStatus,
-  confirm?: { confirmText?: string | null }
-): Promise<{ wallet: string; status: LeaderStatus }> {
-  if (!LEADER_STATUSES.has(status)) {
-    throw new Error(`不允許的領單者狀態：${String(status)}`);
-  }
-
-  if (status === "following") {
-    const gate = await checkInlineConfirm({
-      confirmText: confirm?.confirmText ?? null,
-    });
-    if (!gate.ok) {
-      throw new Error(gate.message);
-    }
-  }
-
-  const updated = await db
-    .update(candidateLeaders)
-    .set({ user_status: status })
-    .where(eq(candidateLeaders.wallet_address, wallet))
-    .returning({ wallet: candidateLeaders.wallet_address });
-
-  if (updated.length === 0) {
-    throw new Error(`找不到候選領單者 ${wallet}，狀態未更新`);
-  }
-
-  if (status === "following") {
-    await emitInlineConfirmAudit({
-      opType: "update_leader_status_following",
-      context: { wallet },
-      requirePassphrase: false,
-    });
-  }
-
-  return { wallet, status };
 }

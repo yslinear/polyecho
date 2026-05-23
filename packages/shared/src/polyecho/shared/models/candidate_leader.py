@@ -30,13 +30,17 @@ class CandidateLeader(Base):
 
         final_score = profit_score × (replicability_score / 100)
 
-    ``user_status`` lifecycle: new -> watching -> following -> rejected --
-    the operator-review intent, set only by a human.
+    ``lifecycle_state`` is the C1 automated paper-trading-ladder state:
+    discovered -> candidate -> paper -> trial_ready, with cooldown /
+    retired branches.  It is driven by the C1-P3 state machine.
 
-    ``lifecycle_state`` (C1) is a SEPARATE automated paper-trading-ladder
-    state: discovered -> candidate -> paper -> trial_ready, with cooldown /
-    retired branches.  It is driven by the C1-P3 state machine and never
-    touches ``user_status``.  This C1-P1 phase only declares the columns.
+    Money-safety: the legacy ``user_status`` column was removed once the
+    /discovery + /research UI merger took its last UI dependency away
+    (it was never read by the trader engine). The insider_suspect
+    exclusion that previously set ``user_status='rejected'`` now parks
+    the candidate at the terminal ``lifecycle_state='retired'`` instead
+    so the state machine short-circuits with ``reason='terminal_state'``
+    and never auto-bootstraps it into paper trading.
     """
 
     __tablename__ = "candidate_leaders"
@@ -91,11 +95,12 @@ class CandidateLeader(Base):
         ARRAY(Text), nullable=True, default=list
     )
 
-    # User review status
-    user_status: Mapped[str] = mapped_column(Text, nullable=False, default="new")
+    # User operator notes (kept; the legacy ``user_status`` column was
+    # removed once the /discovery + /research UI merger consumed the last
+    # UI reference — see the class docstring for the money-safety rewire).
     user_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # --- C1 paper-trading ladder (automated, SEPARATE from user_status) ---
+    # --- C1 paper-trading ladder (automated) -----------------------------
     # Automated ladder state -- discovered | candidate | paper | trial_ready
     # | cooldown | retired (CHECK in __table_args__). Driven by the C1-P3
     # state machine; this phase only stores it.

@@ -27,8 +27,9 @@
  * unchanged (danger-passphrase InlineConfirm + paused follow_relations
  * insert). It is offered ONLY on the trial_ready chip (operator scope).
  *
- * Phase-1 explicitly does NOT touch user_status — no column, no filter, no
- * action. Schema/CLI cleanup is a separate commit.
+ * The legacy `user_status` column has been REMOVED from the schema in the
+ * follow-up cleanup commit; this island therefore renders no status column,
+ * no status filter and no status action — they would have nothing to bind to.
  */
 
 import * as React from "react";
@@ -460,7 +461,8 @@ function RangeFilterControl({ title, value, onChange }: RangeFilterControlProps)
 
 // ---------------------------------------------------------------------------
 // Per-row quick-actions menu — kept across every chip (operator can run a
-// backtest on any candidate). user_status actions are DROPPED in Phase-1.
+// backtest on any candidate). The legacy `user_status` actions are gone
+// (the column was dropped from the schema).
 // ---------------------------------------------------------------------------
 function RowActions({ wallet }: { wallet: string }) {
   const router = useRouter();

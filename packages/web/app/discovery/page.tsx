@@ -30,9 +30,9 @@
  * The promote-to-live Server Action stays in `app/research/actions.ts` (the
  * operator scoped it so) and is imported by the client island.
  *
- * Phase-1 explicitly does NOT touch the DB schema, the CLI, or
- * candidate_leaders.user_status. The merged UI just stops rendering /
- * filtering on it.
+ * The follow-up schema/CLI cleanup commit then DROPPED the
+ * `candidate_leaders.user_status` column entirely (the merger above had
+ * already taken the last UI dependency away).
  */
 
 import Link from "next/link";

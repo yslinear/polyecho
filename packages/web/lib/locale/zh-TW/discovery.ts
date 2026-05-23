@@ -2,11 +2,12 @@
  *  page.tsx`) zh-TW strings. Filled by the i18n swarm.
  *  Proper nouns stay English — see common.ts PROPER-NOUN POLICY.
  *
- *  Phase-1 merge (Option C, moderate): the leaderboard `/discovery` and the
- *  paper-trading ladder `/research` are now ONE chip-filtered candidates
- *  funnel page. /research permanently redirects in. The user_status filter +
- *  column + actions are dropped from the UI (schema/CLI cleanup is a separate
- *  commit; the keys are removed here so the i18n orphan-guard stays green).
+ *  The leaderboard `/discovery` and the paper-trading ladder `/research`
+ *  are now ONE chip-filtered candidates funnel page (Option C, /research
+ *  permanently redirects in). The follow-up cleanup commit DROPPED the
+ *  `candidate_leaders.user_status` column entirely, so the legacy
+ *  statusLabel.* + table column/filter strings are gone from this map
+ *  (orphan-guard requirement).
  */
 export const discovery = {
   /** /discovery — merged candidate funnel list page. */
@@ -43,17 +44,6 @@ export const discovery = {
       profit: "獲利",
       replicability: "可複製性",
       total: "總分",
-    },
-    /** Header status Badge — the raw candidate_leaders.user_status enum
-     *  (new/watching/following/rejected). An UNMAPPED status degrades to
-     *  the raw enum verbatim (never a crash). The detail page is OUT OF
-     *  SCOPE of the merge cleanup (operator: schema/CLI cleanup is a
-     *  separate commit), so these labels remain. */
-    statusLabel: {
-      new: "新發現",
-      watching: "觀察中",
-      following: "跟單中",
-      rejected: "已排除",
     },
     tabs: {
       overview: "概覽",
@@ -131,9 +121,9 @@ export const discovery = {
   /** /discovery DiscoveryTable island — toolbar, columns, row actions,
    *  toasts, empty states, pagination. Proper nouns stay English.
    *
-   *  Phase-1 merge: chip-aware columns + chip-aware default sort. The
-   *  user_status column/filter is dropped (schema unchanged, just hidden
-   *  from the UI). Several columns appear only on the chips that need
+   *  Chip-aware columns + chip-aware default sort. The legacy
+   *  `user_status` column/filter is gone (the column was dropped from
+   *  the schema). Several columns appear only on the chips that need
    *  them (lifecycle_state, copyability, paper stats, promote action). */
   table: {
     cardTitle: "候選 Leaders",

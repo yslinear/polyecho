@@ -56,7 +56,6 @@ const ALL_WORKER_KEYS = [
 ];
 
 const STAT_FIELD_PREFIX = "discovery.detail.stats.fields";
-const STATUS_LABEL_PREFIX = "discovery.detail.statusLabel";
 
 // Re-implements the page's miss-fallback (kept tiny + in-sync with
 // app/discovery/[wallet]/page.tsx statFieldLabel/statusLabel): t() returns
@@ -113,21 +112,7 @@ describe("discovery/[wallet] stats field i18n map", () => {
   });
 });
 
-describe("discovery/[wallet] header status label i18n", () => {
-  // The raw candidate_leaders.user_status enum surfaced by the header
-  // Badge (STATUS_VARIANT keys in page.tsx).
-  const STATUSES = ["new", "watching", "following", "rejected"] as const;
-
-  it("localises every user_status enum value (non-key, non-empty)", () => {
-    for (const s of STATUSES) {
-      const label = resolve(STATUS_LABEL_PREFIX, s);
-      expect(label, `${s} not localised`).not.toBe(s);
-      expect(label).not.toBe(`${STATUS_LABEL_PREFIX}.${s}`);
-      expect(label.length).toBeGreaterThan(0);
-    }
-  });
-
-  it("degrades an unknown status to the raw enum verbatim", () => {
-    expect(resolve(STATUS_LABEL_PREFIX, "archived")).toBe("archived");
-  });
-});
+// The legacy "discovery/[wallet] header status label i18n" suite was removed
+// when the candidate_leaders.user_status column was dropped (the header no
+// longer renders a status Badge; the locale map's statusLabel.* entries are
+// gone too, kept in sync with the orphan-guard).

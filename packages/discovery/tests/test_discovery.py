@@ -954,7 +954,13 @@ class TestDriftedArchetype:
 
 
 class TestInsiderArchetype:
-    """Insider suspect wallet → insider_suspect flag → user_status='rejected'."""
+    """Insider suspect wallet → insider_suspect flag → lifecycle_state='retired'.
+
+    Money-safety: the legacy ``user_status='rejected'`` exclusion was replaced
+    by parking the candidate at the C1 ladder terminal state ``retired`` so
+    the state machine short-circuits with ``reason='terminal_state'`` and
+    can never auto-bootstrap an insider suspect into paper trading.
+    """
 
     def test_insider_flag_raised(self, ds: FixtureDataSource) -> None:
         activity = _fetch_activity(ds, W_INSIDER)
@@ -974,10 +980,19 @@ class TestInsiderArchetype:
 
         assert "insider_suspect" in flags
 
-    def test_insider_causes_rejected_status(self, ds: FixtureDataSource) -> None:
-        """Verify the worker's _upsert_candidate sets user_status='rejected'."""
+    def test_insider_causes_retired_lifecycle_state(self, ds: FixtureDataSource) -> None:
+        """Money-safety regression: the worker parks an insider_suspect
+        candidate at ``lifecycle_state='retired'`` AND the ladder state
+        machine confirms ``retired`` is a no-op terminal (``changed=False``,
+        ``reason='terminal_state'``) so the candidate is never auto-promoted
+        into paper trading."""
         from polyecho.discovery.frequency import StrategyType
         from polyecho.discovery.worker import _upsert_candidate
+        from polyecho.paper.state_machine import (
+            LadderCandidate,
+            LifecycleState,
+            advance,
+        )
 
         activity = _fetch_activity(ds, W_INSIDER)
         if not activity:
@@ -985,12 +1000,6 @@ class TestInsiderArchetype:
 
         stats = _compute_stats(activity, window_days=90)
         fs = compute_frequency_stats(activity, window_days=90)
-
-        captured: dict[str, Any] = {}
-
-        class _FakeLeader:
-            def __init__(self, **kwargs: Any) -> None:
-                captured["user_status"] = kwargs.get("user_status")
 
         async def _run() -> None:
             with (
@@ -1023,14 +1032,33 @@ class TestInsiderArchetype:
                     last_active_at=None,
                 )
 
-                # Check that the CandidateLeader added has user_status='rejected'
+                # (a) The CandidateLeader added has lifecycle_state='retired'.
                 from polyecho.shared.models import CandidateLeader as CL
 
                 leaders = [obj for obj in added if isinstance(obj, CL)]
                 assert leaders, "no CandidateLeader row was added"
-                assert leaders[0].user_status == "rejected"
+                assert leaders[0].lifecycle_state == "retired", (
+                    "money-safety: an insider_suspect candidate MUST land at "
+                    "lifecycle_state='retired' so the C1 ladder cannot "
+                    "auto-bootstrap it into paper trading"
+                )
 
         asyncio.get_event_loop().run_until_complete(_run())
+
+        # (b) The state machine treats ``retired`` as a no-op terminal — the
+        # ladder will never advance an insider_suspect candidate further.
+        snapshot = LadderCandidate(
+            wallet_address=W_INSIDER,
+            lifecycle_state=LifecycleState.RETIRED,
+            score=70.0,
+            can_bootstrap=True,
+        )
+        transition = advance(snapshot)
+        assert transition.changed is False, (
+            "money-safety: a retired insider_suspect must be a state-machine no-op (changed=False)"
+        )
+        assert transition.reason == "terminal_state"
+        assert transition.to_state == LifecycleState.RETIRED
 
 
 # ---------------------------------------------------------------------------
@@ -1582,7 +1610,7 @@ class TestCandidateHighScoreEvent:
     def test_no_emit_when_already_above_no_recrossing(self) -> None:
         existing = MagicMock()
         existing.sources = ["leaderboard"]
-        existing.user_status = "new"
+        existing.lifecycle_state = "discovered"
         existing.total_score = 82.0  # already above ⇒ no new crossing
         self._scope(existing=existing)
         spy = self._emit_spy()
@@ -1657,7 +1685,11 @@ class TestUpsertCandidateBehaviour:
 
         asyncio.get_event_loop().run_until_complete(_run())
         leaders = [o for o in added if isinstance(o, CL)]
-        assert leaders and leaders[0].user_status == "new"
+        # Money-safety: a non-insider candidate is NEVER parked at the
+        # terminal lifecycle_state='retired'. The ORM column default keeps
+        # it at 'discovered' so the C1 ladder can promote it normally.
+        assert leaders, "no CandidateLeader row was added"
+        assert getattr(leaders[0], "lifecycle_state", "discovered") != "retired"
 
     def test_existing_record_merges_sources_and_keeps_first_discovered(
         self,
@@ -1666,7 +1698,7 @@ class TestUpsertCandidateBehaviour:
 
         existing = MagicMock()
         existing.sources = ["leaderboard"]
-        existing.user_status = "new"
+        existing.lifecycle_state = "discovered"
         sentinel_first = object()
         existing.first_discovered_at = sentinel_first
 
@@ -1704,18 +1736,25 @@ class TestUpsertCandidateBehaviour:
         assert existing.sources == ["large_new_positions", "leaderboard"]
         assert existing.first_discovered_at is sentinel_first
         assert existing.total_score == pytest.approx(42.0)
-        # Never auto-unrejects, but a clean record stays "new".
-        assert existing.user_status == "new"
+        # Money-safety: a clean re-run of a non-retired candidate leaves
+        # the lifecycle_state untouched (the discovery worker only ever
+        # WRITES 'retired' on an insider_suspect detection; it never
+        # touches lifecycle_state otherwise — that column is owned by the
+        # C1 paper-trading state machine).
+        assert existing.lifecycle_state == "discovered"
 
-    def test_existing_rejected_record_stays_rejected_on_clean_rerun(
+    def test_existing_retired_record_stays_retired_on_clean_rerun(
         self,
     ) -> None:
-        """Once rejected, a clean re-run must NOT silently un-reject."""
+        """Money-safety: a candidate parked at the terminal lifecycle_state
+        'retired' (e.g. by a prior insider_suspect detection) must NOT be
+        silently un-retired by a clean re-run — the discovery worker only
+        ever WRITES 'retired'; it never resurrects a retired candidate."""
         from polyecho.discovery.worker import _upsert_candidate
 
         existing = MagicMock()
         existing.sources = ["leaderboard"]
-        existing.user_status = "rejected"
+        existing.lifecycle_state = "retired"
 
         async def _run() -> None:
             with patch("polyecho.discovery.worker.session_scope") as ms:
@@ -1747,7 +1786,7 @@ class TestUpsertCandidateBehaviour:
                 )
 
         asyncio.get_event_loop().run_until_complete(_run())
-        assert existing.user_status == "rejected"
+        assert existing.lifecycle_state == "retired"
 
 
 class _StubLeaderboardEntry:
@@ -2260,7 +2299,7 @@ class TestP19cConcurrentHighScoreEmitsOnce:
             # logic READS need controlled values.
             c = MagicMock()
             c.sources = ["leaderboard"]
-            c.user_status = "new"
+            c.lifecycle_state = "discovered"
             c.total_score = score
             c.first_discovered_at = object()
             return c
@@ -2889,7 +2928,7 @@ class TestR10C1C2HistoryRaceAndLockRelease:
                     if score is not None:
                         existing = MagicMock()
                         existing.sources = ["leaderboard"]
-                        existing.user_status = "new"
+                        existing.lifecycle_state = "discovered"
                         existing.total_score = score
                         existing.first_discovered_at = object()
                     return MagicMock(scalar_one_or_none=MagicMock(return_value=existing))

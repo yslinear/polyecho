@@ -90,8 +90,11 @@ describe("lib/db/schema — key columns & types", () => {
     expect(cols.total_score.columnType).toBe("PgNumeric");
     expect(cols.profit_score.columnType).toBe("PgNumeric");
     expect(cols.replicability_score.columnType).toBe("PgNumeric");
-    expect(cols.user_status.default).toBe("new");
-    expect(cols.user_status.notNull).toBe(true);
+    // Money-safety cleanup: the legacy user_status column was DROPPED
+    // (ORM + Drizzle + SQL migration in sync). The insider_suspect
+    // exclusion previously gated by user_status='rejected' is now
+    // enforced at the C1 ladder terminal lifecycle_state='retired'.
+    expect("user_status" in cols).toBe(false);
   });
 
   it("candidate_score_history has a composite PK (wallet_address, date)", () => {
