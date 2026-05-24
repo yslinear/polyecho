@@ -18,8 +18,11 @@
  * so it can also fire a sonner toast.
  */
 
+import { eq } from "drizzle-orm";
+import { revalidatePath } from "next/cache";
+
 import { db } from "@/lib/db";
-import { backtestJobs } from "@/lib/db/schema";
+import { backtestJobs, candidateLeaders } from "@/lib/db/schema";
 import { EVM_ADDRESS_RE } from "@/lib/format";
 
 // ---------------------------------------------------------------------------
@@ -89,4 +92,108 @@ export async function quickBacktest(
     .returning({ id: backtestJobs.id });
 
   return { id: inserted.id };
+}
+
+// ---------------------------------------------------------------------------
+// addCandidateLeader — manual operator add of a smart-wallet address.
+// ---------------------------------------------------------------------------
+/**
+ * Result of a manual add. `already_tracked` is a non-error outcome: the
+ * client renders a friendly hint with the existing `lifecycle_state` rather
+ * than firing the generic error toast. `invalid_address` is the input-guard
+ * tier (matches `quickBacktest`'s shape rejection).
+ */
+export type AddCandidateLeaderResult =
+  | { ok: true }
+  | { ok: false; reason: "invalid_address" }
+  | { ok: false; reason: "already_tracked"; lifecycle_state: string }
+  | { ok: false; reason: "error" };
+
+/**
+ * addCandidateLeader — operator manually enters a smart-wallet address to
+ * track. NOT a money-path operation: it only inserts an OBSERVATION row at
+ * `lifecycle_state='discovered'` (the default). The discovery worker will
+ * re-score it on the next cycle, and the C1 paper-trading ladder's
+ * bootstrap clause admits every discovery-found candidate automatically.
+ *
+ * Schema mapping (the table has no `source_seed`/`source_attribution`/
+ * `source_last_seen` column — we map to the existing columns instead):
+ *   - sources             ← ['manual']  (the source tag)
+ *   - user_notes          ← note        (free-text attribution; nullable)
+ *   - first_discovered_at ← now()
+ *   - last_active_at      ← now()       (fresh-source marker for the paper worker)
+ *   - last_seen_ts        ← now()
+ *   - lifecycle_state     ← 'discovered' (schema default; explicit for clarity)
+ *
+ * Duplicate handling: wallet_address is the PRIMARY KEY. We SELECT first so
+ * we can return the EXISTING `lifecycle_state` to the client (a friendly UX
+ * hint), then INSERT under that same uniqueness so a concurrent insert race
+ * cannot create a dup row (PG raises 23505 → mapped to `already_tracked`).
+ */
+export async function addCandidateLeader(input: {
+  address: string;
+  note?: string;
+}): Promise<AddCandidateLeaderResult> {
+  const raw = (input?.address ?? "").trim();
+  if (raw.length === 0 || raw.length > 64 || !EVM_ADDRESS_RE.test(raw)) {
+    return { ok: false, reason: "invalid_address" };
+  }
+  // Polymarket display uses checksummed mixed-case but the existing worker
+  // / models normalise to lowercase — keep the DB key shape consistent.
+  const wallet = raw.toLowerCase();
+
+  // Trim the note to a sensible cap and treat empty as NULL.
+  const rawNote = (input?.note ?? "").trim();
+  const note = rawNote.length === 0 ? null : rawNote.slice(0, 500);
+
+  // 1) Duplicate check — return the existing lifecycle_state for the UX hint.
+  const existing = await db
+    .select({ lifecycle_state: candidateLeaders.lifecycle_state })
+    .from(candidateLeaders)
+    .where(eq(candidateLeaders.wallet_address, wallet))
+    .limit(1);
+  if (existing.length > 0) {
+    return {
+      ok: false,
+      reason: "already_tracked",
+      lifecycle_state: existing[0].lifecycle_state ?? "discovered",
+    };
+  }
+
+  // 2) INSERT the bare observation row. Stats columns stay NULL — the
+  //    discovery worker fills them in on the next re-score.
+  const now = new Date();
+  try {
+    await db.insert(candidateLeaders).values({
+      wallet_address: wallet,
+      sources: ["manual"],
+      user_notes: note,
+      first_discovered_at: now,
+      last_active_at: now,
+      last_seen_ts: now,
+      lifecycle_state: "discovered",
+      updated_at: now,
+    });
+  } catch (e) {
+    // Concurrent-insert race: PG 23505 → another writer landed first.
+    // Re-query the lifecycle_state for the same UX hint as the eager path.
+    const code = (e as { code?: string } | null)?.code;
+    if (code === "23505") {
+      const race = await db
+        .select({ lifecycle_state: candidateLeaders.lifecycle_state })
+        .from(candidateLeaders)
+        .where(eq(candidateLeaders.wallet_address, wallet))
+        .limit(1);
+      return {
+        ok: false,
+        reason: "already_tracked",
+        lifecycle_state: race[0]?.lifecycle_state ?? "discovered",
+      };
+    }
+    return { ok: false, reason: "error" };
+  }
+
+  // Refresh the server component so the new row appears in the list.
+  revalidatePath("/discovery");
+  return { ok: true };
 }

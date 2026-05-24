@@ -18,6 +18,29 @@ export const discovery = {
     subtitle:
       "依分數排序的候選 Leader 漏斗。透過上方分頁切換不同階段：排行榜、驗證中、可升 live、已退休。",
     newBacktest: "新增 Backtest",
+    /** Manual add-wallet flow — operator hand-enters a smart-wallet address.
+     *  NOT a money-path operation; it only inserts an observation candidate
+     *  (lifecycle_state='discovered') so the discovery + paper workers pick
+     *  it up on their next cycle. No danger-passphrase gate. */
+    addWallet: {
+      /** Button label in the page header. */
+      button: "新增錢包",
+      title: "新增錢包",
+      description:
+        "手動加入智慧錢包地址。系統將其標記為 manual 來源，於下一次 discovery 掃描或 paper 評估時納入。",
+      addressLabel: "錢包地址",
+      addressPlaceholder: "0x… 共 42 字元",
+      addressError: "錢包地址格式錯誤，需為 0x 開頭加 40 位十六進位字元。",
+      noteLabel: "備註（選填）",
+      notePlaceholder: "例如：來源、發現原因或追蹤理由。",
+      submit: "新增",
+      submitting: "新增中…",
+      cancel: "取消",
+      successToast: "已新增錢包，等待 discovery / paper 評估。",
+      /** {{state}} = the existing lifecycle_state of the duplicate row. */
+      duplicate: "此錢包已在追蹤（目前狀態：{{state}}）。",
+      genericError: "新增失敗，請稍候重試。",
+    },
     /** Chip strip: 5 state filters above the table. Each chip writes
      *  `?state=…` so the view is shareable / refresh-stable. */
     chips: {
