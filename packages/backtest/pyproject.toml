@@ -5,7 +5,7 @@ description = "Backtest engine: simulates copy-trading PnL with slippage and del
 requires-python = ">=3.12"
 dependencies = [
     "polyecho-shared",
-    "numpy>=2.0",
+    "numpy>=2.5.1",
     "pandas>=2.2",
 ]
 

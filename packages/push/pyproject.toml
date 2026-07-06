@@ -9,7 +9,7 @@ dependencies = [
     # APScheduler 3.x AsyncIOScheduler drives the 23:00 daily-PnL cron job.
     # Pinned <4 — the 4.x rewrite (Scheduler/AsyncScheduler) is a different,
     # still-evolving API; the 3.x AsyncIOScheduler API is stable.
-    "apscheduler>=3.10,<4",
+    "apscheduler>=3.11.3,<4",
 ]
 
 [build-system]

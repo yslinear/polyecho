@@ -8,7 +8,7 @@ dependencies = [
     # aiohttp is already a transitive dep of polyecho-shared (used by the
     # Polymarket client). Declared here explicitly so this package's wheel
     # advertises the framework dependency.
-    "aiohttp>=3.10",
+    "aiohttp>=3.14.1",
     # web3.py provides AsyncWeb3 + AsyncHTTPProvider used by the SAFE
     # (sig-type 2) view-call path. View-only — no signer/key.
     "web3>=7",
