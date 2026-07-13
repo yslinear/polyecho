@@ -3,7 +3,7 @@ name = "polyecho-cli"
 version = "0.0.0"
 description = "PolyEcho command-line tool"
 requires-python = ">=3.12"
-dependencies = ["polyecho-shared", "typer>=0.15", "rich>=13", "httpx>=0.28"]
+dependencies = ["polyecho-shared", "typer>=0.26.8", "rich>=13", "httpx>=0.28"]
 
 [project.scripts]
 polyecho = "polyecho.cli.__main__:app"
